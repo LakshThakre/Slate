@@ -316,8 +316,8 @@ pub fn save_todos_unlocked(
     todos: &[Todo],
     is_legacy: bool,
     expected_fingerprint: Option<FileFingerprint>,
-    _is_first_save: bool,
-    _last_backup_time: Option<SystemTime>,
+    is_first_save: bool,
+    last_backup_time: Option<SystemTime>,
 ) -> Result<SaveResult, Box<dyn std::error::Error>> {
     let parent = path
         .parent()
@@ -337,6 +337,17 @@ pub fn save_todos_unlocked(
                     if let Err(e) = backup::backup_now(path, BackupReason::ExternalChange) {
                         backup_warning = Some(format!("Backup failed: {e}"));
                     }
+                }
+            }
+        }
+
+        // 3. Rolling backups (if not already backed up by external change)
+        if !external_change {
+            if let Some(reason) =
+                backup::should_backup(is_first_save, false, last_backup_time, SystemTime::now())
+            {
+                if let Err(e) = backup::backup_now(path, reason) {
+                    backup_warning = Some(format!("Backup failed: {e}"));
                 }
             }
         }
@@ -586,5 +597,40 @@ mod tests {
 
         let final_loaded = load_todos(&path).unwrap();
         assert_eq!(final_loaded.todos.len(), 100);
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn test_readonly_backups_dir_does_not_block_save() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+        fs::write(&path, "initial content").unwrap();
+
+        let backups_dir = dir.path().join("backups");
+        fs::create_dir_all(&backups_dir).unwrap();
+
+        // Make backups dir read-only
+        fs::set_permissions(&backups_dir, fs::Permissions::from_mode(0o444)).unwrap();
+
+        let todos = vec![Todo {
+            id: 1,
+            text: "Save despite backup failure".to_string(),
+            created_date: NaiveDate::from_ymd_opt(2026, 10, 27).unwrap(),
+            done: false,
+            done_at: None,
+        }];
+
+        // Save should succeed despite backup error
+        let save_res = save_todos(&path, &todos, false, None, true, None).unwrap();
+        assert!(save_res.backup_warning.is_some());
+        assert!(save_res.backup_warning.unwrap().contains("Backup failed:"));
+
+        // File was saved successfully
+        let loaded = load_todos(&path).unwrap();
+        assert_eq!(loaded.todos.len(), 1);
+
+        // Restore permissions so tempdir cleanup succeeds
+        let _ = fs::set_permissions(&backups_dir, fs::Permissions::from_mode(0o755));
     }
 }
