@@ -1,7 +1,7 @@
 use std::collections::BTreeSet;
 
 use chrono::{Local, NaiveDate};
-use ratatui::crossterm::event::{KeyCode, KeyEvent};
+use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::model::{HistoryPane, InputMode, Todo, View};
 use crate::storage::{load_todos, save_todos};
@@ -31,6 +31,8 @@ pub struct App {
     pub fingerprint: Option<crate::storage::FileFingerprint>,
     pub is_first_save: bool,
     pub last_backup_time: Option<std::time::SystemTime>,
+    pub terminal_width: u16,
+    pub terminal_height: u16,
 }
 
 impl App {
@@ -90,6 +92,8 @@ impl App {
             fingerprint: load_res.fingerprint,
             is_first_save: true,
             last_backup_time: None,
+            terminal_width: 80,
+            terminal_height: 24,
         };
 
         app.clamp_selections();
@@ -126,6 +130,8 @@ impl App {
             fingerprint: None,
             is_first_save: true,
             last_backup_time: None,
+            terminal_width: 80,
+            terminal_height: 24,
         };
         app.clamp_selections();
         app
@@ -211,6 +217,16 @@ impl App {
         } else {
             self.history_todo_index = 0;
         }
+    }
+
+    pub fn on_resize(&mut self, width: u16, height: u16) {
+        self.terminal_width = width;
+        self.terminal_height = height;
+        self.clamp_selections();
+    }
+
+    pub fn is_too_small(&self) -> bool {
+        crate::ui::is_too_small(self.terminal_width, self.terminal_height)
     }
 
     pub fn set_transient_message(&mut self, msg: impl Into<String>) {
@@ -721,6 +737,16 @@ impl App {
 
     /// Handles a key event. Returns true if the app should exit.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        if self.is_too_small() {
+            if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
+                return true;
+            }
+            if key.code == KeyCode::Char('q') && self.input_mode == InputMode::Normal {
+                return true;
+            }
+            return false;
+        }
+
         self.transient_message = None;
         match self.input_mode {
             InputMode::Adding => self.handle_adding_key(key),
@@ -1948,5 +1974,60 @@ mod tests {
         assert_eq!(empty_app.today_selected_index, 0);
         assert_eq!(empty_app.history_date_index, 0);
         assert_eq!(empty_app.history_todo_index, 0);
+    }
+
+    #[test]
+    fn test_state_survives_shrink_and_grow_cycle() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let mut app = App::new_for_test_with_date(Vec::new(), today);
+
+        // Start typing a new todo
+        app.handle_key(key_press(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Adding);
+        for c in "important note".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        assert_eq!(app.input_buffer, "important note");
+        assert_eq!(app.cursor_position, 14);
+
+        // Shrink terminal to 30x6 (below 40x8 minimum)
+        app.on_resize(30, 6);
+        assert!(app.is_too_small());
+
+        // Keys while too small should be ignored without affecting state
+        assert!(!app.handle_key(key_press(KeyCode::Char('x'))));
+        assert!(!app.handle_key(key_press(KeyCode::Char('q')))); // In Adding mode, q is ignored
+        assert!(!app.handle_key(key_press(KeyCode::Esc)));
+        assert!(!app.handle_key(key_press(KeyCode::Enter)));
+
+        // State is completely preserved
+        assert_eq!(app.input_mode, InputMode::Adding);
+        assert_eq!(app.input_buffer, "important note");
+        assert_eq!(app.cursor_position, 14);
+
+        // Grow terminal back to 80x24
+        app.on_resize(80, 24);
+        assert!(!app.is_too_small());
+
+        // State is intact and editing can be finished
+        assert_eq!(app.input_mode, InputMode::Adding);
+        assert_eq!(app.input_buffer, "important note");
+        assert_eq!(app.cursor_position, 14);
+
+        // Press Enter to complete task
+        assert!(!app.handle_key(key_press(KeyCode::Enter)));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].text, "important note");
+
+        // When in Normal mode and terminal is too small, q exits
+        app.on_resize(30, 6);
+        assert!(app.is_too_small());
+        assert!(app.handle_key(key_press(KeyCode::Char('q')))); // exits
+
+        // Ctrl+c exits in any mode
+        app.input_mode = InputMode::Adding;
+        let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
+        assert!(app.handle_key(ctrl_c)); // exits
     }
 }

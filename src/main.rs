@@ -12,14 +12,22 @@ mod ui;
 use app::App;
 
 fn run_app(terminal: &mut DefaultTerminal, mut app: App) -> Result<(), Box<dyn std::error::Error>> {
+    if let Ok(size) = terminal.size() {
+        app.on_resize(size.width, size.height);
+    }
+
     loop {
         terminal.draw(|f| ui::render(&mut app, f))?;
 
         if event::poll(Duration::from_millis(250))? {
-            if let Event::Key(key) = event::read()? {
-                if key.kind == KeyEventKind::Press && app.handle_key(key) {
+            match event::read()? {
+                Event::Resize(w, h) => {
+                    app.on_resize(w, h);
+                }
+                Event::Key(key) if key.kind == KeyEventKind::Press && app.handle_key(key) => {
                     break;
                 }
+                _ => {}
             }
         }
     }

@@ -9,13 +9,41 @@ use crate::app::App;
 use crate::model::{HistoryPane, Todo, View};
 use crate::theme::THEME;
 
+pub const MIN_WIDTH: u16 = 40;
+pub const MIN_HEIGHT: u16 = 8;
+
+pub fn is_too_small(width: u16, height: u16) -> bool {
+    width < MIN_WIDTH || height < MIN_HEIGHT
+}
+
 pub fn render(app: &mut App, frame: &mut Frame) {
+    let terminal_area = frame.area();
+    app.terminal_width = terminal_area.width;
+    app.terminal_height = terminal_area.height;
     app.clamp_selections();
 
-    let terminal_area = frame.area();
-    if terminal_area.width < 24 || terminal_area.height < 6 {
-        let msg = Paragraph::new("Terminal too small").style(Style::default().fg(THEME.dim));
-        frame.render_widget(msg, terminal_area);
+    if is_too_small(terminal_area.width, terminal_area.height) {
+        if terminal_area.width > 0 && terminal_area.height > 0 {
+            let msg = format!(
+                "Terminal too small · need {MIN_WIDTH}×{MIN_HEIGHT}, have {}×{}",
+                terminal_area.width, terminal_area.height
+            );
+            let needed_lines = if terminal_area.width >= 42 { 1 } else { 2 };
+            let top_pad = terminal_area.height.saturating_sub(needed_lines) / 2;
+            let rows = Layout::default()
+                .direction(Direction::Vertical)
+                .constraints([
+                    Constraint::Length(top_pad),
+                    Constraint::Length(needed_lines),
+                    Constraint::Min(0),
+                ])
+                .split(terminal_area);
+            let p = Paragraph::new(msg)
+                .alignment(ratatui::layout::Alignment::Center)
+                .wrap(ratatui::widgets::Wrap { trim: true })
+                .style(Style::default().fg(THEME.dim));
+            frame.render_widget(p, rows[1]);
+        }
         return;
     }
 
@@ -90,6 +118,9 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
 /// Slim top header line: App name + plain text view tabs
 fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let today_tab = if app.current_view == View::Today {
         Span::styled(
             "Today",
@@ -130,6 +161,9 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Quiet Today view: Title row with date, count, slim block progress bar, and todo list
 fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let today = app.today;
     let today_todos: Vec<&Todo> = app
         .todos
@@ -256,6 +290,9 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
 
 /// History view: Narrow Date column + thin vertical rule + Todo list for selected date
 fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let dates = app.dates_list();
     let today = app.today;
 
@@ -436,6 +473,9 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Single line modern prompt at the bottom: "› Text typed...       enter save · esc cancel"
 fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     let prompt_label = match app.input_mode {
         crate::model::InputMode::Editing(_) => "› Edit task ",
         _ => "› ",
@@ -502,6 +542,9 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Single dim line of key hints that is short and context-aware
 fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
     if let Some(ref err) = app.status_message {
         let error_line = Line::from(vec![
             Span::styled(
@@ -673,8 +716,11 @@ fn format_friendly_date(date: NaiveDate, today: NaiveDate) -> String {
 
 /// Truncates string gracefully with ellipsis "…" if it exceeds max_len
 fn truncate_text(text: &str, max_len: usize) -> String {
+    if max_len == 0 {
+        return String::new();
+    }
     let char_count = text.chars().count();
-    if char_count <= max_len || max_len == 0 {
+    if char_count <= max_len {
         return text.to_string();
     }
     if max_len <= 1 {
@@ -687,6 +733,9 @@ fn truncate_text(text: &str, max_len: usize) -> String {
 
 /// Renders a quiet slim progress bar using block characters
 fn render_progress_blocks(done: usize, total: usize, bar_width: usize) -> Vec<Span<'static>> {
+    if bar_width == 0 {
+        return Vec::new();
+    }
     if total == 0 {
         return vec![Span::styled(
             "─".repeat(bar_width),
@@ -999,5 +1048,153 @@ mod tests {
             .collect();
         assert!(buf_editing.contains("Edit task"));
         assert!(buf_editing.contains("Editing todo"));
+    }
+
+    #[test]
+    fn test_render_all_sizes_and_modes_no_panic() {
+        let test_sizes = [
+            (0, 0),
+            (1, 1),
+            (10, 3),
+            (39, 24),
+            (40, 7),
+            (40, 8),
+            (200, 60),
+            (1, 24),
+            (40, 1),
+        ];
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let sample_todos = vec![
+            Todo {
+                id: 1,
+                text: "Task 1".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 2,
+                text: "Task 2".to_string(),
+                created_date: today.pred_opt().unwrap(),
+                done: true,
+                done_at: None,
+            },
+        ];
+
+        for (w, h) in test_sizes {
+            for view in [View::Today, View::History] {
+                for mode in [InputMode::Normal, InputMode::Adding, InputMode::Editing(1)] {
+                    for show_help in [false, true] {
+                        let backend = TestBackend::new(w, h);
+                        let mut terminal = Terminal::new(backend).unwrap();
+                        let mut app = App::new_for_test_with_date(sample_todos.clone(), today);
+                        app.current_view = view;
+                        app.input_mode = mode;
+                        app.show_help = show_help;
+                        if mode != InputMode::Normal {
+                            app.input_buffer = "Work in progress".to_string();
+                            app.cursor_position = app.input_buffer.len();
+                        }
+                        // Rendering must never panic regardless of terminal dimensions
+                        terminal.draw(|f| render(&mut app, f)).unwrap();
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_too_small_message_below_minimum_and_not_at_or_above() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+
+        // 1. Below minimum: 39x24 (width too small)
+        {
+            let backend = TestBackend::new(39, 24);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = App::new_for_test_with_date(Vec::new(), today);
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+            let buf: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(buf.contains("Terminal too small"));
+            assert!(buf.contains("need 40×8"));
+            assert!(buf.contains("39×24"));
+        }
+
+        // 2. Below minimum: 40x7 (height too small)
+        {
+            let backend = TestBackend::new(40, 7);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = App::new_for_test_with_date(Vec::new(), today);
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+            let buf: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(buf.contains("Terminal too small"));
+            assert!(buf.contains("need 40×8"));
+            assert!(buf.contains("40×7"));
+        }
+
+        // 3. Below minimum: 10x3
+        {
+            let backend = TestBackend::new(10, 3);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = App::new_for_test_with_date(Vec::new(), today);
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+            let buf: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(buf.contains("Terminal"));
+        }
+
+        // 4. Exactly at minimum: 40x8
+        {
+            let backend = TestBackend::new(40, 8);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = App::new_for_test_with_date(Vec::new(), today);
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+            let buf: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(
+                !buf.contains("Terminal too small"),
+                "Did not expect small message at 40x8, got: {buf}"
+            );
+            assert!(buf.contains("Today"));
+        }
+
+        // 5. Well above minimum: 200x60
+        {
+            let backend = TestBackend::new(200, 60);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = App::new_for_test_with_date(Vec::new(), today);
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+            let buf: String = terminal
+                .backend()
+                .buffer()
+                .content()
+                .iter()
+                .map(|c| c.symbol())
+                .collect();
+            assert!(!buf.contains("Terminal too small"));
+            assert!(buf.contains("Today"));
+        }
     }
 }
