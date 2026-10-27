@@ -25,8 +25,11 @@ Slate is designed in the spirit of modern, quiet developer tools like Claude Cod
 - **Overdue Indicators**: Past days with unfinished tasks are highlighted with warm warning markers in History and a badge in the Today header.
 - **Move Tasks Between Days (`m`)**: Move historical tasks directly into Today with completion reset to unfinished.
 - **Prompt-Style Input**: Tap `a` to open a modern inline CLI prompt right at the bottom of the screen (`› What needs doing today?`).
-- **Crash-Proof Atomic Storage**: Saves automatically after every change using a safe write-to-temp-and-rename pattern, preventing file corruption.
-- **Single Plain-JSON Storage**: Stores tasks in your operating system's standard application data directory as human-readable JSON. Old files load seamlessly.
+- **Crash-Proof Hardened Storage**: Saves automatically after every change using unique PID-tagged tempfiles, fsync, and atomic rename with retry logic. Exclusive advisory locking (`todos.json.lock`) prevents write collisions.
+- **Automated Rolling Backups**: Automatically takes timestamped snapshots in `backups/` before modifying data (first save of session, 10-minute intervals, or external modifications), retaining the 10 newest backups.
+- **Schema Versioning & Stepwise Migrations**: On-disk versioning (`{"version": 1, "todos": [...]}`) with backward-compatible migrations from legacy v0 formats, creating a one-time safety backup (`todos.v0.bak`).
+- **Terminal Resize & Small Screen Guard**: Dynamically adapts to terminal dimensions, clamping selections on resize. Renders a quiet centered notice (`Terminal too small · need 40×8, have W×H`) when below 40×8 while freezing mutations and preserving half-typed input until restored.
+- **Midnight Daily Rollover**: Automatically advances `today` at local midnight with zero idle CPU spin. Tasks from yesterday slide gracefully into History while keeping historical date selections pinned.
 - **Lightweight & Fast**: Sub-millisecond startup time, negligible memory footprint, and low CPU usage.
 
 ---
@@ -245,12 +248,16 @@ Slate is organized into small, focused modules under `src/`:
 
 ```text
 src/
-├── main.rs      # Application lifecycle, panic hook, terminal initialization, event loop
-├── app.rs       # App state struct, task mutations, undo/redo stack, and key handlers
-├── model.rs     # Data models (Todo, View, HistoryPane, InputMode)
-├── storage.rs   # Atomic file loading and saving, backward compatibility
-├── theme.rs     # Theme struct and color palette configuration
-└── ui.rs        # Ratatui layout rendering, help overlay, and component drawing helpers
+├── main.rs         # Application lifecycle, panic hook, terminal initialization, event loop with midnight timeout
+├── app.rs          # App state struct, task mutations, undo/redo stack, and key handlers
+├── model.rs        # Data models (Todo, View, HistoryPane, InputMode)
+├── storage/        # Storage subsystem:
+│   ├── mod.rs      # Atomic file loading and saving, external change detection
+│   ├── migrate.rs  # Stepwise schema migrations (v0 -> v1) and version detection
+│   ├── backup.rs   # Rolling backups engine, snapshot rotation, and pruning
+│   └── lock.rs     # Sidecar advisory file locking (3-second timeout retry loop)
+├── theme.rs        # Theme struct and color palette configuration
+└── ui.rs           # Ratatui layout rendering, small terminal guard, and component drawing helpers
 ```
 
 ### Module Responsibilities
@@ -259,10 +266,14 @@ src/
    Defines the `THEME` palette with restrained tones: teal `accent`, soft orange `warn` for overdue states, light red `error`, and subtle dividers.
 2. **[`src/model.rs`](src/model.rs)**:
    Declares the core `Todo` struct (with serde defaults for full backward compatibility) along with `View`, `HistoryPane`, and `InputMode` enums.
-3. **[`src/storage.rs`](src/storage.rs)**:
-   Resolves the standard storage path for each OS, deserializes legacy and modern JSON formats seamlessly, and performs safe atomic saves by writing to a hidden temporary file before renaming.
+3. **[`src/storage/`](src/storage/)**:
+   Provides robust, crash-resilient data persistence:
+   - **`storage/mod.rs`**: Resolves OS paths, atomic save engine (PID-tagged tempfiles, fsync, rename with retries, parent sync on Unix), and external change detection.
+   - **`storage/migrate.rs`**: Stepwise schema migrations. Detects v0 legacy formats (unversioned arrays or objects) and migrates them safely in memory.
+   - **`storage/backup.rs`**: Rolling backup system taking timestamped snapshots (`todos-YYYYMMDD-HHMMSS.json`), pruning old snapshots to the 10 newest, and deduplicating identical snapshots.
+   - **`storage/lock.rs`**: Advisory file locking via a sidecar lock file (`todos.json.lock`), held only during saves or atomic load-modify-save blocks.
 4. **[`src/app.rs`](src/app.rs)**:
-   Maintains application memory, implements the centralized snapshot-based mutation engine (`mutate`) powering instant undo/redo, manages selection clamping, and routes keyboard events.
+   Maintains application memory, implements the centralized snapshot-based mutation engine (`mutate`) powering instant undo/redo, manages selection clamping, daily rollover tracking, and routes keyboard events.
 5. **[`src/ui.rs`](src/ui.rs)**:
    Handles all screen painting with dedicated helpers:
    - `draw_header`: Top brand title, navigation tabs, and overdue counter.
@@ -272,7 +283,7 @@ src/
    - `draw_input`: Prompt line with cursor placement for adding and editing.
    - `draw_footer`: Compact context-aware key hints and transient status messages.
 6. **[`src/main.rs`](src/main.rs)**:
-   Lightweight orchestrator that initializes the terminal in raw mode, installs a panic hook for safe recovery, runs the waiter-style event loop, and restores the terminal on exit.
+   Lightweight orchestrator that initializes the terminal in raw mode, installs a panic hook for safe recovery, computes local midnight timeouts for zero-CPU idle polling, and restores the terminal on exit.
 
 ---
 
@@ -320,4 +331,45 @@ Slate stores your tasks as human-readable JSON using your operating system's sta
   (e.g., C:\Users\<Username>\AppData\Roaming\slate\todos.json)
   ```
 
-Because it is plain JSON, you can inspect it with any text editor, format it with `jq`, or back it up with your preferred tools at any time.
+### Storage Directory Layout
+
+Inside your Slate data directory, you will find:
+
+```text
+slate/
+├── todos.json                       # Active task database (Schema version 1)
+├── todos.json.lock                  # Advisory sidecar lock file (held only during saves)
+├── todos.v0.bak                     # One-time legacy backup (created when migrating older format)
+└── backups/                         # Rolling snapshots directory (up to 10 newest kept)
+    ├── todos-20261027-143000.json
+    └── todos-20261027-144500.json
+```
+
+### On-Disk Schema & Compatibility
+
+Slate uses a versioned schema on disk:
+```json
+{
+  "version": 1,
+  "todos": [
+    {
+      "id": 1,
+      "text": "Review project architecture",
+      "created_date": "2026-10-27",
+      "done": false,
+      "done_at": null
+    }
+  ]
+}
+```
+
+- **Backward Compatibility**: Legacy `todos.json` files (bare arrays `[...]` or unversioned objects) are detected as v0 and automatically migrated in memory to v1 on load.
+- **Safety Backup (`todos.v0.bak`)**: The first time a legacy file is rewritten in the v1 format, a byte-for-byte copy of the original file is preserved as `todos.v0.bak` and never overwritten.
+- **Future Versions**: If a `todos.json` was created by a newer version of Slate with a higher schema version, Slate refuses to load or overwrite the file, printing an upgrade message (`todos.json was written by a newer Slate (version X, this build supports Y). Upgrade Slate.`) and exiting cleanly without touching your data.
+- **Syntax / Parse Errors**: If a `todos.json` file is corrupt, Slate prints the exact line, column, and parse error, reports the path to the newest backup in `backups/` if one exists, and exits non-zero without modifying the file.
+
+### Concurrency & External Changes
+
+- **Advisory Sidecar Locking**: Slate locks `todos.json.lock` only for the duration of a write operation, preventing simultaneous processes from corrupting data.
+- **External Changes**: Slate does not live-reload changes if `todos.json` is modified externally while Slate is running. However, before saving, Slate checks the file's fingerprint (mtime + size). If the file changed on disk, Slate automatically creates a safety snapshot of the on-disk file in `backups/` before writing and displays a transient footer notice: `Data changed on disk · previous version backed up`.
+
