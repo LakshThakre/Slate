@@ -2,7 +2,7 @@ use chrono::{Local, NaiveDate};
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
-use ratatui::widgets::{List, ListItem, ListState, Paragraph};
+use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
@@ -80,6 +80,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         draw_input(app, frame, bottom_area);
     } else {
         draw_footer(app, frame, bottom_area);
+    }
+
+    // 4. Draw Help Overlay if toggled
+    if app.show_help {
+        draw_help_overlay(frame);
     }
 }
 
@@ -498,24 +503,22 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         View::Today => vec![
             ("a", "add"),
             ("space", "done"),
-            ("d", "delete"),
             ("tab", "history"),
+            ("?", "help"),
             ("q", "quit"),
         ],
         View::History => match app.history_pane {
             HistoryPane::Dates => vec![
-                ("enter/l", "todos"),
-                ("j/k", "navigate"),
-                ("a", "add"),
+                ("enter/l", "tasks"),
                 ("tab", "today"),
+                ("?", "help"),
                 ("q", "quit"),
             ],
             HistoryPane::Todos => vec![
                 ("h", "dates"),
                 ("space", "done"),
-                ("d", "delete"),
-                ("j/k", "navigate"),
                 ("tab", "today"),
+                ("?", "help"),
                 ("q", "quit"),
             ],
         },
@@ -672,4 +675,172 @@ fn render_progress_blocks(done: usize, total: usize, bar_width: usize) -> Vec<Sp
         Span::styled("█".repeat(filled), Style::default().fg(THEME.accent)),
         Span::styled("░".repeat(empty), Style::default().fg(THEME.dim)),
     ]
+}
+
+fn draw_help_overlay(frame: &mut Frame) {
+    let area = frame.area();
+    if area.width < 10 || area.height < 4 {
+        return;
+    }
+
+    // Centered overlay area, clamped to area bounds
+    let width = 68.min(area.width.saturating_sub(2)).max(1);
+    let height = 22.min(area.height.saturating_sub(2)).max(1);
+    let x = area.x + (area.width.saturating_sub(width)) / 2;
+    let y = area.y + (area.height.saturating_sub(height)) / 2;
+    let overlay_area = Rect::new(x, y, width, height);
+
+    frame.render_widget(Clear, overlay_area);
+
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(1), // Title line: "Help" ... "esc / q / ? close"
+            Constraint::Length(1), // Thin divider rule
+            Constraint::Min(0),    // Grouped keybindings
+        ])
+        .split(overlay_area);
+
+    let title_line = Line::from(vec![
+        Span::styled(
+            "Help",
+            Style::default()
+                .fg(THEME.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ".repeat((chunks[0].width as usize).saturating_sub(25))),
+        Span::styled("esc / q / ? to close", Style::default().fg(THEME.dim)),
+    ]);
+    frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+    frame.render_widget(
+        Paragraph::new("─".repeat(chunks[1].width as usize))
+            .style(Style::default().fg(THEME.divider)),
+        chunks[1],
+    );
+
+    let body_area = chunks[2];
+    if body_area.height == 0 || body_area.width == 0 {
+        return;
+    }
+
+    let is_wide = body_area.width >= 56;
+    if is_wide {
+        let cols = Layout::default()
+            .direction(Direction::Horizontal)
+            .constraints([
+                Constraint::Percentage(50),
+                Constraint::Length(2),
+                Constraint::Percentage(50),
+            ])
+            .split(body_area);
+
+        frame.render_widget(Paragraph::new(build_left_help_lines()), cols[0]);
+        frame.render_widget(Paragraph::new(build_right_help_lines()), cols[2]);
+    } else {
+        frame.render_widget(Paragraph::new(build_all_help_lines()), body_area);
+    }
+}
+
+fn help_entry(key: &str, desc: &str, pad_key: usize) -> Line<'static> {
+    let key_pad = pad_key.saturating_sub(key.chars().count());
+    Line::from(vec![
+        Span::styled(
+            format!("  {key}"),
+            Style::default()
+                .fg(THEME.accent)
+                .add_modifier(Modifier::BOLD),
+        ),
+        Span::raw(" ".repeat(key_pad + 2)),
+        Span::styled(desc.to_string(), Style::default().fg(THEME.dim)),
+    ])
+}
+
+fn help_header(title: &str) -> Line<'static> {
+    Line::from(vec![Span::styled(
+        title.to_string(),
+        Style::default()
+            .fg(THEME.text)
+            .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+    )])
+}
+
+fn build_left_help_lines() -> Vec<Line<'static>> {
+    vec![
+        help_header("Navigation"),
+        help_entry("Tab", "switch views", 10),
+        help_entry("j / k", "navigate down / up", 10),
+        help_entry("g / G", "jump top / bottom", 10),
+        help_entry("Ctrl+d/u", "half page down / up", 10),
+        help_entry("?", "toggle help", 10),
+        help_entry("q", "quit", 10),
+        Line::raw(""),
+        help_header("History"),
+        help_entry("enter/l", "focus tasks column", 10),
+        help_entry("h", "focus dates column", 10),
+        Line::raw(""),
+        help_header("Input"),
+        help_entry("enter", "save", 10),
+        help_entry("esc", "cancel", 10),
+    ]
+}
+
+fn build_right_help_lines() -> Vec<Line<'static>> {
+    vec![
+        help_header("Tasks"),
+        help_entry("a", "add new task", 10),
+        help_entry("e", "edit selected task", 10),
+        help_entry("space", "toggle complete", 10),
+        help_entry("J / K", "move task down / up", 10),
+        help_entry("m", "move task to Today", 10),
+        help_entry("d", "delete task", 10),
+        help_entry("D", "clear completed tasks", 10),
+        help_entry("c", "carry over unfinished", 10),
+        help_entry("u", "undo last action", 10),
+        help_entry("Ctrl+r", "redo undone action", 10),
+    ]
+}
+
+fn build_all_help_lines() -> Vec<Line<'static>> {
+    let mut lines = build_left_help_lines();
+    lines.push(Line::raw(""));
+    lines.extend(build_right_help_lines());
+    lines
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::backend::TestBackend;
+    use ratatui::Terminal;
+
+    #[test]
+    fn test_render_help_overlay() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::new_for_test(Vec::new());
+        app.show_help = true;
+
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let buffer = terminal.backend().buffer();
+        let content: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(content.contains("Help"));
+        assert!(content.contains("Navigation"));
+        assert!(content.contains("Tasks"));
+    }
+
+    #[test]
+    fn test_render_small_terminal_no_panic() {
+        for (w, h) in [(10, 4), (5, 2), (20, 5), (15, 6), (24, 6), (30, 8)] {
+            let backend = TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).unwrap();
+            let mut app = App::new_for_test(Vec::new());
+
+            app.show_help = false;
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+
+            app.show_help = true;
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+        }
+    }
 }

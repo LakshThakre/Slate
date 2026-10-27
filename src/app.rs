@@ -21,6 +21,7 @@ pub struct App {
     pub redo_stack: Vec<Vec<Todo>>,
     pub transient_message: Option<String>,
     pub visible_list_height: usize,
+    pub show_help: bool,
     pub auto_save: bool,
 }
 
@@ -46,6 +47,7 @@ impl App {
             redo_stack: Vec::new(),
             transient_message: None,
             visible_list_height: 10,
+            show_help: false,
             auto_save: true,
         };
 
@@ -70,6 +72,7 @@ impl App {
             redo_stack: Vec::new(),
             transient_message: None,
             visible_list_height: 10,
+            show_help: false,
             auto_save: false,
         };
         app.clamp_selections();
@@ -740,6 +743,16 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
+        if self.show_help {
+            match key.code {
+                KeyCode::Esc | KeyCode::Char('?') | KeyCode::Char('q') => {
+                    self.show_help = false;
+                }
+                _ => {}
+            }
+            return false;
+        }
+
         if key
             .modifiers
             .contains(ratatui::crossterm::event::KeyModifiers::CONTROL)
@@ -763,6 +776,9 @@ impl App {
         }
 
         match key.code {
+            KeyCode::Char('?') => {
+                self.show_help = true;
+            }
             KeyCode::Char('q') => return true,
             KeyCode::Tab | KeyCode::BackTab => {
                 self.current_view = match self.current_view {
@@ -1598,5 +1614,38 @@ mod tests {
         // Jump to top in todos pane
         app.handle_key(key_press(KeyCode::Char('g')));
         assert_eq!(app.history_todo_index, 0);
+    }
+
+    #[test]
+    fn test_help_overlay_keys() {
+        let mut app = App::new_for_test(Vec::new());
+        assert!(!app.show_help);
+
+        // Open help with '?'
+        let exit = app.handle_key(key_press(KeyCode::Char('?')));
+        assert!(!exit);
+        assert!(app.show_help);
+
+        // Other keys like 'j' or 'a' should be ignored and not exit
+        assert!(!app.handle_key(key_press(KeyCode::Char('j'))));
+        assert!(app.show_help);
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        // 'q' should close overlay only and NOT quit the app!
+        let exit_on_q = app.handle_key(key_press(KeyCode::Char('q')));
+        assert!(!exit_on_q);
+        assert!(!app.show_help);
+
+        // Open again, close with Esc
+        app.handle_key(key_press(KeyCode::Char('?')));
+        assert!(app.show_help);
+        assert!(!app.handle_key(key_press(KeyCode::Esc)));
+        assert!(!app.show_help);
+
+        // Open again, close with '?'
+        app.handle_key(key_press(KeyCode::Char('?')));
+        assert!(app.show_help);
+        assert!(!app.handle_key(key_press(KeyCode::Char('?'))));
+        assert!(!app.show_help);
     }
 }
