@@ -323,6 +323,46 @@ impl App {
         }
     }
 
+    pub fn clear_completed_today(&mut self) {
+        let today = Local::now().date_naive();
+        let completed_count = self
+            .todos
+            .iter()
+            .filter(|t| t.created_date == today && t.done)
+            .count();
+
+        if completed_count == 0 {
+            self.set_transient_message("No completed tasks");
+            return;
+        }
+
+        self.mutate(|todos| {
+            todos.retain(|t| !(t.created_date == today && t.done));
+        });
+        self.set_transient_message(format!("Cleared {completed_count} completed · u to undo"));
+    }
+
+    pub fn clear_completed_history(&mut self) {
+        let dates = self.dates_list();
+        if let Some(&selected_date) = dates.get(self.history_date_index) {
+            let completed_count = self
+                .todos
+                .iter()
+                .filter(|t| t.created_date == selected_date && t.done)
+                .count();
+
+            if completed_count == 0 {
+                self.set_transient_message("No completed tasks");
+                return;
+            }
+
+            self.mutate(|todos| {
+                todos.retain(|t| !(t.created_date == selected_date && t.done));
+            });
+            self.set_transient_message(format!("Cleared {completed_count} completed · u to undo"));
+        }
+    }
+
     pub fn add_todo(&mut self, text: &str) {
         let clean_text = text.trim();
         if clean_text.is_empty() {
@@ -671,6 +711,16 @@ impl App {
             KeyCode::Char('c') => {
                 self.carry_over();
             }
+            KeyCode::Char('D') => {
+                self.clear_completed_today();
+            }
+            KeyCode::Char('d')
+                if key
+                    .modifiers
+                    .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
+            {
+                self.clear_completed_today();
+            }
             KeyCode::Char('d') | KeyCode::Delete => {
                 self.delete_today_todo();
             }
@@ -699,6 +749,16 @@ impl App {
                     }
                     KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => {
                         self.history_pane = HistoryPane::Todos;
+                    }
+                    KeyCode::Char('D') => {
+                        self.clear_completed_history();
+                    }
+                    KeyCode::Char('d')
+                        if key
+                            .modifiers
+                            .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
+                    {
+                        self.clear_completed_history();
                     }
                     _ => {}
                 }
@@ -749,6 +809,16 @@ impl App {
                     }
                     KeyCode::Char('e') => {
                         self.start_editing_history();
+                    }
+                    KeyCode::Char('D') => {
+                        self.clear_completed_history();
+                    }
+                    KeyCode::Char('d')
+                        if key
+                            .modifiers
+                            .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
+                    {
+                        self.clear_completed_history();
                     }
                     KeyCode::Char('d') | KeyCode::Delete => {
                         self.delete_history_todo();
@@ -1187,5 +1257,104 @@ mod tests {
             .collect();
         assert_eq!(past_todos, vec!["Past 2", "Past 1"]);
         assert_eq!(app.history_todo_index, 1);
+    }
+
+    #[test]
+    fn test_clear_completed_today_some() {
+        let today = Local::now().date_naive();
+        let t1 = Todo {
+            id: 1,
+            text: "Done 1".to_string(),
+            created_date: today,
+            done: true,
+            done_at: Some(Local::now()),
+        };
+        let t2 = Todo {
+            id: 2,
+            text: "Unfinished".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+        let t3 = Todo {
+            id: 3,
+            text: "Done 2".to_string(),
+            created_date: today,
+            done: true,
+            done_at: Some(Local::now()),
+        };
+        let mut app = App::new_for_test(vec![t1, t2, t3]);
+
+        // Press 'D' (Shift+d)
+        app.handle_key(key_press(KeyCode::Char('D')));
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].text, "Unfinished");
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Cleared 2 completed · u to undo")
+        );
+
+        // Undo
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.todos.len(), 3);
+    }
+
+    #[test]
+    fn test_clear_completed_today_none() {
+        let today = Local::now().date_naive();
+        let t1 = Todo {
+            id: 1,
+            text: "Unfinished".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+        let mut app = App::new_for_test(vec![t1]);
+
+        app.handle_key(key_press(KeyCode::Char('D')));
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.transient_message.as_deref(), Some("No completed tasks"));
+        assert!(app.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_clear_completed_history() {
+        let past = Local::now().date_naive().pred_opt().unwrap();
+        let today = Local::now().date_naive();
+
+        let t_past_done = Todo {
+            id: 1,
+            text: "Past done".to_string(),
+            created_date: past,
+            done: true,
+            done_at: Some(Local::now()),
+        };
+        let t_past_todo = Todo {
+            id: 2,
+            text: "Past open".to_string(),
+            created_date: past,
+            done: false,
+            done_at: None,
+        };
+        let t_today_done = Todo {
+            id: 3,
+            text: "Today done".to_string(),
+            created_date: today,
+            done: true,
+            done_at: Some(Local::now()),
+        };
+
+        let mut app = App::new_for_test(vec![t_past_done, t_past_todo, t_today_done]);
+        app.current_view = View::History;
+        app.history_pane = HistoryPane::Todos;
+        let dates = app.dates_list();
+        let date_idx = dates.iter().position(|&d| d == past).unwrap();
+        app.history_date_index = date_idx;
+
+        app.handle_key(key_press(KeyCode::Char('D')));
+        // Only past done task was cleared
+        assert_eq!(app.todos.len(), 2);
+        assert_eq!(app.todos[0].text, "Past open");
+        assert_eq!(app.todos[1].text, "Today done");
     }
 }
