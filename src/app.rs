@@ -255,6 +255,74 @@ impl App {
         }
     }
 
+    pub fn reorder_today(&mut self, down: bool) {
+        let today = Local::now().date_naive();
+        let today_indices: Vec<usize> = self
+            .todos
+            .iter()
+            .enumerate()
+            .filter(|(_, t)| t.created_date == today)
+            .map(|(i, _)| i)
+            .collect();
+
+        if today_indices.len() <= 1 {
+            return;
+        }
+
+        if down {
+            if self.today_selected_index + 1 < today_indices.len() {
+                let pos_curr = today_indices[self.today_selected_index];
+                let pos_next = today_indices[self.today_selected_index + 1];
+                self.mutate(|todos| {
+                    todos.swap(pos_curr, pos_next);
+                });
+                self.today_selected_index += 1;
+            }
+        } else if self.today_selected_index > 0 {
+            let pos_curr = today_indices[self.today_selected_index];
+            let pos_prev = today_indices[self.today_selected_index - 1];
+            self.mutate(|todos| {
+                todos.swap(pos_curr, pos_prev);
+            });
+            self.today_selected_index -= 1;
+        }
+    }
+
+    pub fn reorder_history(&mut self, down: bool) {
+        let dates = self.dates_list();
+        if let Some(&selected_date) = dates.get(self.history_date_index) {
+            let date_indices: Vec<usize> = self
+                .todos
+                .iter()
+                .enumerate()
+                .filter(|(_, t)| t.created_date == selected_date)
+                .map(|(i, _)| i)
+                .collect();
+
+            if date_indices.len() <= 1 {
+                return;
+            }
+
+            if down {
+                if self.history_todo_index + 1 < date_indices.len() {
+                    let pos_curr = date_indices[self.history_todo_index];
+                    let pos_next = date_indices[self.history_todo_index + 1];
+                    self.mutate(|todos| {
+                        todos.swap(pos_curr, pos_next);
+                    });
+                    self.history_todo_index += 1;
+                }
+            } else if self.history_todo_index > 0 {
+                let pos_curr = date_indices[self.history_todo_index];
+                let pos_prev = date_indices[self.history_todo_index - 1];
+                self.mutate(|todos| {
+                    todos.swap(pos_curr, pos_prev);
+                });
+                self.history_todo_index -= 1;
+            }
+        }
+    }
+
     pub fn add_todo(&mut self, text: &str) {
         let clean_text = text.trim();
         if clean_text.is_empty() {
@@ -566,6 +634,26 @@ impl App {
             .count();
 
         match key.code {
+            KeyCode::Char('J') => {
+                self.reorder_today(true);
+            }
+            KeyCode::Char('K') => {
+                self.reorder_today(false);
+            }
+            KeyCode::Char('j')
+                if key
+                    .modifiers
+                    .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
+            {
+                self.reorder_today(true);
+            }
+            KeyCode::Char('k')
+                if key
+                    .modifiers
+                    .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
+            {
+                self.reorder_today(false);
+            }
             KeyCode::Char('j') | KeyCode::Down => {
                 if count > 0 && self.today_selected_index + 1 < count {
                     self.today_selected_index += 1;
@@ -627,6 +715,26 @@ impl App {
                 match key.code {
                     KeyCode::Char('h') | KeyCode::Left => {
                         self.history_pane = HistoryPane::Dates;
+                    }
+                    KeyCode::Char('J') => {
+                        self.reorder_history(true);
+                    }
+                    KeyCode::Char('K') => {
+                        self.reorder_history(false);
+                    }
+                    KeyCode::Char('j')
+                        if key
+                            .modifiers
+                            .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
+                    {
+                        self.reorder_history(true);
+                    }
+                    KeyCode::Char('k')
+                        if key
+                            .modifiers
+                            .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
+                    {
+                        self.reorder_history(false);
                     }
                     KeyCode::Char('j') | KeyCode::Down => {
                         if count > 0 && self.history_todo_index + 1 < count {
@@ -954,5 +1062,130 @@ mod tests {
         };
         let app = App::new_for_test(vec![y_done]);
         assert!(app.uncarried_previous_tasks().is_none());
+    }
+
+    #[test]
+    fn test_reorder_today_down_and_up() {
+        let today = Local::now().date_naive();
+        let t1 = Todo {
+            id: 1,
+            text: "A".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+        let t2 = Todo {
+            id: 2,
+            text: "B".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+        let t3 = Todo {
+            id: 3,
+            text: "C".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+
+        let mut app = App::new_for_test(vec![t1, t2, t3]);
+        app.today_selected_index = 0; // selected on A
+
+        // Move A down with 'J'
+        app.handle_key(key_press(KeyCode::Char('J')));
+        let texts: Vec<&str> = app.todos.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["B", "A", "C"]);
+        assert_eq!(app.today_selected_index, 1); // Selection followed A
+
+        // Move A up with 'K'
+        app.handle_key(key_press(KeyCode::Char('K')));
+        let texts: Vec<&str> = app.todos.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["A", "B", "C"]);
+        assert_eq!(app.today_selected_index, 0);
+
+        // Undo should revert
+        app.handle_key(key_press(KeyCode::Char('u')));
+        let texts: Vec<&str> = app.todos.iter().map(|t| t.text.as_str()).collect();
+        assert_eq!(texts, vec!["B", "A", "C"]);
+    }
+
+    #[test]
+    fn test_reorder_edges_and_single_item_no_op() {
+        let today = Local::now().date_naive();
+        let t1 = Todo {
+            id: 1,
+            text: "A".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+        let t2 = Todo {
+            id: 2,
+            text: "B".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+        let mut app = App::new_for_test(vec![t1, t2]);
+        app.today_selected_index = 0;
+
+        // Top edge: move up is a no-op
+        app.handle_key(key_press(KeyCode::Char('K')));
+        assert_eq!(app.today_selected_index, 0);
+        assert_eq!(app.todos[0].text, "A");
+        assert!(app.undo_stack.is_empty()); // No snapshot pushed for no-op
+
+        // Bottom edge: move B down is a no-op
+        app.today_selected_index = 1;
+        app.handle_key(key_press(KeyCode::Char('J')));
+        assert_eq!(app.today_selected_index, 1);
+        assert_eq!(app.todos[1].text, "B");
+        assert!(app.undo_stack.is_empty());
+
+        // Single item
+        let mut single_app = App::new_for_test(vec![app.todos[0].clone()]);
+        single_app.handle_key(key_press(KeyCode::Char('J')));
+        assert_eq!(single_app.today_selected_index, 0);
+        single_app.handle_key(key_press(KeyCode::Char('K')));
+        assert_eq!(single_app.today_selected_index, 0);
+        assert!(single_app.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_reorder_history() {
+        let past = Local::now().date_naive().pred_opt().unwrap();
+        let t1 = Todo {
+            id: 10,
+            text: "Past 1".to_string(),
+            created_date: past,
+            done: false,
+            done_at: None,
+        };
+        let t2 = Todo {
+            id: 20,
+            text: "Past 2".to_string(),
+            created_date: past,
+            done: false,
+            done_at: None,
+        };
+        let mut app = App::new_for_test(vec![t1, t2]);
+        app.current_view = View::History;
+        app.history_pane = HistoryPane::Todos;
+        let dates = app.dates_list();
+        let date_idx = dates.iter().position(|&d| d == past).unwrap();
+        app.history_date_index = date_idx;
+        app.history_todo_index = 0;
+
+        // Move Past 1 down using Shift+j
+        app.handle_key(KeyEvent::new(KeyCode::Char('j'), KeyModifiers::SHIFT));
+        let past_todos: Vec<&str> = app
+            .todos
+            .iter()
+            .filter(|t| t.created_date == past)
+            .map(|t| t.text.as_str())
+            .collect();
+        assert_eq!(past_todos, vec!["Past 2", "Past 1"]);
+        assert_eq!(app.history_todo_index, 1);
     }
 }
