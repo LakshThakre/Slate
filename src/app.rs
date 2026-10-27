@@ -606,6 +606,43 @@ impl App {
         }
     }
 
+    pub fn move_history_todo_to_today(&mut self) {
+        if self.current_view != View::History || self.history_pane != HistoryPane::Todos {
+            return;
+        }
+
+        let dates = self.dates_list();
+        let Some(&selected_date) = dates.get(self.history_date_index) else {
+            return;
+        };
+
+        let today = Local::now().date_naive();
+        if selected_date == today {
+            self.set_transient_message("Already in Today");
+            return;
+        }
+
+        let date_todos: Vec<u64> = self
+            .todos
+            .iter()
+            .filter(|t| t.created_date == selected_date)
+            .map(|t| t.id)
+            .collect();
+
+        if let Some(&todo_id) = date_todos.get(self.history_todo_index) {
+            self.mutate(|todos| {
+                if let Some(pos) = todos.iter().position(|t| t.id == todo_id) {
+                    let mut todo = todos.remove(pos);
+                    todo.created_date = today;
+                    todo.done = false;
+                    todo.done_at = None;
+                    todos.push(todo);
+                }
+            });
+            self.set_transient_message("Moved to Today");
+        }
+    }
+
     /// Handles a key event. Returns true if the app should exit.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
         self.transient_message = None;
@@ -873,6 +910,9 @@ impl App {
             {
                 self.clear_completed_today();
             }
+            KeyCode::Char('m') => {
+                self.set_transient_message("Already in Today");
+            }
             KeyCode::Char('d') | KeyCode::Delete => {
                 self.delete_today_todo();
             }
@@ -971,6 +1011,9 @@ impl App {
                             .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
                     {
                         self.clear_completed_history();
+                    }
+                    KeyCode::Char('m') => {
+                        self.move_history_todo_to_today();
                     }
                     KeyCode::Char('d') | KeyCode::Delete => {
                         self.delete_history_todo();
@@ -1647,5 +1690,100 @@ mod tests {
         assert!(app.show_help);
         assert!(!app.handle_key(key_press(KeyCode::Char('?'))));
         assert!(!app.show_help);
+    }
+
+    #[test]
+    fn test_move_task_to_today_from_history() {
+        let today = Local::now().date_naive();
+        let yesterday = today.pred_opt().unwrap();
+
+        let mut app = App::new_for_test(vec![
+            Todo {
+                id: 1,
+                text: "Today task".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 2,
+                text: "Yesterday completed task".to_string(),
+                created_date: yesterday,
+                done: true,
+                done_at: Some(Local::now()),
+            },
+        ]);
+
+        app.current_view = View::History;
+        app.history_pane = HistoryPane::Todos;
+        let dates = app.dates_list();
+        app.history_date_index = dates.iter().position(|&d| d == yesterday).unwrap();
+        app.history_todo_index = 0;
+
+        // Move to today with 'm'
+        app.handle_key(key_press(KeyCode::Char('m')));
+
+        assert_eq!(app.transient_message, Some("Moved to Today".to_string()));
+
+        // Check tasks on today
+        let today_todos: Vec<&Todo> = app
+            .todos
+            .iter()
+            .filter(|t| t.created_date == today)
+            .collect();
+        assert_eq!(today_todos.len(), 2);
+        assert_eq!(today_todos[0].id, 1);
+        assert_eq!(today_todos[1].id, 2);
+        assert_eq!(today_todos[1].text, "Yesterday completed task");
+        // Completion state reset to unfinished
+        assert!(!today_todos[1].done);
+        assert_eq!(today_todos[1].done_at, None);
+
+        // Check yesterday has 0 tasks
+        let yesterday_count = app
+            .todos
+            .iter()
+            .filter(|t| t.created_date == yesterday)
+            .count();
+        assert_eq!(yesterday_count, 0);
+
+        // Undo move
+        app.undo();
+        let yesterday_todos: Vec<&Todo> = app
+            .todos
+            .iter()
+            .filter(|t| t.created_date == yesterday)
+            .collect();
+        assert_eq!(yesterday_todos.len(), 1);
+        assert_eq!(yesterday_todos[0].id, 2);
+        assert!(yesterday_todos[0].done);
+        assert!(yesterday_todos[0].done_at.is_some());
+    }
+
+    #[test]
+    fn test_move_task_already_in_today() {
+        let today = Local::now().date_naive();
+        let mut app = App::new_for_test(vec![Todo {
+            id: 1,
+            text: "Today task".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        }]);
+
+        // In Today view
+        app.current_view = View::Today;
+        app.handle_key(key_press(KeyCode::Char('m')));
+        assert_eq!(app.transient_message, Some("Already in Today".to_string()));
+        assert!(app.undo_stack.is_empty());
+
+        // In History view with today selected
+        app.current_view = View::History;
+        app.history_pane = HistoryPane::Todos;
+        let dates = app.dates_list();
+        app.history_date_index = dates.iter().position(|&d| d == today).unwrap();
+        app.handle_key(key_press(KeyCode::Char('m')));
+        assert_eq!(app.transient_message, Some("Already in Today".to_string()));
+        assert!(app.undo_stack.is_empty());
     }
 }
