@@ -6,7 +6,11 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use crate::model::{HistoryPane, InputMode, Todo, View};
 use crate::storage::{load_todos, save_todos};
 
+use std::path::PathBuf;
+
 pub struct App {
+    pub data_path: PathBuf,
+    pub today: NaiveDate,
     pub todos: Vec<Todo>,
     pub current_view: View,
     pub history_pane: HistoryPane,
@@ -27,12 +31,21 @@ pub struct App {
 
 impl App {
     pub fn new() -> Self {
-        let (todos, status_message) = match load_todos() {
+        let data_path =
+            crate::storage::get_storage_path().unwrap_or_else(|_| PathBuf::from("todos.json"));
+        let today = Local::now().date_naive();
+        Self::with_config(data_path, today)
+    }
+
+    pub fn with_config(data_path: PathBuf, today: NaiveDate) -> Self {
+        let (todos, status_message) = match load_todos(&data_path) {
             Ok(list) => (list, None),
             Err(e) => (Vec::new(), Some(format!("Load warning: {e}"))),
         };
 
         let mut app = Self {
+            data_path,
+            today,
             todos,
             current_view: View::Today,
             history_pane: HistoryPane::Dates,
@@ -57,7 +70,14 @@ impl App {
 
     #[cfg(test)]
     pub fn new_for_test(todos: Vec<Todo>) -> Self {
+        Self::new_for_test_with_date(todos, Local::now().date_naive())
+    }
+
+    #[cfg(test)]
+    pub fn new_for_test_with_date(todos: Vec<Todo>, today: NaiveDate) -> Self {
         let mut app = Self {
+            data_path: PathBuf::from("dummy_test.json"),
+            today,
             todos,
             current_view: View::Today,
             history_pane: HistoryPane::Dates,
@@ -83,7 +103,7 @@ impl App {
         if !self.auto_save {
             return;
         }
-        if let Err(e) = save_todos(&self.todos) {
+        if let Err(e) = save_todos(&self.data_path, &self.todos) {
             self.status_message = Some(format!("Save error: {e}"));
         } else if let Some(ref msg) = self.status_message {
             if msg.starts_with("Save error:") {
@@ -93,7 +113,7 @@ impl App {
     }
 
     pub fn dates_list(&self) -> Vec<NaiveDate> {
-        let today = Local::now().date_naive();
+        let today = self.today;
         let mut dates: BTreeSet<NaiveDate> = self.todos.iter().map(|t| t.created_date).collect();
         dates.insert(today);
         let mut list: Vec<NaiveDate> = dates.into_iter().collect();
@@ -102,7 +122,7 @@ impl App {
     }
 
     pub fn clamp_selections(&mut self) {
-        let today = Local::now().date_naive();
+        let today = self.today;
         let today_count = self
             .todos
             .iter()
@@ -186,7 +206,7 @@ impl App {
     }
 
     pub fn start_editing_today(&mut self) {
-        let today = Local::now().date_naive();
+        let today = self.today;
         let today_todos: Vec<&Todo> = self
             .todos
             .iter()
@@ -216,7 +236,7 @@ impl App {
     }
 
     pub fn uncarried_previous_tasks(&self) -> Option<(NaiveDate, Vec<u64>)> {
-        let today = Local::now().date_naive();
+        let today = self.today;
         let prev_date = self
             .todos
             .iter()
@@ -238,7 +258,7 @@ impl App {
 
     pub fn carry_over(&mut self) {
         if let Some((_, ids)) = self.uncarried_previous_tasks() {
-            let today = Local::now().date_naive();
+            let today = self.today;
             let count = ids.len();
             self.mutate(|todos| {
                 let mut carried = Vec::new();
@@ -262,7 +282,7 @@ impl App {
     }
 
     pub fn reorder_today(&mut self, down: bool) {
-        let today = Local::now().date_naive();
+        let today = self.today;
         let today_indices: Vec<usize> = self
             .todos
             .iter()
@@ -330,7 +350,7 @@ impl App {
     }
 
     pub fn clear_completed_today(&mut self) {
-        let today = Local::now().date_naive();
+        let today = self.today;
         let completed_count = self
             .todos
             .iter()
@@ -390,7 +410,7 @@ impl App {
     pub fn jump_bottom(&mut self) {
         match self.current_view {
             View::Today => {
-                let today = Local::now().date_naive();
+                let today = self.today;
                 let count = self
                     .todos
                     .iter()
@@ -421,7 +441,7 @@ impl App {
         let step = (self.visible_list_height / 2).max(1);
         match self.current_view {
             View::Today => {
-                let today = Local::now().date_naive();
+                let today = self.today;
                 let count = self
                     .todos
                     .iter()
@@ -486,7 +506,7 @@ impl App {
             return;
         }
 
-        let today = Local::now().date_naive();
+        let today = self.today;
         let next_id = self.todos.iter().map(|t| t.id).max().unwrap_or(0) + 1;
         let new_todo = Todo {
             id: next_id,
@@ -511,7 +531,7 @@ impl App {
     }
 
     pub fn toggle_today_todo(&mut self) {
-        let today = Local::now().date_naive();
+        let today = self.today;
         let today_ids: Vec<u64> = self
             .todos
             .iter()
@@ -530,7 +550,7 @@ impl App {
     }
 
     pub fn delete_today_todo(&mut self) {
-        let today = Local::now().date_naive();
+        let today = self.today;
         let today_ids: Vec<u64> = self
             .todos
             .iter()
@@ -616,7 +636,7 @@ impl App {
             return;
         };
 
-        let today = Local::now().date_naive();
+        let today = self.today;
         if selected_date == today {
             self.set_transient_message("Already in Today");
             return;
@@ -855,7 +875,7 @@ impl App {
     }
 
     fn handle_today_key(&mut self, key: KeyEvent) {
-        let today = Local::now().date_naive();
+        let today = self.today;
         let count = self
             .todos
             .iter()
@@ -1785,5 +1805,92 @@ mod tests {
         app.handle_key(key_press(KeyCode::Char('m')));
         assert_eq!(app.transient_message, Some("Already in Today".to_string()));
         assert!(app.undo_stack.is_empty());
+    }
+
+    #[test]
+    fn test_characterization_add_toggle_delete() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let mut app = App::new_for_test_with_date(Vec::new(), today);
+
+        // Add
+        app.add_todo("Write tests");
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].text, "Write tests");
+        assert_eq!(app.todos[0].created_date, today);
+        assert!(!app.todos[0].done);
+        assert_eq!(app.today_selected_index, 0);
+
+        // Add second task
+        app.add_todo("Run tests");
+        assert_eq!(app.todos.len(), 2);
+        assert_eq!(app.today_selected_index, 1);
+
+        // Toggle first task
+        app.today_selected_index = 0;
+        app.toggle_today_todo();
+        assert!(app.todos[0].done);
+        assert!(app.todos[0].done_at.is_some());
+
+        // Delete at the end of list clamps selection
+        app.today_selected_index = 1;
+        app.delete_today_todo();
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.today_selected_index, 0);
+
+        // Delete last remaining task clamps to 0
+        app.delete_today_todo();
+        assert_eq!(app.todos.len(), 0);
+        assert_eq!(app.today_selected_index, 0);
+    }
+
+    #[test]
+    fn test_characterization_history_grouping_and_view_switching() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let yesterday = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let older = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Older task".to_string(),
+                created_date: older,
+                done: true,
+                done_at: None,
+            },
+            Todo {
+                id: 2,
+                text: "Yesterday task".to_string(),
+                created_date: yesterday,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 3,
+                text: "Today task".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos, today);
+
+        // History dates list: newest first, always includes today
+        let dates = app.dates_list();
+        assert_eq!(dates, vec![today, yesterday, older]);
+
+        // View switching with Tab
+        assert_eq!(app.current_view, View::Today);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::History);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Today);
+
+        // Empty list clamping
+        let mut empty_app = App::new_for_test_with_date(Vec::new(), today);
+        empty_app.clamp_selections();
+        assert_eq!(empty_app.today_selected_index, 0);
+        assert_eq!(empty_app.history_date_index, 0);
+        assert_eq!(empty_app.history_todo_index, 0);
     }
 }

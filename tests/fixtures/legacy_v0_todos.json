@@ -1,0 +1,23 @@
+[
+  {
+    "id": 1,
+    "text": "Review project architecture",
+    "created_date": "2026-10-25",
+    "done": false,
+    "done_at": null
+  },
+  {
+    "id": 2,
+    "text": "Buy fresh bread",
+    "created_date": "2026-10-24",
+    "done": true,
+    "done_at": "2026-10-24T11:53:00+05:30"
+  },
+  {
+    "id": 3,
+    "text": "Old legacy date format task",
+    "date": "2026-10-20",
+    "done": true,
+    "done_at": null
+  }
+]

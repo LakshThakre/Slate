@@ -1,4 +1,4 @@
-use chrono::{Local, NaiveDate};
+use chrono::NaiveDate;
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -130,7 +130,7 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Quiet Today view: Title row with date, count, slim block progress bar, and todo list
 fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
-    let today = Local::now().date_naive();
+    let today = app.today;
     let today_todos: Vec<&Todo> = app
         .todos
         .iter()
@@ -257,7 +257,7 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
 /// History view: Narrow Date column + thin vertical rule + Todo list for selected date
 fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
     let dates = app.dates_list();
-    let today = Local::now().date_naive();
+    let today = app.today;
 
     // Responsive date column width: 18 cols on narrow screens, 24 on wide screens
     let date_col_width = if area.width < 70 { 18 } else { 24 }.min(area.width.saturating_sub(15));
@@ -837,6 +837,7 @@ fn build_all_help_lines() -> Vec<Line<'static>> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::model::InputMode;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
@@ -875,14 +876,18 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        let yesterday = Local::now().date_naive().pred_opt().unwrap();
-        let mut app = App::new_for_test(vec![Todo {
-            id: 1,
-            text: "Overdue old task".to_string(),
-            created_date: yesterday,
-            done: false,
-            done_at: None,
-        }]);
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let yesterday = today.pred_opt().unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![Todo {
+                id: 1,
+                text: "Overdue old task".to_string(),
+                created_date: yesterday,
+                done: false,
+                done_at: None,
+            }],
+            today,
+        );
 
         // In Today view, header should show "1 overdue"
         terminal.draw(|f| render(&mut app, f)).unwrap();
@@ -914,5 +919,85 @@ mod tests {
             .iter()
             .any(|c| c.symbol() == "!" && c.fg == THEME.warn);
         assert!(has_warn_cell);
+    }
+
+    #[test]
+    fn test_render_today_history_and_input_views() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![Todo {
+                id: 1,
+                text: "Characterization task 1".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            }],
+            today,
+        );
+
+        // 1. Today view
+        app.current_view = View::Today;
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let buf_today: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf_today.contains("Slate"));
+        assert!(buf_today.contains("Today"));
+        assert!(buf_today.contains("History"));
+        assert!(buf_today.contains("Characterization task 1"));
+        assert!(buf_today.contains("a add"));
+
+        // 2. History view
+        app.current_view = View::History;
+        app.history_pane = HistoryPane::Dates;
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let buf_history: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf_history.contains("Slate"));
+        assert!(buf_history.contains("enter/l tasks"));
+
+        // 3. Input prompt: Adding mode
+        app.current_view = View::Today;
+        app.input_mode = InputMode::Adding;
+        app.input_buffer = "Typing new todo".to_string();
+        app.cursor_position = app.input_buffer.len();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let buf_adding: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf_adding.contains("Typing new todo"));
+        assert!(buf_adding.contains("enter save"));
+        assert!(buf_adding.contains("esc cancel"));
+
+        // 4. Input prompt: Editing mode
+        app.input_mode = InputMode::Editing(1);
+        app.input_buffer = "Editing todo".to_string();
+        app.cursor_position = app.input_buffer.len();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let buf_editing: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(buf_editing.contains("Edit task"));
+        assert!(buf_editing.contains("Editing todo"));
     }
 }
