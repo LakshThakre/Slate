@@ -27,26 +27,46 @@ pub struct App {
     pub visible_list_height: usize,
     pub show_help: bool,
     pub auto_save: bool,
+    pub is_legacy_format: bool,
 }
 
 impl App {
-    pub fn new() -> Self {
+    pub fn load_or_exit() -> Self {
         let data_path =
             crate::storage::get_storage_path().unwrap_or_else(|_| PathBuf::from("todos.json"));
         let today = Local::now().date_naive();
-        Self::with_config(data_path, today)
+        match Self::try_with_config(data_path, today) {
+            Ok(app) => app,
+            Err(e) => {
+                eprintln!("{e}");
+                std::process::exit(1);
+            }
+        }
     }
 
+    #[allow(dead_code)]
+    pub fn new() -> Self {
+        Self::load_or_exit()
+    }
+
+    #[allow(dead_code)]
     pub fn with_config(data_path: PathBuf, today: NaiveDate) -> Self {
-        let (todos, status_message) = match load_todos(&data_path) {
-            Ok(list) => (list, None),
-            Err(e) => (Vec::new(), Some(format!("Load warning: {e}"))),
-        };
+        Self::try_with_config(data_path, today).unwrap_or_else(|e| {
+            eprintln!("{e}");
+            std::process::exit(1);
+        })
+    }
+
+    pub fn try_with_config(
+        data_path: PathBuf,
+        today: NaiveDate,
+    ) -> Result<Self, crate::storage::LoadError> {
+        let load_res = load_todos(&data_path)?;
 
         let mut app = Self {
             data_path,
             today,
-            todos,
+            todos: load_res.todos,
             current_view: View::Today,
             history_pane: HistoryPane::Dates,
             input_mode: InputMode::Normal,
@@ -55,17 +75,18 @@ impl App {
             today_selected_index: 0,
             history_date_index: 0,
             history_todo_index: 0,
-            status_message,
+            status_message: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             transient_message: None,
             visible_list_height: 10,
             show_help: false,
             auto_save: true,
+            is_legacy_format: load_res.was_legacy,
         };
 
         app.clamp_selections();
-        app
+        Ok(app)
     }
 
     #[cfg(test)]
@@ -94,6 +115,7 @@ impl App {
             visible_list_height: 10,
             show_help: false,
             auto_save: false,
+            is_legacy_format: false,
         };
         app.clamp_selections();
         app
@@ -103,11 +125,14 @@ impl App {
         if !self.auto_save {
             return;
         }
-        if let Err(e) = save_todos(&self.data_path, &self.todos) {
+        if let Err(e) = save_todos(&self.data_path, &self.todos, self.is_legacy_format) {
             self.status_message = Some(format!("Save error: {e}"));
-        } else if let Some(ref msg) = self.status_message {
-            if msg.starts_with("Save error:") {
-                self.status_message = None;
+        } else {
+            self.is_legacy_format = false;
+            if let Some(ref msg) = self.status_message {
+                if msg.starts_with("Save error:") {
+                    self.status_message = None;
+                }
             }
         }
     }

@@ -27,6 +27,8 @@ fn run_app(terminal: &mut DefaultTerminal, mut app: App) -> Result<(), Box<dyn s
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let app = App::load_or_exit();
+
     // Install panic hook to restore terminal mode safely even on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
@@ -35,7 +37,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     }));
 
     let mut terminal = ratatui::init();
-    let app = App::new();
     let res = run_app(&mut terminal, app);
     ratatui::restore();
 
