@@ -149,6 +149,36 @@ impl App {
         self.clamp_selections();
     }
 
+    pub fn undo(&mut self) {
+        if let Some(prev) = self.undo_stack.pop() {
+            self.redo_stack.push(self.todos.clone());
+            if self.redo_stack.len() > 50 {
+                self.redo_stack.remove(0);
+            }
+            self.todos = prev;
+            self.save();
+            self.clamp_selections();
+            self.set_transient_message("Undone");
+        } else {
+            self.set_transient_message("Nothing to undo");
+        }
+    }
+
+    pub fn redo(&mut self) {
+        if let Some(next) = self.redo_stack.pop() {
+            self.undo_stack.push(self.todos.clone());
+            if self.undo_stack.len() > 50 {
+                self.undo_stack.remove(0);
+            }
+            self.todos = next;
+            self.save();
+            self.clamp_selections();
+            self.set_transient_message("Redone");
+        } else {
+            self.set_transient_message("Nothing to redo");
+        }
+    }
+
     pub fn start_editing_today(&mut self) {
         let today = Local::now().date_naive();
         let today_todos: Vec<&Todo> = self
@@ -442,6 +472,19 @@ impl App {
     }
 
     fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
+        if key
+            .modifiers
+            .contains(ratatui::crossterm::event::KeyModifiers::CONTROL)
+        {
+            match key.code {
+                KeyCode::Char('r') | KeyCode::Char('R') => {
+                    self.redo();
+                    return false;
+                }
+                _ => {}
+            }
+        }
+
         match key.code {
             KeyCode::Char('q') => return true,
             KeyCode::Tab | KeyCode::BackTab => {
@@ -456,6 +499,9 @@ impl App {
                 self.input_mode = InputMode::Adding;
                 self.input_buffer.clear();
                 self.cursor_position = 0;
+            }
+            KeyCode::Char('u') => {
+                self.undo();
             }
             _ => match self.current_view {
                 View::Today => self.handle_today_key(key),
@@ -690,5 +736,81 @@ mod tests {
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(app.todos[0].text, "Edited past task");
         assert_eq!(app.todos[0].created_date, yesterday);
+    }
+
+    #[test]
+    fn test_undo_redo_add() {
+        let mut app = App::new_for_test(Vec::new());
+        app.add_todo("New task");
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].text, "New task");
+
+        // Undo
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.todos.len(), 0);
+        assert_eq!(app.transient_message.as_deref(), Some("Undone"));
+
+        // Redo via Ctrl+r
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].text, "New task");
+        assert_eq!(app.transient_message.as_deref(), Some("Redone"));
+    }
+
+    #[test]
+    fn test_undo_redo_edit() {
+        let today = Local::now().date_naive();
+        let todo = Todo {
+            id: 1,
+            text: "Before edit".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+        let mut app = App::new_for_test(vec![todo]);
+        app.handle_key(key_press(KeyCode::Char('e')));
+        app.input_buffer = "After edit".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.todos[0].text, "After edit");
+
+        // Undo edit
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.todos[0].text, "Before edit");
+
+        // Redo edit
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.todos[0].text, "After edit");
+    }
+
+    #[test]
+    fn test_new_mutation_clears_redo_stack() {
+        let mut app = App::new_for_test(Vec::new());
+        app.add_todo("Task 1");
+        app.add_todo("Task 2");
+
+        // Undo Task 2
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.redo_stack.len(), 1);
+
+        // Perform new mutation: Add Task 3
+        app.add_todo("Task 3");
+        assert_eq!(app.todos.len(), 2);
+        assert!(app.redo_stack.is_empty());
+
+        // Attempting to redo should report Nothing to redo
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.transient_message.as_deref(), Some("Nothing to redo"));
+        assert_eq!(app.todos.len(), 2);
+    }
+
+    #[test]
+    fn test_undo_redo_empty_stacks() {
+        let mut app = App::new_for_test(Vec::new());
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.transient_message.as_deref(), Some("Nothing to undo"));
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.transient_message.as_deref(), Some("Nothing to redo"));
     }
 }
