@@ -1,5 +1,6 @@
 use std::time::Duration;
 
+use chrono::Local;
 use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 
@@ -11,24 +12,58 @@ mod ui;
 
 use app::App;
 
+fn time_until_next_midnight() -> Duration {
+    let now = Local::now();
+    let tomorrow = now.date_naive().succ_opt().unwrap_or(now.date_naive());
+    if let Some(naive_midnight) = tomorrow.and_hms_opt(0, 0, 0) {
+        let next_midnight = match naive_midnight.and_local_timezone(now.timezone()) {
+            chrono::LocalResult::Single(dt) => Some(dt),
+            chrono::LocalResult::Ambiguous(dt, _) => Some(dt),
+            chrono::LocalResult::None => None,
+        };
+        if let Some(next_midnight) = next_midnight {
+            if let Ok(duration) = (next_midnight - now).to_std() {
+                return duration.clamp(Duration::from_secs(1), Duration::from_secs(60));
+            }
+        }
+    }
+    Duration::from_secs(60)
+}
+
 fn run_app(terminal: &mut DefaultTerminal, mut app: App) -> Result<(), Box<dyn std::error::Error>> {
     if let Ok(size) = terminal.size() {
         app.on_resize(size.width, size.height);
     }
 
-    loop {
-        terminal.draw(|f| ui::render(&mut app, f))?;
+    terminal.draw(|f| ui::render(&mut app, f))?;
 
-        if event::poll(Duration::from_millis(250))? {
+    loop {
+        let timeout = time_until_next_midnight();
+        let mut needs_redraw = false;
+
+        if event::poll(timeout)? {
             match event::read()? {
                 Event::Resize(w, h) => {
                     app.on_resize(w, h);
+                    needs_redraw = true;
                 }
-                Event::Key(key) if key.kind == KeyEventKind::Press && app.handle_key(key) => {
-                    break;
+                Event::Key(key) if key.kind == KeyEventKind::Press => {
+                    if app.handle_key(key) {
+                        break;
+                    }
+                    needs_redraw = true;
                 }
                 _ => {}
             }
+        }
+
+        let today = Local::now().date_naive();
+        if app.tick(today) {
+            needs_redraw = true;
+        }
+
+        if needs_redraw {
+            terminal.draw(|f| ui::render(&mut app, f))?;
         }
     }
     Ok(())

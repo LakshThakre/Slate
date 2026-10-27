@@ -33,6 +33,7 @@ pub struct App {
     pub last_backup_time: Option<std::time::SystemTime>,
     pub terminal_width: u16,
     pub terminal_height: u16,
+    pub selected_history_date: Option<NaiveDate>,
 }
 
 impl App {
@@ -94,6 +95,7 @@ impl App {
             last_backup_time: None,
             terminal_width: 80,
             terminal_height: 24,
+            selected_history_date: None,
         };
 
         app.clamp_selections();
@@ -132,6 +134,7 @@ impl App {
             last_backup_time: None,
             terminal_width: 80,
             terminal_height: 24,
+            selected_history_date: None,
         };
         app.clamp_selections();
         app
@@ -199,8 +202,12 @@ impl App {
         let dates = self.dates_list();
         if dates.is_empty() {
             self.history_date_index = 0;
-        } else if self.history_date_index >= dates.len() {
-            self.history_date_index = dates.len() - 1;
+            self.selected_history_date = None;
+        } else {
+            if self.history_date_index >= dates.len() {
+                self.history_date_index = dates.len() - 1;
+            }
+            self.selected_history_date = dates.get(self.history_date_index).copied();
         }
 
         if let Some(&selected_date) = dates.get(self.history_date_index) {
@@ -216,6 +223,34 @@ impl App {
             }
         } else {
             self.history_todo_index = 0;
+        }
+    }
+
+    pub fn on_day_changed(&mut self, _old_date: NaiveDate, _new_date: NaiveDate) {
+        // Hook for future phases (carry-over, etc.)
+    }
+
+    pub fn tick(&mut self, current_today: NaiveDate) -> bool {
+        if current_today != self.today {
+            let old_date = self.today;
+            let prev_selected_date = self.dates_list().get(self.history_date_index).copied();
+
+            self.today = current_today;
+            self.on_day_changed(old_date, current_today);
+
+            if let Some(target_date) = prev_selected_date {
+                let new_dates = self.dates_list();
+                if let Some(pos) = new_dates.iter().position(|&d| d == target_date) {
+                    self.history_date_index = pos;
+                    self.selected_history_date = Some(target_date);
+                }
+            }
+
+            self.clamp_selections();
+            self.set_transient_message(format!("New day · {}", current_today.format("%A, %-d %B")));
+            true
+        } else {
+            false
         }
     }
 
@@ -2029,5 +2064,171 @@ mod tests {
         app.input_mode = InputMode::Adding;
         let ctrl_c = KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL);
         assert!(app.handle_key(ctrl_c)); // exits
+    }
+
+    #[test]
+    fn test_rollover_while_idle_in_today() {
+        let day1 = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let day2 = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+
+        let todos = vec![Todo {
+            id: 1,
+            text: "Task from day 1".to_string(),
+            created_date: day1,
+            done: false,
+            done_at: None,
+        }];
+
+        let mut app = App::new_for_test_with_date(todos, day1);
+        app.current_view = View::Today;
+
+        // Rollover to next day
+        assert!(app.tick(day2));
+        assert_eq!(app.today, day2);
+        assert_eq!(
+            app.transient_message,
+            Some("New day · Wednesday, 28 October".to_string())
+        );
+
+        // Today view starts empty
+        let today_count = app.todos.iter().filter(|t| t.created_date == day2).count();
+        assert_eq!(today_count, 0);
+
+        // Yesterday's task is present in history
+        let dates = app.dates_list();
+        assert!(dates.contains(&day1));
+        let yesterday_count = app.todos.iter().filter(|t| t.created_date == day1).count();
+        assert_eq!(yesterday_count, 1);
+    }
+
+    #[test]
+    fn test_rollover_while_in_history_selected_date_stays_the_same() {
+        let day1 = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let day2 = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let day3 = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Older task".to_string(),
+                created_date: day1,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 2,
+                text: "Yesterday task".to_string(),
+                created_date: day2,
+                done: false,
+                done_at: None,
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos, day2);
+        app.current_view = View::History;
+        app.history_pane = HistoryPane::Dates;
+
+        // Select day1 (which is at index 1 in [day2, day1])
+        let dates = app.dates_list();
+        assert_eq!(dates, vec![day2, day1]);
+        app.history_date_index = 1;
+        app.clamp_selections();
+        assert_eq!(app.selected_history_date, Some(day1));
+
+        // Midnight rollover to day3
+        assert!(app.tick(day3));
+        assert_eq!(app.today, day3);
+
+        // Dates are now [day3, day2, day1]
+        let new_dates = app.dates_list();
+        assert_eq!(new_dates, vec![day3, day2, day1]);
+
+        // The selected date is STILL day1, and history_date_index moved to 2
+        assert_eq!(app.selected_history_date, Some(day1));
+        assert_eq!(app.history_date_index, 2);
+        assert_eq!(new_dates[app.history_date_index], day1);
+    }
+
+    #[test]
+    fn test_rollover_while_prompt_is_open() {
+        let day1 = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let day2 = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+
+        let mut app = App::new_for_test_with_date(Vec::new(), day1);
+
+        // Open input prompt and type text
+        app.handle_key(key_press(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Adding);
+        for c in "Midnight task".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        assert_eq!(app.input_buffer, "Midnight task");
+
+        // Midnight strikes
+        assert!(app.tick(day2));
+        assert_eq!(app.today, day2);
+
+        // Input buffer and mode are preserved
+        assert_eq!(app.input_mode, InputMode::Adding);
+        assert_eq!(app.input_buffer, "Midnight task");
+
+        // Press Enter to submit task
+        assert!(!app.handle_key(key_press(KeyCode::Enter)));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.todos.len(), 1);
+
+        // Task created_date is the new today (day2)
+        assert_eq!(app.todos[0].text, "Midnight task");
+        assert_eq!(app.todos[0].created_date, day2);
+    }
+
+    #[test]
+    fn test_rollover_multi_day_jump_laptop_sleep() {
+        let day1 = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let day_after_sleep = NaiveDate::from_ymd_opt(2026, 11, 1).unwrap();
+
+        let todos = vec![Todo {
+            id: 1,
+            text: "Pre-sleep task".to_string(),
+            created_date: day1,
+            done: false,
+            done_at: None,
+        }];
+
+        let mut app = App::new_for_test_with_date(todos, day1);
+
+        // Multi-day jump
+        assert!(app.tick(day_after_sleep));
+        assert_eq!(app.today, day_after_sleep);
+        assert_eq!(
+            app.transient_message,
+            Some("New day · Sunday, 1 November".to_string())
+        );
+
+        // Today is empty
+        assert_eq!(
+            app.todos
+                .iter()
+                .filter(|t| t.created_date == day_after_sleep)
+                .count(),
+            0
+        );
+
+        // Old task is in history
+        assert_eq!(
+            app.todos.iter().filter(|t| t.created_date == day1).count(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_rollover_no_change_when_date_is_same() {
+        let day = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let mut app = App::new_for_test_with_date(Vec::new(), day);
+
+        // Same date tick
+        assert!(!app.tick(day));
+        assert_eq!(app.today, day);
+        assert_eq!(app.transient_message, None);
     }
 }
