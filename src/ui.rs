@@ -133,15 +133,29 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
     let total = today_todos.len();
     let done = today_todos.iter().filter(|t| t.done).count();
 
-    // Split: Title row (1) -> Spacing (1) -> List (Min 0)
-    let parts = Layout::default()
-        .direction(Direction::Vertical)
-        .constraints([
-            Constraint::Length(1), // Title row
-            Constraint::Length(1), // Blank line
-            Constraint::Min(0),    // Todos list
-        ])
-        .split(area);
+    let uncarried = app.uncarried_previous_tasks();
+    let has_uncarried = uncarried.is_some();
+
+    let parts = if has_uncarried {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Title row
+                Constraint::Length(1), // Carry over hint line
+                Constraint::Length(1), // Blank line
+                Constraint::Min(0),    // Todos list
+            ])
+            .split(area)
+    } else {
+        Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Title row
+                Constraint::Length(1), // Blank line
+                Constraint::Min(0),    // Todos list
+            ])
+            .split(area)
+    };
 
     // Friendly title row: "Friday, 23 October   3 of 5 done  ████░░░░░░"
     let date_str = today.format("%A, %-d %B").to_string();
@@ -165,6 +179,31 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
 
     frame.render_widget(Paragraph::new(Line::from(title_spans)), parts[0]);
 
+    if let Some((prev_date, ref ids)) = uncarried {
+        let count = ids.len();
+        let date_label = if prev_date == today.pred_opt().unwrap_or(today) {
+            "yesterday".to_string()
+        } else {
+            format_friendly_date(prev_date, today)
+        };
+        let hint_line = Line::from(vec![
+            Span::styled(
+                format!("{count} unfinished from {date_label}  ·  "),
+                Style::default().fg(THEME.dim),
+            ),
+            Span::styled(
+                "c",
+                Style::default()
+                    .fg(THEME.accent)
+                    .add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(" to carry over", Style::default().fg(THEME.dim)),
+        ]);
+        frame.render_widget(Paragraph::new(hint_line), parts[1]);
+    }
+
+    let list_area = if has_uncarried { parts[3] } else { parts[2] };
+
     // Empty state or task list
     if today_todos.is_empty() {
         let empty_text = Line::from(vec![
@@ -177,7 +216,7 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
             ),
             Span::styled(" to add your first one.", Style::default().fg(THEME.dim)),
         ]);
-        frame.render_widget(Paragraph::new(empty_text), parts[2]);
+        frame.render_widget(Paragraph::new(empty_text), list_area);
         return;
     }
 
@@ -186,14 +225,14 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
         .enumerate()
         .map(|(idx, todo)| {
             let is_selected = idx == app.today_selected_index;
-            format_todo_row(todo, is_selected, parts[2].width as usize)
+            format_todo_row(todo, is_selected, list_area.width as usize)
         })
         .collect();
 
     let list = List::new(items);
     let mut list_state = ListState::default();
     list_state.select(Some(app.today_selected_index));
-    frame.render_stateful_widget(list, parts[2], &mut list_state);
+    frame.render_stateful_widget(list, list_area, &mut list_state);
 }
 
 /// History view: Narrow Date column + thin vertical rule + Todo list for selected date

@@ -209,6 +209,52 @@ impl App {
         }
     }
 
+    pub fn uncarried_previous_tasks(&self) -> Option<(NaiveDate, Vec<u64>)> {
+        let today = Local::now().date_naive();
+        let prev_date = self
+            .todos
+            .iter()
+            .map(|t| t.created_date)
+            .filter(|&d| d < today)
+            .max()?;
+        let unfinished_ids: Vec<u64> = self
+            .todos
+            .iter()
+            .filter(|t| t.created_date == prev_date && !t.done)
+            .map(|t| t.id)
+            .collect();
+        if unfinished_ids.is_empty() {
+            None
+        } else {
+            Some((prev_date, unfinished_ids))
+        }
+    }
+
+    pub fn carry_over(&mut self) {
+        if let Some((_, ids)) = self.uncarried_previous_tasks() {
+            let today = Local::now().date_naive();
+            let count = ids.len();
+            self.mutate(|todos| {
+                let mut carried = Vec::new();
+                let mut i = 0;
+                while i < todos.len() {
+                    if ids.contains(&todos[i].id) {
+                        let mut t = todos.remove(i);
+                        t.created_date = today;
+                        carried.push(t);
+                    } else {
+                        i += 1;
+                    }
+                }
+                todos.extend(carried);
+            });
+            self.set_transient_message(format!(
+                "Carried over {count} unfinished task{} · u to undo",
+                if count == 1 { "" } else { "s" }
+            ));
+        }
+    }
+
     pub fn add_todo(&mut self, text: &str) {
         let clean_text = text.trim();
         if clean_text.is_empty() {
@@ -534,6 +580,9 @@ impl App {
             KeyCode::Char('e') => {
                 self.start_editing_today();
             }
+            KeyCode::Char('c') => {
+                self.carry_over();
+            }
             KeyCode::Char('d') | KeyCode::Delete => {
                 self.delete_today_todo();
             }
@@ -812,5 +861,98 @@ mod tests {
 
         app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
         assert_eq!(app.transient_message.as_deref(), Some("Nothing to redo"));
+    }
+
+    #[test]
+    fn test_carry_over_unfinished_tasks_moves_to_today() {
+        let today = Local::now().date_naive();
+        let yesterday = today.pred_opt().unwrap();
+
+        let y1 = Todo {
+            id: 1,
+            text: "Unfinished 1".to_string(),
+            created_date: yesterday,
+            done: false,
+            done_at: None,
+        };
+        let y2 = Todo {
+            id: 2,
+            text: "Finished".to_string(),
+            created_date: yesterday,
+            done: true,
+            done_at: Some(Local::now()),
+        };
+        let y3 = Todo {
+            id: 3,
+            text: "Unfinished 2".to_string(),
+            created_date: yesterday,
+            done: false,
+            done_at: None,
+        };
+        let t1 = Todo {
+            id: 4,
+            text: "Today task".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+
+        let mut app = App::new_for_test(vec![y1, y2, y3, t1]);
+
+        let uncarried = app.uncarried_previous_tasks();
+        assert!(uncarried.is_some());
+        let (p_date, ids) = uncarried.unwrap();
+        assert_eq!(p_date, yesterday);
+        assert_eq!(ids, vec![1, 3]);
+
+        // Press 'c' to carry over
+        app.handle_key(key_press(KeyCode::Char('c')));
+
+        // Carried tasks should now be in Today, appended after t1
+        let today_todos: Vec<&Todo> = app
+            .todos
+            .iter()
+            .filter(|t| t.created_date == today)
+            .collect();
+        assert_eq!(today_todos.len(), 3);
+        assert_eq!(today_todos[0].text, "Today task");
+        assert_eq!(today_todos[1].text, "Unfinished 1");
+        assert_eq!(today_todos[2].text, "Unfinished 2");
+
+        // Yesterday should now only have the completed task
+        let yesterday_todos: Vec<&Todo> = app
+            .todos
+            .iter()
+            .filter(|t| t.created_date == yesterday)
+            .collect();
+        assert_eq!(yesterday_todos.len(), 1);
+        assert_eq!(yesterday_todos[0].text, "Finished");
+
+        // Should not be offered again
+        assert!(app.uncarried_previous_tasks().is_none());
+
+        // Undo carry over
+        app.handle_key(key_press(KeyCode::Char('u')));
+        let yesterday_restored: Vec<&Todo> = app
+            .todos
+            .iter()
+            .filter(|t| t.created_date == yesterday)
+            .collect();
+        assert_eq!(yesterday_restored.len(), 3);
+    }
+
+    #[test]
+    fn test_carry_over_none_when_previous_day_all_done() {
+        let today = Local::now().date_naive();
+        let yesterday = today.pred_opt().unwrap();
+        let y_done = Todo {
+            id: 1,
+            text: "All done".to_string(),
+            created_date: yesterday,
+            done: true,
+            done_at: Some(Local::now()),
+        };
+        let app = App::new_for_test(vec![y_done]);
+        assert!(app.uncarried_previous_tasks().is_none());
     }
 }
