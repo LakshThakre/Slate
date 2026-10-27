@@ -8,6 +8,7 @@ pub struct Todo {
     #[serde(alias = "created_at", alias = "date")]
     pub created_date: NaiveDate,
     pub done: bool,
+    #[serde(default)]
     pub done_at: Option<DateTime<Local>>,
 }
 
@@ -27,4 +28,5 @@ pub enum HistoryPane {
 pub enum InputMode {
     Normal,
     Adding,
+    Editing(u64),
 }

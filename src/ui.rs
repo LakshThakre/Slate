@@ -66,8 +66,11 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         View::History => draw_history(app, frame, main_area),
     }
 
-    // 3. Draw Bottom Area (Inline prompt when adding, otherwise subtle key hints)
-    if app.input_mode == crate::model::InputMode::Adding {
+    // 3. Draw Bottom Area (Inline prompt when adding or editing, otherwise subtle key hints)
+    if matches!(
+        app.input_mode,
+        crate::model::InputMode::Adding | crate::model::InputMode::Editing(_)
+    ) {
         frame.render_widget(
             Paragraph::new("─".repeat(prompt_divider_area.width as usize))
                 .style(Style::default().fg(THEME.divider)),
@@ -149,7 +152,10 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
             Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
-        Span::styled(format!("{done} of {total} done"), Style::default().fg(THEME.dim)),
+        Span::styled(
+            format!("{done} of {total} done"),
+            Style::default().fg(THEME.dim),
+        ),
     ];
 
     if total > 0 {
@@ -221,8 +227,11 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
         .enumerate()
         .map(|(idx, &date)| {
             let is_selected = idx == app.history_date_index;
-            let date_todos: Vec<&Todo> =
-                app.todos.iter().filter(|t| t.created_date == date).collect();
+            let date_todos: Vec<&Todo> = app
+                .todos
+                .iter()
+                .filter(|t| t.created_date == date)
+                .collect();
             let total = date_todos.len();
             let done = date_todos.iter().filter(|t| t.done).count();
 
@@ -251,8 +260,6 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
 
             let date_style = if is_selected && is_date_pane_active {
                 Style::default().fg(THEME.text).add_modifier(Modifier::BOLD)
-            } else if is_selected {
-                Style::default().fg(THEME.text)
             } else {
                 Style::default().fg(THEME.text)
             };
@@ -285,8 +292,11 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
     // 3. Draw Right Todo Pane
     let selected_date = dates.get(app.history_date_index).copied();
     if let Some(date) = selected_date {
-        let date_todos: Vec<&Todo> =
-            app.todos.iter().filter(|t| t.created_date == date).collect();
+        let date_todos: Vec<&Todo> = app
+            .todos
+            .iter()
+            .filter(|t| t.created_date == date)
+            .collect();
         let total = date_todos.len();
         let done = date_todos.iter().filter(|t| t.done).count();
 
@@ -307,7 +317,10 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
                 Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
             ),
             Span::styled("   •   ", Style::default().fg(THEME.dim)),
-            Span::styled(format!("{done} of {total} done"), Style::default().fg(THEME.dim)),
+            Span::styled(
+                format!("{done} of {total} done"),
+                Style::default().fg(THEME.dim),
+            ),
         ]);
         frame.render_widget(Paragraph::new(heading_line), right_rows[0]);
 
@@ -355,8 +368,13 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
 
 /// Single line modern prompt at the bottom: "› Text typed...       enter save · esc cancel"
 fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
+    let prompt_label = match app.input_mode {
+        crate::model::InputMode::Editing(_) => "› Edit task ",
+        _ => "› ",
+    };
+
     let prompt_symbol = Span::styled(
-        "› ",
+        prompt_label,
         Style::default()
             .fg(THEME.accent)
             .add_modifier(Modifier::BOLD),
@@ -364,9 +382,10 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
 
     let hints = "enter save  ·  esc cancel";
     let hints_len = hints.chars().count();
+    let prompt_len = prompt_label.chars().count();
 
     // Calculate available text width between prompt symbol and right hints
-    let available_for_text = (area.width as usize).saturating_sub(3 + hints_len + 3);
+    let available_for_text = (area.width as usize).saturating_sub(prompt_len + hints_len + 3);
 
     let chars: Vec<char> = app.input_buffer.chars().collect();
     let visible_start = if app.cursor_position >= available_for_text && available_for_text > 0 {
@@ -384,16 +403,21 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     let mut spans = vec![prompt_symbol];
 
     if app.input_buffer.is_empty() {
-        spans.push(Span::styled(
-            "What needs doing today?",
-            Style::default().fg(THEME.dim),
-        ));
-        let placeholder_len = 23;
-        let pad = (area.width as usize).saturating_sub(3 + placeholder_len + hints_len);
+        let placeholder = match app.input_mode {
+            crate::model::InputMode::Editing(_) => "",
+            _ => "What needs doing today?",
+        };
+        spans.push(Span::styled(placeholder, Style::default().fg(THEME.dim)));
+        let placeholder_len = placeholder.chars().count();
+        let pad = (area.width as usize).saturating_sub(prompt_len + placeholder_len + hints_len);
         spans.push(Span::raw(" ".repeat(pad)));
     } else {
-        spans.push(Span::styled(&visible_input, Style::default().fg(THEME.text)));
-        let pad = (area.width as usize).saturating_sub(3 + visible_input.chars().count() + hints_len);
+        spans.push(Span::styled(
+            &visible_input,
+            Style::default().fg(THEME.text),
+        ));
+        let pad = (area.width as usize)
+            .saturating_sub(prompt_len + visible_input.chars().count() + hints_len);
         spans.push(Span::raw(" ".repeat(pad)));
     }
 
@@ -403,7 +427,7 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
 
     // Position the cursor right after prompt / typed character
     let cursor_offset = (app.cursor_position.saturating_sub(visible_start)) as u16;
-    let cursor_x = (area.x + 2 + cursor_offset).min(area.right().saturating_sub(1));
+    let cursor_x = (area.x + prompt_len as u16 + cursor_offset).min(area.right().saturating_sub(1));
     let cursor_y = area.y;
     frame.set_cursor_position(Position::new(cursor_x, cursor_y));
 }
@@ -414,11 +438,19 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         let error_line = Line::from(vec![
             Span::styled(
                 "save error: ",
-                Style::default().fg(THEME.error).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(THEME.error)
+                    .add_modifier(Modifier::BOLD),
             ),
             Span::styled(err, Style::default().fg(THEME.error)),
         ]);
         frame.render_widget(Paragraph::new(error_line), area);
+        return;
+    }
+
+    if let Some(ref msg) = app.transient_message {
+        let msg_line = Line::from(vec![Span::styled(msg, Style::default().fg(THEME.subtext))]);
+        frame.render_widget(Paragraph::new(msg_line), area);
         return;
     }
 
@@ -462,11 +494,7 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn format_todo_row(
-    todo: &Todo,
-    is_selected: bool,
-    max_width: usize,
-) -> ListItem<'static> {
+fn format_todo_row(todo: &Todo, is_selected: bool, max_width: usize) -> ListItem<'static> {
     let marker = if is_selected {
         Span::styled(
             "› ",
@@ -554,12 +582,7 @@ fn format_todo_row_history(
 
     let pad_len = max_width.saturating_sub(4 + text_truncated.chars().count() + suffix_len);
 
-    let mut spans = vec![
-        marker,
-        checkbox,
-        text_span,
-        Span::raw(" ".repeat(pad_len)),
-    ];
+    let mut spans = vec![marker, checkbox, text_span, Span::raw(" ".repeat(pad_len))];
 
     if !suffix_str.is_empty() {
         spans.push(Span::styled(suffix_str, Style::default().fg(THEME.dim)));
@@ -596,7 +619,10 @@ fn truncate_text(text: &str, max_len: usize) -> String {
 /// Renders a quiet slim progress bar using block characters
 fn render_progress_blocks(done: usize, total: usize, bar_width: usize) -> Vec<Span<'static>> {
     if total == 0 {
-        return vec![Span::styled("─".repeat(bar_width), Style::default().fg(THEME.dim))];
+        return vec![Span::styled(
+            "─".repeat(bar_width),
+            Style::default().fg(THEME.dim),
+        )];
     }
     let filled = ((done as f64 / total as f64) * bar_width as f64).round() as usize;
     let filled = filled.min(bar_width);

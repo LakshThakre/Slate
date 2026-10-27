@@ -17,6 +17,10 @@ pub struct App {
     pub history_date_index: usize,
     pub history_todo_index: usize,
     pub status_message: Option<String>,
+    pub undo_stack: Vec<Vec<Todo>>,
+    pub redo_stack: Vec<Vec<Todo>>,
+    pub transient_message: Option<String>,
+    pub auto_save: bool,
 }
 
 impl App {
@@ -37,13 +41,42 @@ impl App {
             history_date_index: 0,
             history_todo_index: 0,
             status_message,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            transient_message: None,
+            auto_save: true,
         };
 
         app.clamp_selections();
         app
     }
 
+    #[cfg(test)]
+    pub fn new_for_test(todos: Vec<Todo>) -> Self {
+        let mut app = Self {
+            todos,
+            current_view: View::Today,
+            history_pane: HistoryPane::Dates,
+            input_mode: InputMode::Normal,
+            input_buffer: String::new(),
+            cursor_position: 0,
+            today_selected_index: 0,
+            history_date_index: 0,
+            history_todo_index: 0,
+            status_message: None,
+            undo_stack: Vec::new(),
+            redo_stack: Vec::new(),
+            transient_message: None,
+            auto_save: false,
+        };
+        app.clamp_selections();
+        app
+    }
+
     pub fn save(&mut self) {
+        if !self.auto_save {
+            return;
+        }
         if let Err(e) = save_todos(&self.todos) {
             self.status_message = Some(format!("Save error: {e}"));
         } else if let Some(ref msg) = self.status_message {
@@ -98,6 +131,54 @@ impl App {
         }
     }
 
+    pub fn set_transient_message(&mut self, msg: impl Into<String>) {
+        self.transient_message = Some(msg.into());
+    }
+
+    pub fn mutate<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut Vec<Todo>),
+    {
+        self.undo_stack.push(self.todos.clone());
+        if self.undo_stack.len() > 50 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+        f(&mut self.todos);
+        self.save();
+        self.clamp_selections();
+    }
+
+    pub fn start_editing_today(&mut self) {
+        let today = Local::now().date_naive();
+        let today_todos: Vec<&Todo> = self
+            .todos
+            .iter()
+            .filter(|t| t.created_date == today)
+            .collect();
+        if let Some(todo) = today_todos.get(self.today_selected_index) {
+            self.input_mode = InputMode::Editing(todo.id);
+            self.input_buffer = todo.text.clone();
+            self.cursor_position = self.input_buffer.chars().count();
+        }
+    }
+
+    pub fn start_editing_history(&mut self) {
+        let dates = self.dates_list();
+        if let Some(&selected_date) = dates.get(self.history_date_index) {
+            let date_todos: Vec<&Todo> = self
+                .todos
+                .iter()
+                .filter(|t| t.created_date == selected_date)
+                .collect();
+            if let Some(todo) = date_todos.get(self.history_todo_index) {
+                self.input_mode = InputMode::Editing(todo.id);
+                self.input_buffer = todo.text.clone();
+                self.cursor_position = self.input_buffer.chars().count();
+            }
+        }
+    }
+
     pub fn add_todo(&mut self, text: &str) {
         let clean_text = text.trim();
         if clean_text.is_empty() {
@@ -114,8 +195,9 @@ impl App {
             done_at: None,
         };
 
-        self.todos.push(new_todo);
-        self.save();
+        self.mutate(|todos| {
+            todos.push(new_todo);
+        });
 
         // Selection lands on the newly added todo
         let today_count = self
@@ -137,11 +219,12 @@ impl App {
             .collect();
 
         if let Some(&target_id) = today_ids.get(self.today_selected_index) {
-            if let Some(todo) = self.todos.iter_mut().find(|t| t.id == target_id) {
-                todo.done = !todo.done;
-                todo.done_at = if todo.done { Some(Local::now()) } else { None };
-            }
-            self.save();
+            self.mutate(|todos| {
+                if let Some(todo) = todos.iter_mut().find(|t| t.id == target_id) {
+                    todo.done = !todo.done;
+                    todo.done_at = if todo.done { Some(Local::now()) } else { None };
+                }
+            });
         }
     }
 
@@ -155,9 +238,20 @@ impl App {
             .collect();
 
         if let Some(&target_id) = today_ids.get(self.today_selected_index) {
-            self.todos.retain(|t| t.id != target_id);
-            self.save();
-            self.clamp_selections();
+            let task_text = self
+                .todos
+                .iter()
+                .find(|t| t.id == target_id)
+                .map(|t| t.text.clone());
+            self.mutate(|todos| {
+                todos.retain(|t| t.id != target_id);
+            });
+            if let Some(text) = task_text {
+                self.set_transient_message(format!(
+                    "Deleted \"{}\" · u to undo",
+                    truncate_str(&text, 24)
+                ));
+            }
         }
     }
 
@@ -172,11 +266,12 @@ impl App {
                 .collect();
 
             if let Some(&target_id) = date_ids.get(self.history_todo_index) {
-                if let Some(todo) = self.todos.iter_mut().find(|t| t.id == target_id) {
-                    todo.done = !todo.done;
-                    todo.done_at = if todo.done { Some(Local::now()) } else { None };
-                }
-                self.save();
+                self.mutate(|todos| {
+                    if let Some(todo) = todos.iter_mut().find(|t| t.id == target_id) {
+                        todo.done = !todo.done;
+                        todo.done_at = if todo.done { Some(Local::now()) } else { None };
+                    }
+                });
             }
         }
     }
@@ -192,17 +287,30 @@ impl App {
                 .collect();
 
             if let Some(&target_id) = date_ids.get(self.history_todo_index) {
-                self.todos.retain(|t| t.id != target_id);
-                self.save();
-                self.clamp_selections();
+                let task_text = self
+                    .todos
+                    .iter()
+                    .find(|t| t.id == target_id)
+                    .map(|t| t.text.clone());
+                self.mutate(|todos| {
+                    todos.retain(|t| t.id != target_id);
+                });
+                if let Some(text) = task_text {
+                    self.set_transient_message(format!(
+                        "Deleted \"{}\" · u to undo",
+                        truncate_str(&text, 24)
+                    ));
+                }
             }
         }
     }
 
     /// Handles a key event. Returns true if the app should exit.
     pub fn handle_key(&mut self, key: KeyEvent) -> bool {
+        self.transient_message = None;
         match self.input_mode {
             InputMode::Adding => self.handle_adding_key(key),
+            InputMode::Editing(id) => self.handle_editing_key(id, key),
             InputMode::Normal => self.handle_normal_key(key),
         }
     }
@@ -220,6 +328,77 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.add_todo(&text);
+            }
+            KeyCode::Left => {
+                self.cursor_position = self.cursor_position.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_len = self.input_buffer.chars().count();
+                if self.cursor_position < char_len {
+                    self.cursor_position += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor_position = 0;
+            }
+            KeyCode::End => {
+                self.cursor_position = self.input_buffer.chars().count();
+            }
+            KeyCode::Backspace => {
+                if self.cursor_position > 0 {
+                    let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                    chars.remove(self.cursor_position - 1);
+                    self.input_buffer = chars.into_iter().collect();
+                    self.cursor_position -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                if self.cursor_position < chars.len() {
+                    chars.remove(self.cursor_position);
+                    self.input_buffer = chars.into_iter().collect();
+                }
+            }
+            KeyCode::Char(c) => {
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                chars.insert(self.cursor_position, c);
+                self.input_buffer = chars.into_iter().collect();
+                self.cursor_position += 1;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_editing_key(&mut self, target_id: u64, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+            }
+            KeyCode::Enter => {
+                let clean_text = self.input_buffer.trim().to_string();
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                if !clean_text.is_empty() {
+                    let old_text = self
+                        .todos
+                        .iter()
+                        .find(|t| t.id == target_id)
+                        .map(|t| t.text.clone());
+                    if let Some(old) = old_text {
+                        if old != clean_text {
+                            self.mutate(|todos| {
+                                if let Some(todo) = todos.iter_mut().find(|t| t.id == target_id) {
+                                    todo.text = clean_text;
+                                }
+                            });
+                            self.set_transient_message("Edited task · u to undo");
+                        }
+                    }
+                }
             }
             KeyCode::Left => {
                 self.cursor_position = self.cursor_position.saturating_sub(1);
@@ -306,6 +485,9 @@ impl App {
             KeyCode::Char(' ') | KeyCode::Enter => {
                 self.toggle_today_todo();
             }
+            KeyCode::Char('e') => {
+                self.start_editing_today();
+            }
             KeyCode::Char('d') | KeyCode::Delete => {
                 self.delete_today_todo();
             }
@@ -362,6 +544,9 @@ impl App {
                     KeyCode::Char(' ') | KeyCode::Enter => {
                         self.toggle_history_todo();
                     }
+                    KeyCode::Char('e') => {
+                        self.start_editing_history();
+                    }
                     KeyCode::Char('d') | KeyCode::Delete => {
                         self.delete_history_todo();
                     }
@@ -369,5 +554,141 @@ impl App {
                 }
             }
         }
+    }
+}
+
+fn truncate_str(text: &str, max_len: usize) -> String {
+    let char_count = text.chars().count();
+    if char_count <= max_len || max_len == 0 {
+        return text.to_string();
+    }
+    if max_len <= 1 {
+        return "…".to_string();
+    }
+    let take_count = max_len - 1;
+    let truncated: String = text.chars().take(take_count).collect();
+    format!("{truncated}…")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use ratatui::crossterm::event::KeyModifiers;
+
+    fn key_press(code: KeyCode) -> KeyEvent {
+        KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    #[test]
+    fn test_edit_task_today_saves_new_text() {
+        let today = Local::now().date_naive();
+        let todo1 = Todo {
+            id: 1,
+            text: "Initial text".to_string(),
+            created_date: today,
+            done: true,
+            done_at: Some(Local::now()),
+        };
+        let todo2 = Todo {
+            id: 2,
+            text: "Second task".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+        let mut app = App::new_for_test(vec![todo1.clone(), todo2.clone()]);
+        app.today_selected_index = 0;
+
+        // Press 'e' to start editing
+        app.handle_key(key_press(KeyCode::Char('e')));
+        assert_eq!(app.input_mode, InputMode::Editing(1));
+        assert_eq!(app.input_buffer, "Initial text");
+        assert_eq!(app.cursor_position, "Initial text".chars().count());
+
+        // Replace text in buffer
+        app.input_buffer = "Updated text".to_string();
+        app.cursor_position = app.input_buffer.chars().count();
+
+        // Press Enter to save
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.todos[0].text, "Updated text");
+        // State, timestamp, and position are preserved
+        assert_eq!(app.todos[0].id, 1);
+        assert_eq!(app.todos[0].done, todo1.done);
+        assert_eq!(app.todos[0].done_at, todo1.done_at);
+        assert_eq!(app.todos[0].created_date, todo1.created_date);
+        assert_eq!(app.todos[1].text, "Second task");
+    }
+
+    #[test]
+    fn test_edit_task_empty_text_keeps_old() {
+        let today = Local::now().date_naive();
+        let todo = Todo {
+            id: 10,
+            text: "Original text".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+        let mut app = App::new_for_test(vec![todo]);
+        app.handle_key(key_press(KeyCode::Char('e')));
+        assert_eq!(app.input_mode, InputMode::Editing(10));
+
+        // Set to empty text
+        app.input_buffer = "   ".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.todos[0].text, "Original text");
+        assert_eq!(app.todos.len(), 1);
+    }
+
+    #[test]
+    fn test_edit_task_cancel_with_esc() {
+        let today = Local::now().date_naive();
+        let todo = Todo {
+            id: 15,
+            text: "Unchanged".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        };
+        let mut app = App::new_for_test(vec![todo]);
+        app.handle_key(key_press(KeyCode::Char('e')));
+        app.input_buffer = "Typing something else".to_string();
+
+        app.handle_key(key_press(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.todos[0].text, "Unchanged");
+    }
+
+    #[test]
+    fn test_edit_task_history() {
+        let yesterday = Local::now().date_naive().pred_opt().unwrap();
+        let todo = Todo {
+            id: 20,
+            text: "Past task".to_string(),
+            created_date: yesterday,
+            done: false,
+            done_at: None,
+        };
+        let mut app = App::new_for_test(vec![todo]);
+        app.current_view = View::History;
+        app.history_pane = HistoryPane::Todos;
+        let dates = app.dates_list();
+        let date_idx = dates.iter().position(|&d| d == yesterday).unwrap();
+        app.history_date_index = date_idx;
+        app.history_todo_index = 0;
+
+        app.handle_key(key_press(KeyCode::Char('e')));
+        assert_eq!(app.input_mode, InputMode::Editing(20));
+        assert_eq!(app.input_buffer, "Past task");
+
+        app.input_buffer = "Edited past task".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.todos[0].text, "Edited past task");
+        assert_eq!(app.todos[0].created_date, yesterday);
     }
 }
