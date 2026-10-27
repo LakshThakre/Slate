@@ -183,6 +183,19 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
         title_spans.extend(render_progress_blocks(done, total, bar_width));
     }
 
+    let overdue_count = app
+        .todos
+        .iter()
+        .filter(|t| t.created_date < today && !t.done)
+        .count();
+    if overdue_count > 0 {
+        title_spans.push(Span::raw("    "));
+        title_spans.push(Span::styled(
+            format!("{overdue_count} overdue"),
+            Style::default().fg(THEME.warn),
+        ));
+    }
+
     frame.render_widget(Paragraph::new(Line::from(title_spans)), parts[0]);
 
     if let Some((prev_date, ref ids)) = uncarried {
@@ -279,6 +292,7 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
                 .collect();
             let total = date_todos.len();
             let done = date_todos.iter().filter(|t| t.done).count();
+            let is_overdue = date < today && done < total;
 
             let marker = if is_selected {
                 if is_date_pane_active {
@@ -309,11 +323,17 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
                 Style::default().fg(THEME.text)
             };
 
+            let count_style = if is_overdue {
+                Style::default().fg(THEME.warn)
+            } else {
+                Style::default().fg(THEME.dim)
+            };
+
             let line = Line::from(vec![
                 marker,
                 Span::styled(date_truncated, date_style),
                 Span::raw(" ".repeat(pad_spaces)),
-                Span::styled(count_str, Style::default().fg(THEME.dim)),
+                Span::styled(count_str, count_style),
             ]);
 
             ListItem::new(line)
@@ -378,12 +398,14 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
                 right_rows[2],
             );
         } else {
+            let is_date_overdue = date < today;
             let items: Vec<ListItem> = date_todos
                 .iter()
                 .enumerate()
                 .map(|(idx, todo)| {
                     let is_selected = idx == app.history_todo_index;
                     let active_marker = is_selected && is_todo_pane_active;
+                    let is_todo_overdue = is_date_overdue && !todo.done;
                     let time_str = if todo.done {
                         match todo.done_at {
                             Some(dt) => Some(format!("done {}", dt.format("%H:%M"))),
@@ -397,6 +419,7 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
                         todo,
                         is_selected,
                         active_marker,
+                        is_todo_overdue,
                         right_rows[2].width as usize,
                         time_str.as_deref(),
                     )
@@ -577,6 +600,7 @@ fn format_todo_row_history(
     todo: &Todo,
     is_selected: bool,
     is_active: bool,
+    is_overdue: bool,
     max_width: usize,
     time_str: Option<&str>,
 ) -> ListItem<'static> {
@@ -597,6 +621,8 @@ fn format_todo_row_history(
 
     let checkbox = if todo.done {
         Span::styled("✓ ", Style::default().fg(THEME.accent))
+    } else if is_overdue {
+        Span::styled("! ", Style::default().fg(THEME.warn))
     } else {
         Span::styled("○ ", Style::default().fg(THEME.dim))
     };
@@ -842,5 +868,51 @@ mod tests {
             app.show_help = true;
             terminal.draw(|f| render(&mut app, f)).unwrap();
         }
+    }
+
+    #[test]
+    fn test_render_overdue_marker() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let yesterday = Local::now().date_naive().pred_opt().unwrap();
+        let mut app = App::new_for_test(vec![Todo {
+            id: 1,
+            text: "Overdue old task".to_string(),
+            created_date: yesterday,
+            done: false,
+            done_at: None,
+        }]);
+
+        // In Today view, header should show "1 overdue"
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains("1 overdue"));
+
+        // Switch to History view and select yesterday
+        app.current_view = View::History;
+        app.history_pane = HistoryPane::Todos;
+        let dates = app.dates_list();
+        app.history_date_index = dates.iter().position(|&d| d == yesterday).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        let buffer = terminal.backend().buffer();
+        let content_history: String = buffer.content().iter().map(|c| c.symbol()).collect();
+        assert!(content_history.contains("Overdue old task"));
+        // The overdue marker '!' should be rendered
+        assert!(content_history.contains('!'));
+
+        // Verify that the '!' cell has fg color THEME.warn
+        let has_warn_cell = buffer
+            .content()
+            .iter()
+            .any(|c| c.symbol() == "!" && c.fg == THEME.warn);
+        assert!(has_warn_cell);
     }
 }

@@ -14,6 +14,7 @@ pub struct Theme {
     pub subtext: Color,
     pub divider: Color,
     pub error: Color,
+    pub warn: Color,
 }
 
 pub const THEME: Theme = Theme {
@@ -23,4 +24,5 @@ pub const THEME: Theme = Theme {
     subtext: Color::Gray,             // Slightly brighter for key labels
     divider: Color::DarkGray,         // Light subtle rules
     error: Color::LightRed,           // Non-intrusive warning/error
+    warn: Color::Rgb(228, 140, 75),   // Soft orange / warning for overdue
 };
