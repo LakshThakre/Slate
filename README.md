@@ -11,11 +11,20 @@ Slate is designed in the spirit of modern, quiet developer tools like Claude Cod
 - **Quiet, Minimal Interface**: Clean layout without heavy box borders, using a soft teal accent and breathable spacing.
 - **Cross-Platform**: Works smoothly across Linux, macOS, and Windows.
 - **Today & History Views**:
-  - **Today View**: See today's tasks with a friendly weekday header and a slim block progress bar (`████░░░░░░`).
-  - **History View**: Browse past days by date (`Today`, `Yesterday`, `Mon 19 Oct`) with task counts and completion timestamps (`done 14:32`).
+  - **Today View**: See today's tasks with a friendly weekday header and a slim block progress bar (`████░░░░░░`). Shows subtle overdue and carry-over indicators.
+  - **History View**: Browse past days by date (`Today`, `Yesterday`, `Mon 19 Oct`) with task counts, completion timestamps (`done 14:32`), and overdue indicators.
+- **Task Text Editing (`e`)**: Edit tasks in Today and History views with an inline prompt pre-filled with existing text.
+- **Full Undo / Redo (`u`, `Ctrl+r`)**: In-memory snapshot stack (up to 50 operations) supporting all mutations (add, edit, toggle, delete, reorder, clear completed, carry over, move) with transient status feedback.
+- **Carry Over Unfinished Tasks (`c`)**: Subtle hint line on startup or rollover showing unfinished tasks from previous days with one-key carry-over into Today.
+- **Task Reordering (`J` / `K`)**: Move tasks up or down within the same day with `Shift+j` / `Shift+k`.
+- **Clear Completed (`D` / `Shift+d`)**: Clear all completed tasks for today or the selected historical date in a single action.
+- **Jump Navigation (`g`, `G`, `Ctrl+d`, `Ctrl+u`)**: Quick jumps to the top, bottom, or half-page scroll in any focused list.
+- **Help Overlay (`?`)**: Minimal, non-intrusive modal overlay displaying all grouped keybindings.
+- **Overdue Indicators**: Past days with unfinished tasks are highlighted with warm warning markers in History and a badge in the Today header.
+- **Move Tasks Between Days (`m`)**: Move historical tasks directly into Today with completion reset to unfinished.
 - **Prompt-Style Input**: Tap `a` to open a modern inline CLI prompt right at the bottom of the screen (`› What needs doing today?`).
 - **Crash-Proof Atomic Storage**: Saves automatically after every change using a safe write-to-temp-and-rename pattern, preventing file corruption.
-- **Single Plain-JSON Storage**: Stores tasks in your operating system's standard application data directory as human-readable JSON.
+- **Single Plain-JSON Storage**: Stores tasks in your operating system's standard application data directory as human-readable JSON. Old files load seamlessly.
 - **Lightweight & Fast**: Sub-millisecond startup time, negligible memory footprint, and low CPU usage.
 
 ---
@@ -27,16 +36,16 @@ Slate is designed in the spirit of modern, quiet developer tools like Claude Cod
   Slate    Today   History
   ──────────────────────────────────────────────────────────────────────────
 
-  Friday, 23 October    2 of 3 done  ██████░░░░
+  Friday, 23 October    2 of 3 done  ██████░░░░    1 overdue
 
   › ○ Review project architecture
     ✓ Buy fresh bread
     ✓ Read Rust documentation
 
-  a add  ·  space done  ·  d delete  ·  tab history  ·  q quit
+  a add  ·  space done  ·  tab history  ·  ? help  ·  q quit
 ```
 
-### Inline Prompt (while typing `a`)
+### Inline Prompt (while typing `a` or `e`)
 ```text
   Slate    Today   History
   ──────────────────────────────────────────────────────────────────────────
@@ -57,12 +66,12 @@ Slate is designed in the spirit of modern, quiet developer tools like Claude Cod
   ──────────────────────────────────────────────────────────────────────────
 
   › Today           2/3 │  Friday, 23 October   •   2 of 3 done
-    Yesterday       4/4 │
-    Wed 21 Oct      1/2 │  › ○ Review project architecture
+    Yesterday       1/2 │
+    Wed 21 Oct      1/2 │  › ! Review project architecture
                         │    ✓ Buy fresh bread                    done 11:53
                         │    ✓ Read Rust documentation            done 12:10
 
-  enter/l todos  ·  j/k navigate  ·  a add  ·  tab today  ·  q quit
+  h dates  ·  space done  ·  tab today  ·  ? help  ·  q quit
 ```
 
 ---
@@ -175,31 +184,52 @@ slate
 | Key | Action |
 | :--- | :--- |
 | `Tab` / `Shift+Tab` | Toggle between **Today** and **History** views |
-| `q` | Quit Slate |
-| `a` | Add a new task (opens the inline prompt) |
+| `?` | Toggle help overlay (`Esc`, `?`, or `q` to close) |
+| `u` | Undo last action |
+| `Ctrl+r` | Redo undone action |
+| `g` | Jump to first item in focused list |
+| `G` | Jump to last item in focused list |
+| `Ctrl+d` | Move half a page down |
+| `Ctrl+u` | Move half a page up |
+| `q` | Quit Slate (closes help overlay first if open) |
 
 ### Today View
 | Key | Action |
 | :--- | :--- |
+| `a` | Add new task (opens inline prompt) |
+| `e` | Edit selected task text |
+| `Space` / `Enter` | Toggle task completion (`○` ↔ `✓`) |
 | `j` / `↓` | Move selection down |
 | `k` / `↑` | Move selection up |
-| `Space` / `Enter` | Toggle task completion (`○` ↔ `✓`) |
-| `d` / `Delete` | Delete the selected task |
+| `J` / `Shift+j` | Move selected task down one position |
+| `K` / `Shift+k` | Move selected task up one position |
+| `d` / `Delete` | Delete selected task |
+| `D` / `Shift+d` | Clear all completed tasks for today |
+| `c` | Carry over unfinished tasks from previous day |
+| `m` | Move task to Today (notifies "Already in Today") |
 
 ### History View
-| Key | Action |
-| :--- | :--- |
-| `j` / `↓` | Move selection down |
-| `k` / `↑` | Move selection up |
-| `Enter` / `l` / `→` | Switch focus from Dates column to Tasks column |
-| `h` / `←` | Switch focus from Tasks column back to Dates column |
-| `Space` / `Enter` | Toggle task completion (in Tasks column) |
-| `d` / `Delete` | Delete task (in Tasks column) |
+| Column | Key | Action |
+| :--- | :--- | :--- |
+| **Dates** | `j` / `↓` | Move selection down |
+| **Dates** | `k` / `↑` | Move selection up |
+| **Dates** | `Enter` / `l` / `→` | Switch focus to Tasks column |
+| **Dates** | `D` / `Shift+d` | Clear all completed tasks for selected date |
+| **Tasks** | `h` / `←` | Switch focus back to Dates column |
+| **Tasks** | `j` / `↓` | Move selection down |
+| **Tasks** | `k` / `↑` | Move selection up |
+| **Tasks** | `J` / `Shift+j` | Move selected task down one position |
+| **Tasks** | `K` / `Shift+k` | Move selected task up one position |
+| **Tasks** | `Space` / `Enter` | Toggle task completion |
+| **Tasks** | `e` | Edit selected task text |
+| **Tasks** | `m` | Move selected task to Today (resets to unfinished) |
+| **Tasks** | `d` / `Delete` | Delete selected task |
+| **Tasks** | `D` / `Shift+d` | Clear all completed tasks for selected date |
 
-### Inline Input Prompt (Adding Mode)
+### Inline Input Prompt (Add / Edit Mode)
 | Key | Action |
 | :--- | :--- |
-| `Enter` | Save task and return to Normal mode |
+| `Enter` | Save task text and return to Normal mode |
 | `Esc` | Cancel input and return to Normal mode |
 | `Backspace` / `Del` | Delete characters |
 | `←` / `→` | Move text cursor |
@@ -214,55 +244,51 @@ Slate is organized into small, focused modules under `src/`:
 ```text
 src/
 ├── main.rs      # Application lifecycle, panic hook, terminal initialization, event loop
-├── app.rs       # App state struct, task mutations, selection clamping, and key handlers
+├── app.rs       # App state struct, task mutations, undo/redo stack, and key handlers
 ├── model.rs     # Data models (Todo, View, HistoryPane, InputMode)
-├── storage.rs   # Atomic file loading and saving
+├── storage.rs   # Atomic file loading and saving, backward compatibility
 ├── theme.rs     # Theme struct and color palette configuration
-└── ui.rs        # Ratatui layout rendering and visual component drawing helpers
+└── ui.rs        # Ratatui layout rendering, help overlay, and component drawing helpers
 ```
 
 ### Module Responsibilities
 
-1. **[`src/theme.rs`](file:///home/laksh/Projects/Todo/src/theme.rs)**:
-   Defines the `THEME` palette. You can customize the accent color (e.g. from Soft Teal to Soft Orange or Soft Lavender) in a single line.
-2. **[`src/model.rs`](file:///home/laksh/Projects/Todo/src/model.rs)**:
-   Declares the core `Todo` struct along with `View`, `HistoryPane`, and `InputMode` enums.
-3. **[`src/storage.rs`](file:///home/laksh/Projects/Todo/src/storage.rs)**:
-   Resolves the standard storage path for each OS, deserializes JSON on load, and performs safe atomic saves by writing to a hidden temporary file before renaming.
-4. **[`src/app.rs`](file:///home/laksh/Projects/Todo/src/app.rs)**:
-   Maintains application memory, implements task manipulation (`add_todo`, `toggle_*`, `delete_*`), bounds-checked selection clamping (`clamp_selections`), and keyboard routing.
-5. **[`src/ui.rs`](file:///home/laksh/Projects/Todo/src/ui.rs)**:
+1. **[`src/theme.rs`](src/theme.rs)**:
+   Defines the `THEME` palette with restrained tones: teal `accent`, soft orange `warn` for overdue states, light red `error`, and subtle dividers.
+2. **[`src/model.rs`](src/model.rs)**:
+   Declares the core `Todo` struct (with serde defaults for full backward compatibility) along with `View`, `HistoryPane`, and `InputMode` enums.
+3. **[`src/storage.rs`](src/storage.rs)**:
+   Resolves the standard storage path for each OS, deserializes legacy and modern JSON formats seamlessly, and performs safe atomic saves by writing to a hidden temporary file before renaming.
+4. **[`src/app.rs`](src/app.rs)**:
+   Maintains application memory, implements the centralized snapshot-based mutation engine (`mutate`) powering instant undo/redo, manages selection clamping, and routes keyboard events.
+5. **[`src/ui.rs`](src/ui.rs)**:
    Handles all screen painting with dedicated helpers:
-   - `draw_header`: Top brand title and navigation tabs.
-   - `draw_today`: Title row, block progress bar, and today's task rows.
-   - `draw_history`: Narrow date column, vertical line rule (`│`), and date task pane with completion timestamps.
-   - `draw_input`: Prompt line with cursor placement.
-   - `draw_footer`: Context-aware key hints.
-6. **[`src/main.rs`](file:///home/laksh/Projects/Todo/src/main.rs)**:
+   - `draw_header`: Top brand title, navigation tabs, and overdue counter.
+   - `draw_today`: Title row, block progress bar, carry-over hint, and today's task rows.
+   - `draw_history`: Responsive date column, vertical line rule (`│`), and date task pane with completion timestamps and overdue markers.
+   - `draw_help`: Minimal centered overlay displaying grouped keyboard shortcuts.
+   - `draw_input`: Prompt line with cursor placement for adding and editing.
+   - `draw_footer`: Compact context-aware key hints and transient status messages.
+6. **[`src/main.rs`](src/main.rs)**:
    Lightweight orchestrator that initializes the terminal in raw mode, installs a panic hook for safe recovery, runs the waiter-style event loop, and restores the terminal on exit.
 
 ---
 
 ## Theming & Customization
 
-To change the accent color, open [`src/theme.rs`](file:///home/laksh/Projects/Todo/src/theme.rs) and edit the `accent` field:
+To change colors, open [`src/theme.rs`](src/theme.rs) and edit the `THEME` constant:
 
 ```rust
 pub const THEME: Theme = Theme {
     // Soft Teal (Default):
     accent: Color::Rgb(78, 186, 175),
 
-    // Or try Soft Orange:
-    // accent: Color::Rgb(228, 140, 75),
-
-    // Or try Soft Lavender:
-    // accent: Color::Rgb(180, 140, 220),
-
     text: Color::Reset,
     dim: Color::DarkGray,
     subtext: Color::Gray,
     divider: Color::DarkGray,
     error: Color::LightRed,
+    warn: Color::Rgb(228, 140, 75), // Soft orange warning for overdue
 };
 ```
 
