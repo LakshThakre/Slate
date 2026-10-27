@@ -20,6 +20,7 @@ pub struct App {
     pub undo_stack: Vec<Vec<Todo>>,
     pub redo_stack: Vec<Vec<Todo>>,
     pub transient_message: Option<String>,
+    pub visible_list_height: usize,
     pub auto_save: bool,
 }
 
@@ -44,6 +45,7 @@ impl App {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             transient_message: None,
+            visible_list_height: 10,
             auto_save: true,
         };
 
@@ -67,6 +69,7 @@ impl App {
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
             transient_message: None,
+            visible_list_height: 10,
             auto_save: false,
         };
         app.clamp_selections();
@@ -363,6 +366,117 @@ impl App {
         }
     }
 
+    pub fn jump_top(&mut self) {
+        match self.current_view {
+            View::Today => {
+                self.today_selected_index = 0;
+            }
+            View::History => match self.history_pane {
+                HistoryPane::Dates => {
+                    self.history_date_index = 0;
+                    self.history_todo_index = 0;
+                    self.clamp_selections();
+                }
+                HistoryPane::Todos => {
+                    self.history_todo_index = 0;
+                }
+            },
+        }
+    }
+
+    pub fn jump_bottom(&mut self) {
+        match self.current_view {
+            View::Today => {
+                let today = Local::now().date_naive();
+                let count = self
+                    .todos
+                    .iter()
+                    .filter(|t| t.created_date == today)
+                    .count();
+                self.today_selected_index = count.saturating_sub(1);
+            }
+            View::History => match self.history_pane {
+                HistoryPane::Dates => {
+                    let dates = self.dates_list();
+                    self.history_date_index = dates.len().saturating_sub(1);
+                    self.history_todo_index = 0;
+                    self.clamp_selections();
+                }
+                HistoryPane::Todos => {
+                    let dates = self.dates_list();
+                    let count = dates
+                        .get(self.history_date_index)
+                        .map(|&d| self.todos.iter().filter(|t| t.created_date == d).count())
+                        .unwrap_or(0);
+                    self.history_todo_index = count.saturating_sub(1);
+                }
+            },
+        }
+    }
+
+    pub fn jump_half_page_down(&mut self) {
+        let step = (self.visible_list_height / 2).max(1);
+        match self.current_view {
+            View::Today => {
+                let today = Local::now().date_naive();
+                let count = self
+                    .todos
+                    .iter()
+                    .filter(|t| t.created_date == today)
+                    .count();
+                if count > 0 {
+                    self.today_selected_index = (self.today_selected_index + step).min(count - 1);
+                } else {
+                    self.today_selected_index = 0;
+                }
+            }
+            View::History => match self.history_pane {
+                HistoryPane::Dates => {
+                    let dates = self.dates_list();
+                    let count = dates.len();
+                    if count > 0 {
+                        self.history_date_index = (self.history_date_index + step).min(count - 1);
+                    } else {
+                        self.history_date_index = 0;
+                    }
+                    self.history_todo_index = 0;
+                    self.clamp_selections();
+                }
+                HistoryPane::Todos => {
+                    let dates = self.dates_list();
+                    let count = dates
+                        .get(self.history_date_index)
+                        .map(|&d| self.todos.iter().filter(|t| t.created_date == d).count())
+                        .unwrap_or(0);
+                    if count > 0 {
+                        self.history_todo_index = (self.history_todo_index + step).min(count - 1);
+                    } else {
+                        self.history_todo_index = 0;
+                    }
+                }
+            },
+        }
+    }
+
+    pub fn jump_half_page_up(&mut self) {
+        let step = (self.visible_list_height / 2).max(1);
+        match self.current_view {
+            View::Today => {
+                self.today_selected_index = self.today_selected_index.saturating_sub(step);
+            }
+            View::History => match self.history_pane {
+                HistoryPane::Dates => {
+                    self.history_date_index = self.history_date_index.saturating_sub(step);
+                    self.history_todo_index = 0;
+                    self.clamp_selections();
+                }
+                HistoryPane::Todos => {
+                    self.history_todo_index = self.history_todo_index.saturating_sub(step);
+                }
+            },
+        }
+    }
+
     pub fn add_todo(&mut self, text: &str) {
         let clean_text = text.trim();
         if clean_text.is_empty() {
@@ -635,8 +749,17 @@ impl App {
                     self.redo();
                     return false;
                 }
+                KeyCode::Char('d') | KeyCode::Char('D') => {
+                    self.jump_half_page_down();
+                    return false;
+                }
+                KeyCode::Char('u') | KeyCode::Char('U') => {
+                    self.jump_half_page_up();
+                    return false;
+                }
                 _ => {}
             }
+            return false;
         }
 
         match key.code {
@@ -656,6 +779,19 @@ impl App {
             }
             KeyCode::Char('u') => {
                 self.undo();
+            }
+            KeyCode::Char('G') => {
+                self.jump_bottom();
+            }
+            KeyCode::Char('g')
+                if key
+                    .modifiers
+                    .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
+            {
+                self.jump_bottom();
+            }
+            KeyCode::Char('g') => {
+                self.jump_top();
             }
             _ => match self.current_view {
                 View::Today => self.handle_today_key(key),
@@ -1356,5 +1492,111 @@ mod tests {
         assert_eq!(app.todos.len(), 2);
         assert_eq!(app.todos[0].text, "Past open");
         assert_eq!(app.todos[1].text, "Today done");
+    }
+
+    #[test]
+    fn test_jump_keys_today() {
+        let today = Local::now().date_naive();
+        let todos: Vec<Todo> = (0..10)
+            .map(|i| Todo {
+                id: i + 1,
+                text: format!("Task {i}"),
+                created_date: today,
+                done: false,
+                done_at: None,
+            })
+            .collect();
+        let mut app = App::new_for_test(todos);
+        app.visible_list_height = 4; // half page step = 2
+        app.today_selected_index = 0;
+
+        // Ctrl+d half page down
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(app.today_selected_index, 2);
+        assert_eq!(app.todos.len(), 10); // Ctrl+d MUST NOT delete!
+
+        // Another Ctrl+d
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(app.today_selected_index, 4);
+
+        // Jump to bottom 'G'
+        app.handle_key(key_press(KeyCode::Char('G')));
+        assert_eq!(app.today_selected_index, 9);
+
+        // Ctrl+u half page up
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.today_selected_index, 7);
+
+        // Jump to top 'g'
+        app.handle_key(key_press(KeyCode::Char('g')));
+        assert_eq!(app.today_selected_index, 0);
+    }
+
+    #[test]
+    fn test_jump_empty_list_clamping() {
+        let mut app = App::new_for_test(Vec::new());
+        app.visible_list_height = 4;
+
+        // None of these should panic on empty list
+        app.handle_key(key_press(KeyCode::Char('g')));
+        assert_eq!(app.today_selected_index, 0);
+
+        app.handle_key(key_press(KeyCode::Char('G')));
+        assert_eq!(app.today_selected_index, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('d'), KeyModifiers::CONTROL));
+        assert_eq!(app.today_selected_index, 0);
+
+        app.handle_key(KeyEvent::new(KeyCode::Char('u'), KeyModifiers::CONTROL));
+        assert_eq!(app.today_selected_index, 0);
+    }
+
+    #[test]
+    fn test_jump_history() {
+        let today = Local::now().date_naive();
+        let yesterday = today.pred_opt().unwrap();
+        let d2 = yesterday.pred_opt().unwrap();
+
+        let t1 = Todo {
+            id: 1,
+            text: "Task 1".to_string(),
+            created_date: d2,
+            done: false,
+            done_at: None,
+        };
+        let t2 = Todo {
+            id: 2,
+            text: "Task 2".to_string(),
+            created_date: d2,
+            done: false,
+            done_at: None,
+        };
+        let t3 = Todo {
+            id: 3,
+            text: "Task 3".to_string(),
+            created_date: d2,
+            done: false,
+            done_at: None,
+        };
+        let mut app = App::new_for_test(vec![t1, t2, t3]);
+        app.current_view = View::History;
+        app.history_pane = HistoryPane::Dates;
+        app.visible_list_height = 2; // step = 1
+
+        // Dates pane jump to bottom
+        app.handle_key(key_press(KeyCode::Char('G')));
+        assert_eq!(app.history_date_index, 1); // today and d2 -> 2 dates (index 1)
+
+        // Focus todos pane
+        app.history_pane = HistoryPane::Todos;
+        assert_eq!(app.history_todo_index, 0);
+
+        // Jump to bottom in todos pane
+        app.handle_key(key_press(KeyCode::Char('G')));
+        assert_eq!(app.history_todo_index, 2);
+
+        // Jump to top in todos pane
+        app.handle_key(key_press(KeyCode::Char('g')));
+        assert_eq!(app.history_todo_index, 0);
     }
 }

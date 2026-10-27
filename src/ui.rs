@@ -61,6 +61,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     );
 
     // 2. Draw Main View (Today or History)
+    app.visible_list_height = (main_area.height.saturating_sub(2) as usize).max(1);
     match app.current_view {
         View::Today => draw_today(app, frame, main_area),
         View::History => draw_history(app, frame, main_area),
