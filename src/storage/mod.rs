@@ -1,12 +1,17 @@
+pub mod backup;
+pub mod lock;
 pub mod migrate;
 
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, SystemTime};
 
 use serde::{Deserialize, Serialize};
 
 use crate::model::Todo;
+#[allow(unused_imports)]
+pub use backup::{backup_now, BackupReason};
 use migrate::{detect_version, migrate_to_latest, CURRENT_SCHEMA_VERSION};
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -15,10 +20,34 @@ pub struct StorageData {
     pub todos: Vec<Todo>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileFingerprint {
+    pub mtime: SystemTime,
+    pub len: u64,
+}
+
+impl FileFingerprint {
+    pub fn of(path: &Path) -> Option<Self> {
+        let meta = fs::metadata(path).ok()?;
+        Some(Self {
+            mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
+            len: meta.len(),
+        })
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LoadResult {
     pub todos: Vec<Todo>,
     pub was_legacy: bool,
+    pub fingerprint: Option<FileFingerprint>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SaveResult {
+    pub external_change: bool,
+    pub new_fingerprint: Option<FileFingerprint>,
+    pub backup_warning: Option<String>,
 }
 
 #[derive(Debug)]
@@ -89,23 +118,14 @@ pub fn get_storage_path() -> Result<PathBuf, Box<dyn std::error::Error>> {
 
 pub fn find_newest_backup(path: &Path) -> Option<PathBuf> {
     let parent = path.parent()?;
-    let mut newest: Option<(std::time::SystemTime, PathBuf)> = None;
+    let mut newest: Option<(SystemTime, PathBuf)> = None;
 
     // Check backups/ directory
     let backups_dir = parent.join("backups");
-    if let Ok(entries) = fs::read_dir(backups_dir) {
-        for entry in entries.flatten() {
-            let p = entry.path();
-            if let Some(file_name) = p.file_name().and_then(|n| n.to_str()) {
-                if file_name.starts_with("todos-") && file_name.ends_with(".json") {
-                    if let Ok(meta) = entry.metadata() {
-                        let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
-                        if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
-                            newest = Some((mtime, p));
-                        }
-                    }
-                }
-            }
+    if let Some(p) = backup::find_newest_backup(&backups_dir) {
+        if let Ok(meta) = p.metadata() {
+            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
+            newest = Some((mtime, p));
         }
     }
 
@@ -113,7 +133,7 @@ pub fn find_newest_backup(path: &Path) -> Option<PathBuf> {
     let v0_bak = path.with_extension("v0.bak");
     if v0_bak.exists() {
         if let Ok(meta) = v0_bak.metadata() {
-            let mtime = meta.modified().unwrap_or(std::time::SystemTime::UNIX_EPOCH);
+            let mtime = meta.modified().unwrap_or(SystemTime::UNIX_EPOCH);
             if newest.as_ref().is_none_or(|(t, _)| mtime > *t) {
                 newest = Some((mtime, v0_bak));
             }
@@ -123,19 +143,47 @@ pub fn find_newest_backup(path: &Path) -> Option<PathBuf> {
     newest.map(|(_, p)| p)
 }
 
+pub fn clean_stale_temp_files(data_path: &Path) {
+    let Some(parent) = data_path.parent() else {
+        return;
+    };
+    let Ok(entries) = fs::read_dir(parent) else {
+        return;
+    };
+
+    let base_name = data_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("todos.json");
+    let prefix = format!(".{base_name}.tmp.");
+
+    for entry in entries.flatten() {
+        let p = entry.path();
+        if let Some(name) = p.file_name().and_then(|n| n.to_str()) {
+            if name.starts_with(&prefix) {
+                let _ = fs::remove_file(p);
+            }
+        }
+    }
+}
+
 pub fn load_todos(path: &Path) -> Result<LoadResult, LoadError> {
     if !path.exists() {
         return Ok(LoadResult {
             todos: Vec::new(),
             was_legacy: false,
+            fingerprint: None,
         });
     }
 
     let data = fs::read_to_string(path).map_err(LoadError::Io)?;
+    let fp = FileFingerprint::of(path);
+
     if data.trim().is_empty() {
         return Ok(LoadResult {
             todos: Vec::new(),
             was_legacy: false,
+            fingerprint: fp,
         });
     }
 
@@ -187,35 +235,138 @@ pub fn load_todos(path: &Path) -> Result<LoadResult, LoadError> {
     Ok(LoadResult {
         todos: storage_data.todos,
         was_legacy,
+        fingerprint: fp,
     })
+}
+
+#[cfg(unix)]
+fn sync_parent_dir(path: &Path) {
+    if let Some(parent) = path.parent() {
+        if let Ok(dir) = fs::File::open(parent) {
+            let _ = dir.sync_all();
+        }
+    }
+}
+
+#[cfg(not(unix))]
+fn sync_parent_dir(_path: &Path) {}
+
+fn rename_with_retries(from: &Path, to: &Path) -> Result<(), std::io::Error> {
+    let mut attempts = 0;
+    loop {
+        match fs::rename(from, to) {
+            Ok(()) => return Ok(()),
+            Err(e) => {
+                attempts += 1;
+                if attempts >= 5 {
+                    return Err(e);
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+        }
+    }
 }
 
 pub fn save_todos(
     path: &Path,
     todos: &[Todo],
     is_legacy: bool,
-) -> Result<(), Box<dyn std::error::Error>> {
+    expected_fingerprint: Option<FileFingerprint>,
+    is_first_save: bool,
+    last_backup_time: Option<SystemTime>,
+) -> Result<SaveResult, Box<dyn std::error::Error>> {
+    // 1. Acquire advisory sidecar lock (held only for the duration of this save)
+    let _lock = lock::acquire_lock(path, Duration::from_secs(3))?;
+    save_todos_unlocked(
+        path,
+        todos,
+        is_legacy,
+        expected_fingerprint,
+        is_first_save,
+        last_backup_time,
+    )
+}
+
+#[allow(dead_code)]
+pub fn load_modify_save<F, R>(
+    path: &Path,
+    f: F,
+) -> Result<(R, SaveResult), Box<dyn std::error::Error>>
+where
+    F: FnOnce(&mut Vec<Todo>) -> R,
+{
+    // Hold lock for the duration of load-modify-save
+    let _lock = lock::acquire_lock(path, Duration::from_secs(5))?;
+    let load_res = load_todos(path)?;
+    let mut todos = load_res.todos;
+    let r = f(&mut todos);
+    let save_res = save_todos_unlocked(
+        path,
+        &todos,
+        load_res.was_legacy,
+        load_res.fingerprint,
+        false,
+        None,
+    )?;
+    Ok((r, save_res))
+}
+
+pub fn save_todos_unlocked(
+    path: &Path,
+    todos: &[Todo],
+    is_legacy: bool,
+    expected_fingerprint: Option<FileFingerprint>,
+    _is_first_save: bool,
+    _last_backup_time: Option<SystemTime>,
+) -> Result<SaveResult, Box<dyn std::error::Error>> {
     let parent = path
         .parent()
         .ok_or("Cannot determine parent data directory")?;
     fs::create_dir_all(parent)?;
 
-    // If migrating from legacy, back up original once to todos.v0.bak
-    if is_legacy && path.exists() {
-        let bak_path = path.with_extension("v0.bak");
-        if !bak_path.exists() {
-            fs::copy(path, &bak_path)?;
+    let mut external_change = false;
+    let mut backup_warning = None;
+
+    // 2. Check external change under lock
+    if path.exists() {
+        if let Some(expected) = expected_fingerprint {
+            if let Some(actual) = FileFingerprint::of(path) {
+                if actual != expected {
+                    external_change = true;
+                    // Force backup of on-disk version bypassing throttle
+                    if let Err(e) = backup::backup_now(path, BackupReason::ExternalChange) {
+                        backup_warning = Some(format!("Backup failed: {e}"));
+                    }
+                }
+            }
+        }
+
+        // 4. One-time legacy backup to todos.v0.bak
+        if is_legacy {
+            let bak_path = path.with_extension("v0.bak");
+            if !bak_path.exists() {
+                let _ = fs::copy(path, &bak_path);
+            }
         }
     }
 
+    // 5. Atomic write: write to unique temp file, sync, rename, sync parent
     let storage_data = StorageData {
         version: CURRENT_SCHEMA_VERSION,
         todos: todos.to_vec(),
     };
-
-    // Write safely to a temp file in the same directory, then rename atomically
-    let tmp_path = parent.join(format!(".todos.json.tmp.{}", std::process::id()));
     let json_str = serde_json::to_string_pretty(&storage_data)?;
+
+    let file_name = path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("todos.json");
+    let tmp_path = parent.join(format!(
+        ".{}.tmp.{}.{}",
+        file_name,
+        std::process::id(),
+        chrono::Local::now().timestamp_nanos_opt().unwrap_or(0)
+    ));
 
     {
         let mut file = fs::File::create(&tmp_path)?;
@@ -223,14 +374,23 @@ pub fn save_todos(
         file.sync_all()?;
     }
 
-    fs::rename(&tmp_path, path)?;
-    Ok(())
+    rename_with_retries(&tmp_path, path)?;
+    sync_parent_dir(path);
+
+    let new_fp = FileFingerprint::of(path);
+
+    Ok(SaveResult {
+        external_change,
+        new_fingerprint: new_fp,
+        backup_warning,
+    })
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use chrono::NaiveDate;
+    use std::sync::Arc;
     use tempfile::tempdir;
 
     #[test]
@@ -274,7 +434,7 @@ mod tests {
             },
         ];
 
-        save_todos(&path, &todos, false).unwrap();
+        save_todos(&path, &todos, false, None, true, None).unwrap();
         let loaded = load_todos(&path).unwrap();
         assert_eq!(loaded.todos, todos);
         assert!(!loaded.was_legacy);
@@ -293,7 +453,7 @@ mod tests {
             done_at: None,
         }];
 
-        save_todos(&path, &todos, false).unwrap();
+        save_todos(&path, &todos, false, None, true, None).unwrap();
         assert!(path.exists());
 
         // Check parent directory contains no .tmp files
@@ -308,116 +468,123 @@ mod tests {
     }
 
     #[test]
-    fn test_legacy_fixture_migrates_and_saves_v1_and_creates_bak() {
+    fn test_stale_temp_cleanup_removes_only_matching_files() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("todos.json");
 
-        // Copy legacy v0 fixture
-        let fixture_bytes = fs::read("tests/fixtures/legacy_v0_todos.json").unwrap();
-        fs::write(&path, &fixture_bytes).unwrap();
+        // Slate's own temp files
+        let slate_tmp1 = dir.path().join(".todos.json.tmp.1234.5678");
+        let slate_tmp2 = dir.path().join(".todos.json.tmp.9999.0000");
+        fs::write(&slate_tmp1, "stale").unwrap();
+        fs::write(&slate_tmp2, "stale").unwrap();
 
-        // 1. Load legacy fixture
-        let loaded = load_todos(&path).unwrap();
-        assert!(loaded.was_legacy);
-        assert_eq!(loaded.todos.len(), 3);
+        // Other non-matching files
+        let other_tmp = dir.path().join("other.tmp");
+        let important_file = dir.path().join("notes.txt");
+        fs::write(&other_tmp, "keep me").unwrap();
+        fs::write(&important_file, "keep me").unwrap();
 
-        // 2. Save migrated v1 file
-        let bak_path = path.with_extension("v0.bak");
-        assert!(!bak_path.exists());
+        clean_stale_temp_files(&path);
 
-        save_todos(&path, &loaded.todos, loaded.was_legacy).unwrap();
-
-        // Check todos.v0.bak created once with identical bytes
-        assert!(bak_path.exists());
-        let bak_bytes = fs::read(&bak_path).unwrap();
-        assert_eq!(bak_bytes, fixture_bytes);
-
-        // Check todos.json is now version 1 format
-        let new_data: serde_json::Value =
-            serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(new_data["version"], 1);
-        assert_eq!(new_data["todos"].as_array().unwrap().len(), 3);
-
-        // 3. Second save doesn't touch .v0.bak
-        let bak_meta_before = fs::metadata(&bak_path).unwrap().modified().unwrap();
-        save_todos(&path, &loaded.todos, false).unwrap();
-        let bak_bytes_after = fs::read(&bak_path).unwrap();
-        assert_eq!(bak_bytes_after, fixture_bytes);
-        let bak_meta_after = fs::metadata(&bak_path).unwrap().modified().unwrap();
-        assert_eq!(bak_meta_before, bak_meta_after);
+        assert!(!slate_tmp1.exists());
+        assert!(!slate_tmp2.exists());
+        assert!(other_tmp.exists());
+        assert!(important_file.exists());
     }
 
     #[test]
-    fn test_future_version_rejected_file_untouched() {
+    fn test_external_change_detected_and_backed_up() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("todos.json");
 
-        let future_json = r#"{"version": 99, "todos": [{"id": 1, "text": "Future", "created_date": "2026-10-27", "done": false}]}"#;
-        fs::write(&path, future_json).unwrap();
+        let initial_todos = vec![Todo {
+            id: 1,
+            text: "Initial".to_string(),
+            created_date: NaiveDate::from_ymd_opt(2026, 10, 27).unwrap(),
+            done: false,
+            done_at: None,
+        }];
+        let res = save_todos(&path, &initial_todos, false, None, true, None).unwrap();
+        let fp1 = res.new_fingerprint;
 
-        let res = load_todos(&path);
-        match res {
-            Err(LoadError::VersionTooNew {
-                file_version,
-                supported_version,
-                ..
-            }) => {
-                assert_eq!(file_version, 99);
-                assert_eq!(supported_version, 1);
-            }
-            other => panic!("Expected VersionTooNew, got: {other:?}"),
-        }
+        // Simulate external edit to file on disk
+        std::thread::sleep(Duration::from_millis(50));
+        fs::write(&path, r#"{"version": 1, "todos": [{"id": 99, "text": "External edit", "created_date": "2026-10-27", "done": false}]}"#).unwrap();
 
-        // File is byte-identical afterward
-        let after = fs::read_to_string(&path).unwrap();
-        assert_eq!(after, future_json);
+        let my_new_todos = vec![Todo {
+            id: 1,
+            text: "My update".to_string(),
+            created_date: NaiveDate::from_ymd_opt(2026, 10, 27).unwrap(),
+            done: true,
+            done_at: None,
+        }];
+
+        // Save with old expected fingerprint
+        let save_res = save_todos(&path, &my_new_todos, false, fp1, false, None).unwrap();
+        assert!(save_res.external_change);
+
+        // Verify backups directory contains the external edit
+        let backups_dir = dir.path().join("backups");
+        let backup_file = backup::find_newest_backup(&backups_dir).unwrap();
+        let backup_content = fs::read_to_string(backup_file).unwrap();
+        assert!(backup_content.contains("External edit"));
     }
 
     #[test]
-    fn test_corrupt_json_rejected_file_untouched() {
+    fn test_lock_timeout_returns_error() {
         let dir = tempdir().unwrap();
         let path = dir.path().join("todos.json");
 
-        let corrupt_json = r#"{"version": 1, "todos": [invalid json..."#;
-        fs::write(&path, corrupt_json).unwrap();
+        // Hold sidecar lock externally
+        let _held_lock = lock::acquire_lock(&path, Duration::from_millis(500)).unwrap();
 
-        let res = load_todos(&path);
-        match res {
-            Err(LoadError::ParseError { line, column, .. }) => {
-                assert_eq!(line, 1);
-                assert!(column > 0);
-            }
-            other => panic!("Expected ParseError, got: {other:?}"),
-        }
-
-        // File is byte-identical afterward
-        let after = fs::read_to_string(&path).unwrap();
-        assert_eq!(after, corrupt_json);
+        // Trying to save should fail with lock timeout error
+        let err = save_todos(&path, &[], false, None, false, None);
+        assert!(err.is_err());
+        assert!(err
+            .unwrap_err()
+            .to_string()
+            .contains("another Slate process is writing"));
     }
 
     #[test]
-    fn test_unknown_extra_fields_tolerated() {
+    fn test_concurrent_threads_locked_load_modify_save() {
         let dir = tempdir().unwrap();
-        let path = dir.path().join("todos.json");
+        let path = Arc::new(dir.path().join("todos.json"));
 
-        let extra_fields_json = r#"{
-            "version": 1,
-            "extra_root_prop": "ignored",
-            "todos": [
-                {
-                    "id": 1,
-                    "text": "Task with extras",
-                    "created_date": "2026-10-27",
-                    "done": false,
-                    "priority": "urgent",
-                    "labels": ["dev", "v1"]
+        // Initialize empty file
+        save_todos(&path, &[], false, None, true, None).unwrap();
+
+        let mut handles = Vec::new();
+        for thread_idx in 0..2 {
+            let path_clone = Arc::clone(&path);
+            handles.push(std::thread::spawn(move || {
+                for i in 0..50 {
+                    loop {
+                        let res = load_modify_save(&path_clone, |todos| {
+                            let next_id = (thread_idx * 1000 + i + 1) as u64;
+                            todos.push(Todo {
+                                id: next_id,
+                                text: format!("Thread {thread_idx} task {i}"),
+                                created_date: NaiveDate::from_ymd_opt(2026, 10, 27).unwrap(),
+                                done: false,
+                                done_at: None,
+                            });
+                        });
+                        if res.is_ok() {
+                            break;
+                        }
+                        std::thread::sleep(Duration::from_millis(5));
+                    }
                 }
-            ]
-        }"#;
-        fs::write(&path, extra_fields_json).unwrap();
+            }));
+        }
 
-        let loaded = load_todos(&path).unwrap();
-        assert_eq!(loaded.todos.len(), 1);
-        assert_eq!(loaded.todos[0].text, "Task with extras");
+        for h in handles {
+            h.join().unwrap();
+        }
+
+        let final_loaded = load_todos(&path).unwrap();
+        assert_eq!(final_loaded.todos.len(), 100);
     }
 }

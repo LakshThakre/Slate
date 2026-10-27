@@ -28,6 +28,9 @@ pub struct App {
     pub show_help: bool,
     pub auto_save: bool,
     pub is_legacy_format: bool,
+    pub fingerprint: Option<crate::storage::FileFingerprint>,
+    pub is_first_save: bool,
+    pub last_backup_time: Option<std::time::SystemTime>,
 }
 
 impl App {
@@ -61,6 +64,7 @@ impl App {
         data_path: PathBuf,
         today: NaiveDate,
     ) -> Result<Self, crate::storage::LoadError> {
+        crate::storage::clean_stale_temp_files(&data_path);
         let load_res = load_todos(&data_path)?;
 
         let mut app = Self {
@@ -83,6 +87,9 @@ impl App {
             show_help: false,
             auto_save: true,
             is_legacy_format: load_res.was_legacy,
+            fingerprint: load_res.fingerprint,
+            is_first_save: true,
+            last_backup_time: None,
         };
 
         app.clamp_selections();
@@ -116,6 +123,9 @@ impl App {
             show_help: false,
             auto_save: false,
             is_legacy_format: false,
+            fingerprint: None,
+            is_first_save: true,
+            last_backup_time: None,
         };
         app.clamp_selections();
         app
@@ -125,14 +135,35 @@ impl App {
         if !self.auto_save {
             return;
         }
-        if let Err(e) = save_todos(&self.data_path, &self.todos, self.is_legacy_format) {
-            self.status_message = Some(format!("Save error: {e}"));
-        } else {
-            self.is_legacy_format = false;
-            if let Some(ref msg) = self.status_message {
-                if msg.starts_with("Save error:") {
-                    self.status_message = None;
+        let res = save_todos(
+            &self.data_path,
+            &self.todos,
+            self.is_legacy_format,
+            self.fingerprint,
+            self.is_first_save,
+            self.last_backup_time,
+        );
+        match res {
+            Ok(save_res) => {
+                self.is_legacy_format = false;
+                self.is_first_save = false;
+                self.fingerprint = save_res.new_fingerprint;
+                self.last_backup_time = Some(std::time::SystemTime::now());
+
+                if let Some(warn) = save_res.backup_warning {
+                    self.status_message = Some(warn);
+                } else if let Some(ref msg) = self.status_message {
+                    if msg.starts_with("Save error:") || msg.starts_with("Backup failed:") {
+                        self.status_message = None;
+                    }
                 }
+
+                if save_res.external_change {
+                    self.set_transient_message("Data changed on disk · previous version backed up");
+                }
+            }
+            Err(e) => {
+                self.status_message = Some(format!("Save error: {e}"));
             }
         }
     }
