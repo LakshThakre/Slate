@@ -37,6 +37,7 @@ pub struct App {
     pub config: crate::config::Config,
     pub theme: crate::theme::Theme,
     pub symbols: crate::ui::Symbols,
+    pub keymap: crate::keymap::Keymap,
 }
 
 impl App {
@@ -93,6 +94,10 @@ impl App {
         let load_res = load_todos(&data_path)?;
         let theme = crate::theme::Theme::from_config(&config);
         let symbols = crate::ui::Symbols::from_config(&config);
+        let (keymap, keymap_warnings) = crate::keymap::Keymap::from_config(&config);
+
+        let mut all_warnings = warnings;
+        all_warnings.extend(keymap_warnings);
 
         let mut app = Self {
             data_path,
@@ -123,10 +128,11 @@ impl App {
             config,
             theme,
             symbols,
+            keymap,
         };
 
-        if !warnings.is_empty() {
-            app.set_transient_message(warnings.join(" · "));
+        if !all_warnings.is_empty() {
+            app.set_transient_message(all_warnings.join(" · "));
         }
 
         app.clamp_selections();
@@ -169,6 +175,7 @@ impl App {
             config: crate::config::Config::default(),
             theme: crate::theme::Theme::default(),
             symbols: crate::ui::Symbols::unicode(),
+            keymap: crate::keymap::Keymap::default(),
         };
         app.clamp_selections();
         app
@@ -961,34 +968,16 @@ impl App {
             return false;
         }
 
-        if key
-            .modifiers
-            .contains(ratatui::crossterm::event::KeyModifiers::CONTROL)
-        {
-            match key.code {
-                KeyCode::Char('r') | KeyCode::Char('R') => {
-                    self.redo();
-                    return false;
-                }
-                KeyCode::Char('d') | KeyCode::Char('D') => {
-                    self.jump_half_page_down();
-                    return false;
-                }
-                KeyCode::Char('u') | KeyCode::Char('U') => {
-                    self.jump_half_page_up();
-                    return false;
-                }
-                _ => {}
-            }
+        let Some(action) = self.keymap.resolve(&key) else {
             return false;
-        }
+        };
 
-        match key.code {
-            KeyCode::Char('?') => {
+        match action {
+            crate::keymap::Action::Quit => return true,
+            crate::keymap::Action::Help => {
                 self.show_help = true;
             }
-            KeyCode::Char('q') => return true,
-            KeyCode::Tab | KeyCode::BackTab => {
+            crate::keymap::Action::SwitchView => {
                 if self.config.ui.show_history {
                     self.current_view = match self.current_view {
                         View::Today => View::History,
@@ -997,37 +986,40 @@ impl App {
                     self.clamp_selections();
                 }
             }
-            KeyCode::Char('a') => {
+            crate::keymap::Action::Add => {
                 self.current_view = View::Today;
                 self.input_mode = InputMode::Adding;
                 self.input_buffer.clear();
                 self.cursor_position = 0;
             }
-            KeyCode::Char('u') => {
+            crate::keymap::Action::Undo => {
                 self.undo();
             }
-            KeyCode::Char('G') => {
-                self.jump_bottom();
+            crate::keymap::Action::Redo => {
+                self.redo();
             }
-            KeyCode::Char('g')
-                if key
-                    .modifiers
-                    .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
-            {
-                self.jump_bottom();
-            }
-            KeyCode::Char('g') => {
+            crate::keymap::Action::JumpTop => {
                 self.jump_top();
             }
+            crate::keymap::Action::JumpBottom => {
+                self.jump_bottom();
+            }
+            crate::keymap::Action::HalfPageDown => {
+                self.jump_half_page_down();
+            }
+            crate::keymap::Action::HalfPageUp => {
+                self.jump_half_page_up();
+            }
             _ => match self.current_view {
-                View::Today => self.handle_today_key(key),
-                View::History => self.handle_history_key(key),
+                View::Today => self.handle_today_action(action),
+                View::History => self.handle_history_action(action),
             },
         }
+
         false
     }
 
-    fn handle_today_key(&mut self, key: KeyEvent) {
+    fn handle_today_action(&mut self, action: crate::keymap::Action) {
         let today = self.today;
         let count = self
             .todos
@@ -1035,94 +1027,66 @@ impl App {
             .filter(|t| t.created_date == today)
             .count();
 
-        match key.code {
-            KeyCode::Char('J') => {
+        match action {
+            crate::keymap::Action::ReorderDown => {
                 self.reorder_today(true);
             }
-            KeyCode::Char('K') => {
+            crate::keymap::Action::ReorderUp => {
                 self.reorder_today(false);
             }
-            KeyCode::Char('j')
-                if key
-                    .modifiers
-                    .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
-            {
-                self.reorder_today(true);
-            }
-            KeyCode::Char('k')
-                if key
-                    .modifiers
-                    .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
-            {
-                self.reorder_today(false);
-            }
-            KeyCode::Char('j') | KeyCode::Down => {
+            crate::keymap::Action::MoveSelectionDown => {
                 if count > 0 && self.today_selected_index + 1 < count {
                     self.today_selected_index += 1;
                 }
             }
-            KeyCode::Char('k') | KeyCode::Up => {
+            crate::keymap::Action::MoveSelectionUp => {
                 self.today_selected_index = self.today_selected_index.saturating_sub(1);
             }
-            KeyCode::Char(' ') | KeyCode::Enter => {
+            crate::keymap::Action::Toggle => {
                 self.toggle_today_todo();
             }
-            KeyCode::Char('e') => {
+            crate::keymap::Action::Edit => {
                 self.start_editing_today();
             }
-            KeyCode::Char('c') => {
+            crate::keymap::Action::CarryOver => {
                 self.carry_over();
             }
-            KeyCode::Char('D') => {
+            crate::keymap::Action::ClearCompleted => {
                 self.clear_completed_today();
             }
-            KeyCode::Char('d')
-                if key
-                    .modifiers
-                    .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
-            {
-                self.clear_completed_today();
-            }
-            KeyCode::Char('m') => {
+            crate::keymap::Action::MoveToToday => {
                 self.set_transient_message("Already in Today");
             }
-            KeyCode::Char('d') | KeyCode::Delete => {
+            crate::keymap::Action::Delete => {
                 self.delete_today_todo();
             }
             _ => {}
         }
     }
 
-    fn handle_history_key(&mut self, key: KeyEvent) {
+    fn handle_history_action(&mut self, action: crate::keymap::Action) {
         match self.history_pane {
             HistoryPane::Dates => {
                 let dates = self.dates_list();
-                match key.code {
-                    KeyCode::Char('j') | KeyCode::Down => {
+                match action {
+                    crate::keymap::Action::MoveSelectionDown => {
                         if !dates.is_empty() && self.history_date_index + 1 < dates.len() {
                             self.history_date_index += 1;
                             self.history_todo_index = 0;
                             self.clamp_selections();
                         }
                     }
-                    KeyCode::Char('k') | KeyCode::Up => {
+                    crate::keymap::Action::MoveSelectionUp => {
                         if self.history_date_index > 0 {
                             self.history_date_index -= 1;
                             self.history_todo_index = 0;
                             self.clamp_selections();
                         }
                     }
-                    KeyCode::Char('l') | KeyCode::Right | KeyCode::Enter => {
+                    crate::keymap::Action::FocusTasks | crate::keymap::Action::Toggle => {
                         self.history_pane = HistoryPane::Todos;
                     }
-                    KeyCode::Char('D') => {
-                        self.clear_completed_history();
-                    }
-                    KeyCode::Char('d')
-                        if key
-                            .modifiers
-                            .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
-                    {
+                    crate::keymap::Action::ClearCompleted => {
                         self.clear_completed_history();
                     }
                     _ => {}
@@ -1137,58 +1101,37 @@ impl App {
                     0
                 };
 
-                match key.code {
-                    KeyCode::Char('h') | KeyCode::Left => {
+                match action {
+                    crate::keymap::Action::FocusDates => {
                         self.history_pane = HistoryPane::Dates;
                     }
-                    KeyCode::Char('J') => {
+                    crate::keymap::Action::ReorderDown => {
                         self.reorder_history(true);
                     }
-                    KeyCode::Char('K') => {
+                    crate::keymap::Action::ReorderUp => {
                         self.reorder_history(false);
                     }
-                    KeyCode::Char('j')
-                        if key
-                            .modifiers
-                            .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
-                    {
-                        self.reorder_history(true);
-                    }
-                    KeyCode::Char('k')
-                        if key
-                            .modifiers
-                            .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
-                    {
-                        self.reorder_history(false);
-                    }
-                    KeyCode::Char('j') | KeyCode::Down => {
+                    crate::keymap::Action::MoveSelectionDown => {
                         if count > 0 && self.history_todo_index + 1 < count {
                             self.history_todo_index += 1;
                         }
                     }
-                    KeyCode::Char('k') | KeyCode::Up => {
+                    crate::keymap::Action::MoveSelectionUp => {
                         self.history_todo_index = self.history_todo_index.saturating_sub(1);
                     }
-                    KeyCode::Char(' ') | KeyCode::Enter => {
+                    crate::keymap::Action::Toggle => {
                         self.toggle_history_todo();
                     }
-                    KeyCode::Char('e') => {
+                    crate::keymap::Action::Edit => {
                         self.start_editing_history();
                     }
-                    KeyCode::Char('D') => {
+                    crate::keymap::Action::ClearCompleted => {
                         self.clear_completed_history();
                     }
-                    KeyCode::Char('d')
-                        if key
-                            .modifiers
-                            .contains(ratatui::crossterm::event::KeyModifiers::SHIFT) =>
-                    {
-                        self.clear_completed_history();
-                    }
-                    KeyCode::Char('m') => {
+                    crate::keymap::Action::MoveToToday => {
                         self.move_history_todo_to_today();
                     }
-                    KeyCode::Char('d') | KeyCode::Delete => {
+                    crate::keymap::Action::Delete => {
                         self.delete_history_todo();
                     }
                     _ => {}

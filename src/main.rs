@@ -6,6 +6,7 @@ use ratatui::DefaultTerminal;
 
 mod app;
 pub mod config;
+pub mod keymap;
 mod model;
 mod storage;
 pub mod theme;

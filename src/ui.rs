@@ -385,7 +385,10 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
                 ),
                 app.theme.dim_style(),
             ),
-            Span::styled("c", app.theme.accent_style().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                app.keymap.hint(crate::keymap::Action::CarryOver),
+                app.theme.accent_style().add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to carry over", app.theme.dim_style()),
         ]);
         frame.render_widget(Paragraph::new(hint_line), parts[1]);
@@ -397,7 +400,10 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
     if today_todos.is_empty() {
         let empty_text = Line::from(vec![
             Span::styled("No todos yet. Press ", app.theme.dim_style()),
-            Span::styled("a", app.theme.accent_style().add_modifier(Modifier::BOLD)),
+            Span::styled(
+                app.keymap.hint(crate::keymap::Action::Add),
+                app.theme.accent_style().add_modifier(Modifier::BOLD),
+            ),
             Span::styled(" to add your first one.", app.theme.dim_style()),
         ]);
         frame.render_widget(Paragraph::new(empty_text), list_area);
@@ -717,29 +723,37 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let hints: Vec<(&str, &str)> = match app.current_view {
+    let tab_hint = app.keymap.hint(crate::keymap::Action::SwitchView);
+    let help_hint = app.keymap.hint(crate::keymap::Action::Help);
+    let quit_hint = app.keymap.hint(crate::keymap::Action::Quit);
+    let done_hint = app.keymap.hint(crate::keymap::Action::Toggle);
+
+    let hints: Vec<(String, &str)> = match app.current_view {
         View::Today => {
-            let mut list = vec![("a", "add"), ("space", "done")];
+            let mut list = vec![
+                (app.keymap.hint(crate::keymap::Action::Add), "add"),
+                (done_hint, "done"),
+            ];
             if app.config.ui.show_history {
-                list.push(("tab", "history"));
+                list.push((tab_hint, "history"));
             }
-            list.push(("?", "help"));
-            list.push(("q", "quit"));
+            list.push((help_hint, "help"));
+            list.push((quit_hint, "quit"));
             list
         }
         View::History => match app.history_pane {
             HistoryPane::Dates => vec![
-                ("enter/l", "tasks"),
-                ("tab", "today"),
-                ("?", "help"),
-                ("q", "quit"),
+                (app.keymap.hint(crate::keymap::Action::FocusTasks), "tasks"),
+                (tab_hint, "today"),
+                (help_hint, "help"),
+                (quit_hint, "quit"),
             ],
             HistoryPane::Todos => vec![
-                ("h", "dates"),
-                ("space", "done"),
-                ("tab", "today"),
-                ("?", "help"),
-                ("q", "quit"),
+                (app.keymap.hint(crate::keymap::Action::FocusDates), "dates"),
+                (done_hint, "done"),
+                (tab_hint, "today"),
+                (help_hint, "help"),
+                (quit_hint, "quit"),
             ],
         },
     };
@@ -752,7 +766,7 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
                 app.theme.divider_style(),
             ));
         }
-        spans.push(Span::styled(*key, app.theme.subtext_style()));
+        spans.push(Span::styled(key.clone(), app.theme.subtext_style()));
         spans.push(Span::raw(" "));
         spans.push(Span::styled(*action, app.theme.dim_style()));
     }
@@ -999,6 +1013,7 @@ fn draw_help_overlay(app: &App, frame: &mut Frame) {
         frame.render_widget(
             Paragraph::new(build_left_help_lines(
                 &app.theme,
+                &app.keymap,
                 app.config.ui.show_history,
             )),
             cols[0],
@@ -1006,13 +1021,18 @@ fn draw_help_overlay(app: &App, frame: &mut Frame) {
         frame.render_widget(
             Paragraph::new(build_right_help_lines(
                 &app.theme,
+                &app.keymap,
                 app.config.ui.show_history,
             )),
             cols[2],
         );
     } else {
         frame.render_widget(
-            Paragraph::new(build_all_help_lines(&app.theme, app.config.ui.show_history)),
+            Paragraph::new(build_all_help_lines(
+                &app.theme,
+                &app.keymap,
+                app.config.ui.show_history,
+            )),
             body_area,
         );
     }
@@ -1039,59 +1059,171 @@ fn help_header(title: &str, theme: &Theme) -> Line<'static> {
     )])
 }
 
-fn build_left_help_lines(theme: &Theme, show_history: bool) -> Vec<Line<'static>> {
+fn build_left_help_lines(
+    theme: &Theme,
+    keymap: &crate::keymap::Keymap,
+    show_history: bool,
+) -> Vec<Line<'static>> {
     let mut lines = vec![help_header("Navigation", theme)];
     if show_history {
-        lines.push(help_entry("Tab", "switch views", 10, theme));
+        lines.push(help_entry(
+            &keymap.hint(crate::keymap::Action::SwitchView),
+            "switch views",
+            12,
+            theme,
+        ));
     }
-    lines.extend(vec![
-        help_entry("j / k", "navigate down / up", 10, theme),
-        help_entry("g / G", "jump top / bottom", 10, theme),
-        help_entry("Ctrl+d/u", "half page down / up", 10, theme),
-        help_entry("?", "toggle help", 10, theme),
-        help_entry("q", "quit", 10, theme),
-    ]);
+    let nav_down = keymap.hint(crate::keymap::Action::MoveSelectionDown);
+    let nav_up = keymap.hint(crate::keymap::Action::MoveSelectionUp);
+    lines.push(help_entry(
+        &format!("{nav_down} / {nav_up}"),
+        "navigate down / up",
+        12,
+        theme,
+    ));
+
+    let top = keymap.hint(crate::keymap::Action::JumpTop);
+    let bot = keymap.hint(crate::keymap::Action::JumpBottom);
+    lines.push(help_entry(
+        &format!("{top} / {bot}"),
+        "jump top / bottom",
+        12,
+        theme,
+    ));
+
+    let pg_down = keymap.hint(crate::keymap::Action::HalfPageDown);
+    let pg_up = keymap.hint(crate::keymap::Action::HalfPageUp);
+    lines.push(help_entry(
+        &format!("{pg_down}/{pg_up}"),
+        "half page down / up",
+        12,
+        theme,
+    ));
+
+    lines.push(help_entry(
+        &keymap.hint(crate::keymap::Action::Help),
+        "toggle help",
+        12,
+        theme,
+    ));
+    lines.push(help_entry(
+        &keymap.hint(crate::keymap::Action::Quit),
+        "quit",
+        12,
+        theme,
+    ));
 
     if show_history {
         lines.push(Line::raw(""));
         lines.push(help_header("History", theme));
-        lines.push(help_entry("enter/l", "focus tasks column", 10, theme));
-        lines.push(help_entry("h", "focus dates column", 10, theme));
+        lines.push(help_entry(
+            &keymap.hint(crate::keymap::Action::FocusTasks),
+            "focus tasks column",
+            12,
+            theme,
+        ));
+        lines.push(help_entry(
+            &keymap.hint(crate::keymap::Action::FocusDates),
+            "focus dates column",
+            12,
+            theme,
+        ));
     }
 
     lines.push(Line::raw(""));
     lines.push(help_header("Input", theme));
-    lines.push(help_entry("enter", "save", 10, theme));
-    lines.push(help_entry("esc", "cancel", 10, theme));
+    lines.push(help_entry("enter", "save", 12, theme));
+    lines.push(help_entry("esc", "cancel", 12, theme));
 
     lines
 }
 
-fn build_right_help_lines(theme: &Theme, show_history: bool) -> Vec<Line<'static>> {
+fn build_right_help_lines(
+    theme: &Theme,
+    keymap: &crate::keymap::Keymap,
+    show_history: bool,
+) -> Vec<Line<'static>> {
+    let reorder_down = keymap.hint(crate::keymap::Action::ReorderDown);
+    let reorder_up = keymap.hint(crate::keymap::Action::ReorderUp);
+
     let mut lines = vec![
         help_header("Tasks", theme),
-        help_entry("a", "add new task", 10, theme),
-        help_entry("e", "edit selected task", 10, theme),
-        help_entry("space", "toggle complete", 10, theme),
-        help_entry("J / K", "move task down / up", 10, theme),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::Add),
+            "add new task",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::Edit),
+            "edit selected task",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::Toggle),
+            "toggle complete",
+            12,
+            theme,
+        ),
+        help_entry(
+            &format!("{reorder_down} / {reorder_up}"),
+            "move task down / up",
+            12,
+            theme,
+        ),
     ];
     if show_history {
-        lines.push(help_entry("m", "move task to Today", 10, theme));
+        lines.push(help_entry(
+            &keymap.hint(crate::keymap::Action::MoveToToday),
+            "move task to Today",
+            12,
+            theme,
+        ));
     }
     lines.extend(vec![
-        help_entry("d", "delete task", 10, theme),
-        help_entry("D", "clear completed tasks", 10, theme),
-        help_entry("c", "carry over unfinished", 10, theme),
-        help_entry("u", "undo last action", 10, theme),
-        help_entry("Ctrl+r", "redo undone action", 10, theme),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::Delete),
+            "delete task",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::ClearCompleted),
+            "clear completed tasks",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::CarryOver),
+            "carry over unfinished",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::Undo),
+            "undo last action",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::Redo),
+            "redo undone action",
+            12,
+            theme,
+        ),
     ]);
     lines
 }
 
-fn build_all_help_lines(theme: &Theme, show_history: bool) -> Vec<Line<'static>> {
-    let mut lines = build_left_help_lines(theme, show_history);
+fn build_all_help_lines(
+    theme: &Theme,
+    keymap: &crate::keymap::Keymap,
+    show_history: bool,
+) -> Vec<Line<'static>> {
+    let mut lines = build_left_help_lines(theme, keymap, show_history);
     lines.push(Line::raw(""));
-    lines.extend(build_right_help_lines(theme, show_history));
+    lines.extend(build_right_help_lines(theme, keymap, show_history));
     lines
 }
 
@@ -1741,6 +1873,65 @@ mod tests {
         assert!(
             !help_content.contains("move task to Today"),
             "Expected 'move task to Today' not to appear in help overlay when show_history=false"
+        );
+    }
+
+    #[test]
+    fn test_render_remapped_keys_appear_in_footer_and_help() {
+        let mut config = crate::config::Config::default();
+        config.keys.overrides.insert(
+            "add".to_string(),
+            toml::Value::Array(vec![toml::Value::String("n".to_string())]),
+        );
+        config.keys.overrides.insert(
+            "toggle".to_string(),
+            toml::Value::Array(vec![toml::Value::String("x".to_string())]),
+        );
+
+        let (keymap, _) = crate::keymap::Keymap::from_config(&config);
+        let mut app = App::new_for_test(Vec::new());
+        app.keymap = keymap;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // 1. Footer should show remapped keys "n add" and "x done"
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let footer_content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(
+            footer_content.contains("n add"),
+            "Expected footer to show 'n add', got: {footer_content}"
+        );
+        assert!(
+            footer_content.contains("x done"),
+            "Expected footer to show 'x done', got: {footer_content}"
+        );
+
+        // 2. Help overlay should show remapped keys for add and toggle
+        app.show_help = true;
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let help_content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(
+            help_content.contains("n") && help_content.contains("add new task"),
+            "Expected help overlay to contain remapped 'n' for add new task"
+        );
+        assert!(
+            help_content.contains("x") && help_content.contains("toggle complete"),
+            "Expected help overlay to contain remapped 'x' for toggle complete"
         );
     }
 }
