@@ -241,7 +241,7 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
         title_spans.push(Span::raw("    "));
         title_spans.push(Span::styled(
             format!("{overdue_count} overdue"),
-            Style::default().fg(app.theme.warn),
+            app.theme.warn_style(),
         ));
     }
 
@@ -381,9 +381,9 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
             };
 
             let count_style = if is_overdue {
-                Style::default().fg(app.theme.warn)
+                app.theme.warn_style()
             } else {
-                Style::default().fg(app.theme.dim)
+                app.theme.dim_style()
             };
 
             let line = Line::from(vec![
@@ -577,11 +577,9 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         let error_line = Line::from(vec![
             Span::styled(
                 "save error: ",
-                Style::default()
-                    .fg(app.theme.error)
-                    .add_modifier(Modifier::BOLD),
+                app.theme.error_style().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(err, Style::default().fg(app.theme.error)),
+            Span::styled(err, app.theme.error_style()),
         ]);
         frame.render_widget(Paragraph::new(error_line), area);
         return;
@@ -705,9 +703,9 @@ fn format_todo_row_history(
     let checkbox = if todo.done {
         Span::styled("✓ ", Style::default().fg(theme.accent))
     } else if is_overdue {
-        Span::styled("! ", Style::default().fg(theme.warn))
+        Span::styled("! ", theme.warn_style())
     } else {
-        Span::styled("○ ", Style::default().fg(theme.dim))
+        Span::styled("○ ", theme.dim_style())
     };
 
     let suffix_str = time_str.unwrap_or("").to_string();
@@ -1240,6 +1238,58 @@ mod tests {
                 .collect();
             assert!(!buf.contains("Terminal too small"));
             assert!(buf.contains("Today"));
+        }
+    }
+
+    #[test]
+    fn test_render_mono_no_fg_colors_other_than_reset() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Task 1".to_string(),
+                    created_date: today,
+                    done: false,
+                    done_at: None,
+                },
+                Todo {
+                    id: 2,
+                    text: "Task 2".to_string(),
+                    created_date: today,
+                    done: true,
+                    done_at: None,
+                },
+            ],
+            today,
+        );
+        app.theme = Theme::preset_mono();
+
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        for cell in terminal.backend().buffer().content() {
+            assert_eq!(
+                cell.fg,
+                ratatui::style::Color::Reset,
+                "Expected cell with symbol '{}' to have fg Reset in mono, but got {:?}",
+                cell.symbol(),
+                cell.fg
+            );
+        }
+
+        // Test with help overlay
+        app.show_help = true;
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        for cell in terminal.backend().buffer().content() {
+            assert_eq!(
+                cell.fg,
+                ratatui::style::Color::Reset,
+                "Expected cell with symbol '{}' to have fg Reset in mono (help open), but got {:?}",
+                cell.symbol(),
+                cell.fg
+            );
         }
     }
 }
