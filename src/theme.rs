@@ -78,6 +78,15 @@ impl Theme {
     }
 
     pub fn from_config_with_env(config: &Config, env: &impl EnvLookup) -> Self {
+        let no_color = env
+            .get("NO_COLOR")
+            .map(|s| !s.trim().is_empty())
+            .unwrap_or(false);
+
+        if no_color {
+            return Self::preset_mono();
+        }
+
         let mut theme = match config.theme.to_ascii_lowercase().as_str() {
             "orange" => Self::preset_orange(),
             "lavender" => Self::preset_lavender(),
@@ -96,6 +105,14 @@ impl Theme {
         theme.warn = map_color_to_truecolor(theme.warn, truecolor);
 
         theme
+    }
+
+    pub fn text_style(&self) -> Style {
+        if self.is_mono {
+            Style::default().fg(Color::Reset)
+        } else {
+            Style::default().fg(self.text)
+        }
     }
 
     pub fn accent_style(&self) -> Style {
@@ -300,5 +317,38 @@ mod tests {
         // Should have mapped Rgb accent to Color::Indexed
         assert!(matches!(theme.accent, Color::Indexed(_)));
         assert_eq!(theme.accent, Color::Indexed(rgb_to_ansi256(78, 186, 175)));
+    }
+
+    #[test]
+    fn test_no_color_strips_all_colors() {
+        let env_no_color = MapEnv(HashMap::from([("NO_COLOR", "1".to_string())]));
+        let config = Config {
+            theme: "orange".to_string(),
+            accent: Some("#123456".to_string()),
+            ..Default::default()
+        };
+        let theme = Theme::from_config_with_env(&config, &env_no_color);
+        assert!(theme.is_mono);
+        let colors = [
+            theme.accent,
+            theme.text,
+            theme.dim,
+            theme.subtext,
+            theme.divider,
+            theme.error,
+            theme.warn,
+        ];
+        for c in colors {
+            assert_eq!(c, Color::Reset);
+        }
+
+        // Empty NO_COLOR should NOT strip colors
+        let env_empty_no_color = MapEnv(HashMap::from([
+            ("NO_COLOR", "".to_string()),
+            ("COLORTERM", "truecolor".to_string()),
+        ]));
+        let theme_not_stripped = Theme::from_config_with_env(&config, &env_empty_no_color);
+        assert!(!theme_not_stripped.is_mono);
+        assert_eq!(theme_not_stripped.accent, Color::Rgb(0x12, 0x34, 0x56));
     }
 }

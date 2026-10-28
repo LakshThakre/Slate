@@ -10,6 +10,96 @@ use crate::config::TimeFormat;
 use crate::model::{HistoryPane, Todo, View};
 use crate::theme::Theme;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Symbols {
+    pub check_done: &'static str,
+    pub check_todo: &'static str,
+    pub check_overdue: &'static str,
+    pub marker: &'static str,
+    pub prompt_default: &'static str,
+    pub prompt_edit: &'static str,
+    pub v_divider: &'static str,
+    pub h_rule: &'static str,
+    pub bullet: &'static str,
+    pub dot: &'static str,
+    pub ellipsis: &'static str,
+    pub multiply: &'static str,
+    pub progress_filled: &'static str,
+    pub progress_empty: &'static str,
+    pub is_ascii: bool,
+}
+
+impl Default for Symbols {
+    fn default() -> Self {
+        Self::unicode()
+    }
+}
+
+impl Symbols {
+    pub const fn unicode() -> Self {
+        Self {
+            check_done: "✓ ",
+            check_todo: "○ ",
+            check_overdue: "! ",
+            marker: "› ",
+            prompt_default: "› ",
+            prompt_edit: "› Edit task ",
+            v_divider: "│",
+            h_rule: "─",
+            bullet: "•",
+            dot: "·",
+            ellipsis: "…",
+            multiply: "×",
+            progress_filled: "█",
+            progress_empty: "░",
+            is_ascii: false,
+        }
+    }
+
+    pub const fn ascii() -> Self {
+        Self {
+            check_done: "[x] ",
+            check_todo: "[ ] ",
+            check_overdue: "[!] ",
+            marker: "> ",
+            prompt_default: "> ",
+            prompt_edit: "> Edit task ",
+            v_divider: "|",
+            h_rule: "-",
+            bullet: "*",
+            dot: "*",
+            ellipsis: "...",
+            multiply: "x",
+            progress_filled: "#",
+            progress_empty: "-",
+            is_ascii: true,
+        }
+    }
+
+    pub fn from_config(config: &crate::config::Config) -> Self {
+        Self::from_config_with_env(config, &crate::config::SystemEnv)
+    }
+
+    pub fn from_config_with_env(
+        config: &crate::config::Config,
+        env: &impl crate::config::EnvLookup,
+    ) -> Self {
+        let env_ascii = env
+            .get("SLATE_ASCII")
+            .map(|s| {
+                let t = s.trim();
+                t == "1" || t.eq_ignore_ascii_case("true")
+            })
+            .unwrap_or(false);
+
+        if env_ascii || config.ui.symbols == crate::config::SymbolsMode::Ascii {
+            Self::ascii()
+        } else {
+            Self::unicode()
+        }
+    }
+}
+
 pub const MIN_WIDTH: u16 = 40;
 pub const MIN_HEIGHT: u16 = 8;
 
@@ -38,8 +128,12 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     if is_too_small(terminal_area.width, terminal_area.height) {
         if terminal_area.width > 0 && terminal_area.height > 0 {
             let msg = format!(
-                "Terminal too small · need {MIN_WIDTH}×{MIN_HEIGHT}, have {}×{}",
-                terminal_area.width, terminal_area.height
+                "Terminal too small {} need {MIN_WIDTH}{}{MIN_HEIGHT}, have {}{}{}",
+                app.symbols.dot,
+                app.symbols.multiply,
+                terminal_area.width,
+                app.symbols.multiply,
+                terminal_area.height
             );
             let needed_lines = if terminal_area.width >= 42 { 1 } else { 2 };
             let top_pad = terminal_area.height.saturating_sub(needed_lines) / 2;
@@ -54,7 +148,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             let p = Paragraph::new(msg)
                 .alignment(ratatui::layout::Alignment::Center)
                 .wrap(ratatui::widgets::Wrap { trim: true })
-                .style(Style::default().fg(app.theme.dim));
+                .style(app.theme.dim_style());
             frame.render_widget(p, rows[1]);
         }
         return;
@@ -96,8 +190,12 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     // 1. Draw Slim Header & Rule
     draw_header(app, frame, header_area);
     frame.render_widget(
-        Paragraph::new("─".repeat(header_divider_area.width as usize))
-            .style(Style::default().fg(app.theme.divider)),
+        Paragraph::new(
+            app.symbols
+                .h_rule
+                .repeat(header_divider_area.width as usize),
+        )
+        .style(app.theme.divider_style()),
         header_divider_area,
     );
 
@@ -114,8 +212,12 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         crate::model::InputMode::Adding | crate::model::InputMode::Editing(_)
     ) {
         frame.render_widget(
-            Paragraph::new("─".repeat(prompt_divider_area.width as usize))
-                .style(Style::default().fg(app.theme.divider)),
+            Paragraph::new(
+                app.symbols
+                    .h_rule
+                    .repeat(prompt_divider_area.width as usize),
+            )
+            .style(app.theme.divider_style()),
             prompt_divider_area,
         );
         draw_input(app, frame, bottom_area);
@@ -137,31 +239,29 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
     let today_tab = if app.current_view == View::Today {
         Span::styled(
             "Today",
-            Style::default()
-                .fg(app.theme.accent)
+            app.theme
+                .accent_style()
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )
     } else {
-        Span::styled("Today", Style::default().fg(app.theme.dim))
+        Span::styled("Today", app.theme.dim_style())
     };
 
     let history_tab = if app.current_view == View::History {
         Span::styled(
             "History",
-            Style::default()
-                .fg(app.theme.accent)
+            app.theme
+                .accent_style()
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )
     } else {
-        Span::styled("History", Style::default().fg(app.theme.dim))
+        Span::styled("History", app.theme.dim_style())
     };
 
     let line = Line::from(vec![
         Span::styled(
             "Slate",
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
+            app.theme.accent_style().add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
         today_tab,
@@ -229,7 +329,13 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
 
     if total > 0 {
         title_spans.push(Span::raw("  "));
-        title_spans.extend(render_progress_blocks(done, total, bar_width, &app.theme));
+        title_spans.extend(render_progress_blocks(
+            done,
+            total,
+            bar_width,
+            &app.theme,
+            &app.symbols,
+        ));
     }
 
     let overdue_count = app
@@ -256,16 +362,14 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
         };
         let hint_line = Line::from(vec![
             Span::styled(
-                format!("{count} unfinished from {date_label}  ·  "),
-                Style::default().fg(app.theme.dim),
+                format!(
+                    "{count} unfinished from {date_label}  {}  ",
+                    app.symbols.dot
+                ),
+                app.theme.dim_style(),
             ),
-            Span::styled(
-                "c",
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(" to carry over", Style::default().fg(app.theme.dim)),
+            Span::styled("c", app.theme.accent_style().add_modifier(Modifier::BOLD)),
+            Span::styled(" to carry over", app.theme.dim_style()),
         ]);
         frame.render_widget(Paragraph::new(hint_line), parts[1]);
     }
@@ -275,17 +379,9 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
     // Empty state or task list
     if today_todos.is_empty() {
         let empty_text = Line::from(vec![
-            Span::styled("No todos yet. Press ", Style::default().fg(app.theme.dim)),
-            Span::styled(
-                "a",
-                Style::default()
-                    .fg(app.theme.accent)
-                    .add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
-                " to add your first one.",
-                Style::default().fg(app.theme.dim),
-            ),
+            Span::styled("No todos yet. Press ", app.theme.dim_style()),
+            Span::styled("a", app.theme.accent_style().add_modifier(Modifier::BOLD)),
+            Span::styled(" to add your first one.", app.theme.dim_style()),
         ]);
         frame.render_widget(Paragraph::new(empty_text), list_area);
         return;
@@ -296,7 +392,13 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
         .enumerate()
         .map(|(idx, todo)| {
             let is_selected = idx == app.today_selected_index;
-            format_todo_row(todo, is_selected, list_area.width as usize, &app.theme)
+            format_todo_row(
+                todo,
+                is_selected,
+                list_area.width as usize,
+                &app.theme,
+                &app.symbols,
+            )
         })
         .collect();
 
@@ -352,32 +454,34 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
             let marker = if is_selected {
                 if is_date_pane_active {
                     Span::styled(
-                        "› ",
-                        Style::default()
-                            .fg(app.theme.accent)
-                            .add_modifier(Modifier::BOLD),
+                        app.symbols.marker,
+                        app.theme.accent_style().add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    Span::styled("› ", Style::default().fg(app.theme.dim))
+                    Span::styled(app.symbols.marker, app.theme.dim_style())
                 }
             } else {
-                Span::raw("  ")
+                Span::raw(" ".repeat(app.symbols.marker.chars().count()))
             };
 
             let friendly_date = format_friendly_date(date, today, &app.config.short_date_format);
             let count_str = format!("{done}/{total}");
 
             // Calculate spacing so count aligns to the right edge of the date column
-            let text_space = (date_area.width as usize).saturating_sub(2 + count_str.len());
-            let date_truncated = truncate_text(&friendly_date, text_space.saturating_sub(1));
+            let marker_width = app.symbols.marker.chars().count();
+            let text_space =
+                (date_area.width as usize).saturating_sub(marker_width + count_str.len());
+            let date_truncated = truncate_text(
+                &friendly_date,
+                text_space.saturating_sub(1),
+                app.symbols.ellipsis,
+            );
             let pad_spaces = text_space.saturating_sub(date_truncated.chars().count());
 
             let date_style = if is_selected && is_date_pane_active {
-                Style::default()
-                    .fg(app.theme.text)
-                    .add_modifier(Modifier::BOLD)
+                app.theme.text_style().add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(app.theme.text)
+                app.theme.text_style()
             };
 
             let count_style = if is_overdue {
@@ -405,9 +509,9 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(date_list, date_area, &mut date_state);
 
     // 2. Draw Thin Vertical Divider
-    let divider_line = "│\n".repeat(area.height as usize);
+    let divider_line = format!("{}\n", app.symbols.v_divider).repeat(area.height as usize);
     frame.render_widget(
-        Paragraph::new(divider_line).style(Style::default().fg(app.theme.divider)),
+        Paragraph::new(divider_line).style(app.theme.divider_style()),
         divider_area,
     );
 
@@ -436,15 +540,13 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
         let heading_line = Line::from(vec![
             Span::styled(
                 full_date_str,
-                Style::default()
-                    .fg(app.theme.text)
-                    .add_modifier(Modifier::BOLD),
+                app.theme.text_style().add_modifier(Modifier::BOLD),
             ),
-            Span::styled("   •   ", Style::default().fg(app.theme.dim)),
             Span::styled(
-                format!("{done} of {total} done"),
-                Style::default().fg(app.theme.dim),
+                format!("   {}   ", app.symbols.bullet),
+                app.theme.dim_style(),
             ),
+            Span::styled(format!("{done} of {total} done"), app.theme.dim_style()),
         ]);
         frame.render_widget(Paragraph::new(heading_line), right_rows[0]);
 
@@ -452,7 +554,7 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "No todos recorded for this date.",
-                    Style::default().fg(app.theme.dim),
+                    app.theme.dim_style(),
                 )),
                 right_rows[2],
             );
@@ -484,6 +586,7 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
                         right_rows[2].width as usize,
                         time_str.as_deref(),
                         &app.theme,
+                        &app.symbols,
                     )
                 })
                 .collect();
@@ -502,18 +605,16 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
     let prompt_label = match app.input_mode {
-        crate::model::InputMode::Editing(_) => "› Edit task ",
-        _ => "› ",
+        crate::model::InputMode::Editing(_) => app.symbols.prompt_edit,
+        _ => app.symbols.prompt_default,
     };
 
     let prompt_symbol = Span::styled(
         prompt_label,
-        Style::default()
-            .fg(app.theme.accent)
-            .add_modifier(Modifier::BOLD),
+        app.theme.accent_style().add_modifier(Modifier::BOLD),
     );
 
-    let hints = "enter save  ·  esc cancel";
+    let hints = format!("enter save  {}  esc cancel", app.symbols.dot);
     let hints_len = hints.chars().count();
     let prompt_len = prompt_label.chars().count();
 
@@ -540,24 +641,18 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
             crate::model::InputMode::Editing(_) => "",
             _ => "What needs doing today?",
         };
-        spans.push(Span::styled(
-            placeholder,
-            Style::default().fg(app.theme.dim),
-        ));
+        spans.push(Span::styled(placeholder, app.theme.dim_style()));
         let placeholder_len = placeholder.chars().count();
         let pad = (area.width as usize).saturating_sub(prompt_len + placeholder_len + hints_len);
         spans.push(Span::raw(" ".repeat(pad)));
     } else {
-        spans.push(Span::styled(
-            &visible_input,
-            Style::default().fg(app.theme.text),
-        ));
+        spans.push(Span::styled(&visible_input, app.theme.text_style()));
         let pad = (area.width as usize)
             .saturating_sub(prompt_len + visible_input.chars().count() + hints_len);
         spans.push(Span::raw(" ".repeat(pad)));
     }
 
-    spans.push(Span::styled(hints, Style::default().fg(app.theme.dim)));
+    spans.push(Span::styled(hints, app.theme.dim_style()));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
@@ -574,22 +669,29 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         return;
     }
     if let Some(ref err) = app.status_message {
+        let sanitized = if app.symbols.is_ascii {
+            err.replace('·', "*")
+        } else {
+            err.clone()
+        };
         let error_line = Line::from(vec![
             Span::styled(
                 "save error: ",
                 app.theme.error_style().add_modifier(Modifier::BOLD),
             ),
-            Span::styled(err, app.theme.error_style()),
+            Span::styled(sanitized, app.theme.error_style()),
         ]);
         frame.render_widget(Paragraph::new(error_line), area);
         return;
     }
 
     if let Some(ref msg) = app.transient_message {
-        let msg_line = Line::from(vec![Span::styled(
-            msg,
-            Style::default().fg(app.theme.subtext),
-        )]);
+        let sanitized = if app.symbols.is_ascii {
+            msg.replace('·', "*")
+        } else {
+            msg.clone()
+        };
+        let msg_line = Line::from(vec![Span::styled(sanitized, app.theme.subtext_style())]);
         frame.render_widget(Paragraph::new(msg_line), area);
         return;
     }
@@ -623,13 +725,13 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     for (i, (key, action)) in hints.iter().enumerate() {
         if i > 0 {
             spans.push(Span::styled(
-                "  ·  ",
-                Style::default().fg(app.theme.divider),
+                format!("  {}  ", app.symbols.dot),
+                app.theme.divider_style(),
             ));
         }
-        spans.push(Span::styled(*key, Style::default().fg(app.theme.subtext)));
+        spans.push(Span::styled(*key, app.theme.subtext_style()));
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(*action, Style::default().fg(app.theme.dim)));
+        spans.push(Span::styled(*action, app.theme.dim_style()));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
@@ -640,42 +742,41 @@ fn format_todo_row(
     is_selected: bool,
     max_width: usize,
     theme: &Theme,
+    symbols: &Symbols,
 ) -> ListItem<'static> {
+    let marker_len = symbols.marker.chars().count();
     let marker = if is_selected {
         Span::styled(
-            "› ",
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
+            symbols.marker,
+            theme.accent_style().add_modifier(Modifier::BOLD),
         )
     } else {
-        Span::raw("  ")
+        Span::raw(" ".repeat(marker_len))
     };
 
     let checkbox = if todo.done {
-        Span::styled("✓ ", Style::default().fg(theme.accent))
+        Span::styled(symbols.check_done, Style::default().fg(theme.accent))
     } else {
-        Span::styled("○ ", Style::default().fg(theme.dim))
+        Span::styled(symbols.check_todo, theme.dim_style())
     };
 
-    // Available space for text = width - marker (2) - checkbox (2)
-    let avail = max_width.saturating_sub(5);
-    let text_truncated = truncate_text(&todo.text, avail);
+    let checkbox_len = symbols.check_done.chars().count();
+    let avail = max_width.saturating_sub(marker_len + checkbox_len + 1);
+    let text_truncated = truncate_text(&todo.text, avail, symbols.ellipsis);
 
     let text_span = if todo.done {
         Span::styled(
             text_truncated,
-            Style::default()
-                .fg(theme.dim)
-                .add_modifier(Modifier::CROSSED_OUT),
+            theme.dim_style().add_modifier(Modifier::CROSSED_OUT),
         )
     } else {
-        Span::styled(text_truncated, Style::default().fg(theme.text))
+        Span::styled(text_truncated, theme.text_style())
     };
 
     ListItem::new(Line::from(vec![marker, checkbox, text_span]))
 }
 
+#[allow(clippy::too_many_arguments)]
 fn format_todo_row_history(
     todo: &Todo,
     is_selected: bool,
@@ -684,30 +785,31 @@ fn format_todo_row_history(
     max_width: usize,
     time_str: Option<&str>,
     theme: &Theme,
+    symbols: &Symbols,
 ) -> ListItem<'static> {
+    let marker_len = symbols.marker.chars().count();
     let marker = if is_selected {
         if is_active {
             Span::styled(
-                "› ",
-                Style::default()
-                    .fg(theme.accent)
-                    .add_modifier(Modifier::BOLD),
+                symbols.marker,
+                theme.accent_style().add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled("› ", Style::default().fg(theme.dim))
+            Span::styled(symbols.marker, theme.dim_style())
         }
     } else {
-        Span::raw("  ")
+        Span::raw(" ".repeat(marker_len))
     };
 
     let checkbox = if todo.done {
-        Span::styled("✓ ", Style::default().fg(theme.accent))
+        Span::styled(symbols.check_done, Style::default().fg(theme.accent))
     } else if is_overdue {
-        Span::styled("! ", theme.warn_style())
+        Span::styled(symbols.check_overdue, theme.warn_style())
     } else {
-        Span::styled("○ ", theme.dim_style())
+        Span::styled(symbols.check_todo, theme.dim_style())
     };
 
+    let checkbox_len = symbols.check_done.chars().count();
     let suffix_str = time_str.unwrap_or("").to_string();
     let suffix_len = if suffix_str.is_empty() {
         0
@@ -715,27 +817,25 @@ fn format_todo_row_history(
         suffix_str.chars().count() + 2
     };
 
-    // Available space for text = max_width - marker (2) - checkbox (2) - suffix
-    let avail = max_width.saturating_sub(4 + suffix_len + 1);
-    let text_truncated = truncate_text(&todo.text, avail);
+    let avail = max_width.saturating_sub(marker_len + checkbox_len + suffix_len + 1);
+    let text_truncated = truncate_text(&todo.text, avail, symbols.ellipsis);
 
     let text_span = if todo.done {
         Span::styled(
             text_truncated.clone(),
-            Style::default()
-                .fg(theme.dim)
-                .add_modifier(Modifier::CROSSED_OUT),
+            theme.dim_style().add_modifier(Modifier::CROSSED_OUT),
         )
     } else {
-        Span::styled(text_truncated.clone(), Style::default().fg(theme.text))
+        Span::styled(text_truncated.clone(), theme.text_style())
     };
 
-    let pad_len = max_width.saturating_sub(4 + text_truncated.chars().count() + suffix_len);
+    let pad_len = max_width
+        .saturating_sub(marker_len + checkbox_len + text_truncated.chars().count() + suffix_len);
 
     let mut spans = vec![marker, checkbox, text_span, Span::raw(" ".repeat(pad_len))];
 
     if !suffix_str.is_empty() {
-        spans.push(Span::styled(suffix_str, Style::default().fg(theme.dim)));
+        spans.push(Span::styled(suffix_str, theme.dim_style()));
     }
 
     ListItem::new(Line::from(spans))
@@ -752,8 +852,8 @@ fn format_friendly_date(date: NaiveDate, today: NaiveDate, short_date_format: &s
     }
 }
 
-/// Truncates string gracefully with ellipsis "…" if it exceeds max_len
-fn truncate_text(text: &str, max_len: usize) -> String {
+/// Truncates string gracefully with ellipsis if it exceeds max_len
+fn truncate_text(text: &str, max_len: usize, ellipsis: &str) -> String {
     if max_len == 0 {
         return String::new();
     }
@@ -761,12 +861,13 @@ fn truncate_text(text: &str, max_len: usize) -> String {
     if char_count <= max_len {
         return text.to_string();
     }
-    if max_len <= 1 {
-        return "…".to_string();
+    let el_len = ellipsis.chars().count();
+    if max_len <= el_len {
+        return ellipsis.chars().take(max_len).collect();
     }
-    let take_count = max_len - 1;
+    let take_count = max_len - el_len;
     let truncated: String = text.chars().take(take_count).collect();
-    format!("{truncated}…")
+    format!("{truncated}{ellipsis}")
 }
 
 /// Renders a quiet slim progress bar using block characters
@@ -775,14 +876,15 @@ fn render_progress_blocks(
     total: usize,
     bar_width: usize,
     theme: &Theme,
+    symbols: &Symbols,
 ) -> Vec<Span<'static>> {
     if bar_width == 0 {
         return Vec::new();
     }
     if total == 0 {
         return vec![Span::styled(
-            "─".repeat(bar_width),
-            Style::default().fg(theme.dim),
+            symbols.h_rule.repeat(bar_width),
+            theme.dim_style(),
         )];
     }
     let filled = ((done as f64 / total as f64) * bar_width as f64).round() as usize;
@@ -790,8 +892,8 @@ fn render_progress_blocks(
     let empty = bar_width.saturating_sub(filled);
 
     vec![
-        Span::styled("█".repeat(filled), Style::default().fg(theme.accent)),
-        Span::styled("░".repeat(empty), Style::default().fg(theme.dim)),
+        Span::styled(symbols.progress_filled.repeat(filled), theme.accent_style()),
+        Span::styled(symbols.progress_empty.repeat(empty), theme.dim_style()),
     ]
 }
 
@@ -822,18 +924,16 @@ fn draw_help_overlay(app: &App, frame: &mut Frame) {
     let title_line = Line::from(vec![
         Span::styled(
             "Help",
-            Style::default()
-                .fg(app.theme.accent)
-                .add_modifier(Modifier::BOLD),
+            app.theme.accent_style().add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat((chunks[0].width as usize).saturating_sub(25))),
-        Span::styled("esc / q / ? to close", Style::default().fg(app.theme.dim)),
+        Span::styled("esc / q / ? to close", app.theme.dim_style()),
     ]);
     frame.render_widget(Paragraph::new(title_line), chunks[0]);
 
     frame.render_widget(
-        Paragraph::new("─".repeat(chunks[1].width as usize))
-            .style(Style::default().fg(app.theme.divider)),
+        Paragraph::new(app.symbols.h_rule.repeat(chunks[1].width as usize))
+            .style(app.theme.divider_style()),
         chunks[1],
     );
 
@@ -865,20 +965,18 @@ fn help_entry(key: &str, desc: &str, pad_key: usize, theme: &Theme) -> Line<'sta
     Line::from(vec![
         Span::styled(
             format!("  {key}"),
-            Style::default()
-                .fg(theme.accent)
-                .add_modifier(Modifier::BOLD),
+            theme.accent_style().add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat(key_pad + 2)),
-        Span::styled(desc.to_string(), Style::default().fg(theme.dim)),
+        Span::styled(desc.to_string(), theme.dim_style()),
     ])
 }
 
 fn help_header(title: &str, theme: &Theme) -> Line<'static> {
     Line::from(vec![Span::styled(
         title.to_string(),
-        Style::default()
-            .fg(theme.text)
+        theme
+            .text_style()
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
     )])
 }
@@ -1291,5 +1389,109 @@ mod tests {
                 cell.fg
             );
         }
+    }
+
+    #[test]
+    fn test_symbols_ascii_mode_is_pure_ascii() {
+        let sym = Symbols::ascii();
+        assert!(sym.is_ascii);
+        let strings = [
+            sym.check_done,
+            sym.check_todo,
+            sym.check_overdue,
+            sym.marker,
+            sym.prompt_default,
+            sym.prompt_edit,
+            sym.v_divider,
+            sym.h_rule,
+            sym.bullet,
+            sym.dot,
+            sym.ellipsis,
+            sym.multiply,
+            sym.progress_filled,
+            sym.progress_empty,
+        ];
+        for s in strings {
+            assert!(s.is_ascii(), "Symbol '{s}' is not pure ASCII");
+        }
+    }
+
+    #[test]
+    fn test_render_ascii_mode_all_cells_ascii() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let past = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Task 1 today unfinished".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 2,
+                text: "Task 2 today done".to_string(),
+                created_date: today,
+                done: true,
+                done_at: None,
+            },
+            Todo {
+                id: 3,
+                text: "Task 3 past overdue".to_string(),
+                created_date: past,
+                done: false,
+                done_at: None,
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos, today);
+        app.symbols = Symbols::ascii();
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let assert_all_ascii = |term: &Terminal<TestBackend>, view_name: &str| {
+            for cell in term.backend().buffer().content() {
+                assert!(
+                    cell.symbol().is_ascii(),
+                    "In view {view_name}, cell symbol '{}' contains non-ASCII char",
+                    cell.symbol()
+                );
+            }
+        };
+
+        // 1. Today view
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert_all_ascii(&terminal, "Today");
+
+        // 2. History view
+        app.current_view = View::History;
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert_all_ascii(&terminal, "History");
+
+        // 3. Input mode adding
+        app.input_mode = InputMode::Adding;
+        app.input_buffer = "New task text".to_string();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert_all_ascii(&terminal, "Input Adding");
+
+        // 4. Input mode editing
+        app.input_mode = InputMode::Editing(1);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert_all_ascii(&terminal, "Input Editing");
+
+        // 5. Help overlay
+        app.input_mode = InputMode::Normal;
+        app.show_help = true;
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert_all_ascii(&terminal, "Help Overlay");
+
+        // 6. Too-small screen
+        app.show_help = false;
+        let small_backend = TestBackend::new(30, 6);
+        let mut small_terminal = Terminal::new(small_backend).unwrap();
+        small_terminal.draw(|f| render(&mut app, f)).unwrap();
+        assert_all_ascii(&small_terminal, "Too Small Screen");
     }
 }

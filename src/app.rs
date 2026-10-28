@@ -36,6 +36,7 @@ pub struct App {
     pub selected_history_date: Option<NaiveDate>,
     pub config: crate::config::Config,
     pub theme: crate::theme::Theme,
+    pub symbols: crate::ui::Symbols,
 }
 
 impl App {
@@ -91,6 +92,7 @@ impl App {
         crate::storage::clean_stale_temp_files(&data_path);
         let load_res = load_todos(&data_path)?;
         let theme = crate::theme::Theme::from_config(&config);
+        let symbols = crate::ui::Symbols::from_config(&config);
 
         let mut app = Self {
             data_path,
@@ -120,6 +122,7 @@ impl App {
             selected_history_date: None,
             config,
             theme,
+            symbols,
         };
 
         if !warnings.is_empty() {
@@ -165,6 +168,7 @@ impl App {
             selected_history_date: None,
             config: crate::config::Config::default(),
             theme: crate::theme::Theme::default(),
+            symbols: crate::ui::Symbols::unicode(),
         };
         app.clamp_selections();
         app
