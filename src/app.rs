@@ -34,14 +34,21 @@ pub struct App {
     pub terminal_width: u16,
     pub terminal_height: u16,
     pub selected_history_date: Option<NaiveDate>,
+    pub config: crate::config::Config,
+    pub theme: crate::theme::Theme,
 }
 
 impl App {
     pub fn load_or_exit() -> Self {
+        let (config, warnings) = crate::config::Config::load();
+        Self::load_or_exit_with_config(config, warnings)
+    }
+
+    pub fn load_or_exit_with_config(config: crate::config::Config, warnings: Vec<String>) -> Self {
         let data_path =
             crate::storage::get_storage_path().unwrap_or_else(|_| PathBuf::from("todos.json"));
         let today = Local::now().date_naive();
-        match Self::try_with_config(data_path, today) {
+        match Self::try_with_config_and_settings(data_path, today, config, warnings) {
             Ok(app) => app,
             Err(e) => {
                 eprintln!("{e}");
@@ -67,8 +74,23 @@ impl App {
         data_path: PathBuf,
         today: NaiveDate,
     ) -> Result<Self, crate::storage::LoadError> {
+        Self::try_with_config_and_settings(
+            data_path,
+            today,
+            crate::config::Config::default(),
+            Vec::new(),
+        )
+    }
+
+    pub fn try_with_config_and_settings(
+        data_path: PathBuf,
+        today: NaiveDate,
+        config: crate::config::Config,
+        warnings: Vec<String>,
+    ) -> Result<Self, crate::storage::LoadError> {
         crate::storage::clean_stale_temp_files(&data_path);
         let load_res = load_todos(&data_path)?;
+        let theme = crate::theme::Theme::from_config(&config);
 
         let mut app = Self {
             data_path,
@@ -96,7 +118,13 @@ impl App {
             terminal_width: 80,
             terminal_height: 24,
             selected_history_date: None,
+            config,
+            theme,
         };
+
+        if !warnings.is_empty() {
+            app.set_transient_message(warnings.join(" · "));
+        }
 
         app.clamp_selections();
         Ok(app)
@@ -135,6 +163,8 @@ impl App {
             terminal_width: 80,
             terminal_height: 24,
             selected_history_date: None,
+            config: crate::config::Config::default(),
+            theme: crate::theme::Theme::default(),
         };
         app.clamp_selections();
         app

@@ -5,9 +5,10 @@ use ratatui::crossterm::event::{self, Event, KeyEventKind};
 use ratatui::DefaultTerminal;
 
 mod app;
+pub mod config;
 mod model;
 mod storage;
-mod theme;
+pub mod theme;
 mod ui;
 
 use app::App;
@@ -70,7 +71,8 @@ fn run_app(terminal: &mut DefaultTerminal, mut app: App) -> Result<(), Box<dyn s
 }
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let app = App::load_or_exit();
+    let (config, warnings) = config::Config::load();
+    let app = App::load_or_exit_with_config(config, warnings);
 
     // Install panic hook to restore terminal mode safely even on panic
     let original_hook = std::panic::take_hook();

@@ -1,4 +1,4 @@
-use chrono::NaiveDate;
+use chrono::{NaiveDate, Timelike};
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -6,14 +6,27 @@ use ratatui::widgets::{Clear, List, ListItem, ListState, Paragraph};
 use ratatui::Frame;
 
 use crate::app::App;
+use crate::config::TimeFormat;
 use crate::model::{HistoryPane, Todo, View};
-use crate::theme::THEME;
+use crate::theme::Theme;
 
 pub const MIN_WIDTH: u16 = 40;
 pub const MIN_HEIGHT: u16 = 8;
 
 pub fn is_too_small(width: u16, height: u16) -> bool {
     width < MIN_WIDTH || height < MIN_HEIGHT
+}
+
+pub fn format_time(dt: &chrono::DateTime<chrono::Local>, fmt: TimeFormat) -> String {
+    match fmt {
+        TimeFormat::TwentyFourHour => dt.format("%H:%M").to_string(),
+        TimeFormat::TwelveHour => {
+            let hour = dt.format("%-I");
+            let minute = dt.format("%M");
+            let am_pm = if dt.time().hour() < 12 { "am" } else { "pm" };
+            format!("{hour}:{minute} {am_pm}")
+        }
+    }
 }
 
 pub fn render(app: &mut App, frame: &mut Frame) {
@@ -41,7 +54,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
             let p = Paragraph::new(msg)
                 .alignment(ratatui::layout::Alignment::Center)
                 .wrap(ratatui::widgets::Wrap { trim: true })
-                .style(Style::default().fg(THEME.dim));
+                .style(Style::default().fg(app.theme.dim));
             frame.render_widget(p, rows[1]);
         }
         return;
@@ -84,7 +97,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     draw_header(app, frame, header_area);
     frame.render_widget(
         Paragraph::new("─".repeat(header_divider_area.width as usize))
-            .style(Style::default().fg(THEME.divider)),
+            .style(Style::default().fg(app.theme.divider)),
         header_divider_area,
     );
 
@@ -102,7 +115,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
     ) {
         frame.render_widget(
             Paragraph::new("─".repeat(prompt_divider_area.width as usize))
-                .style(Style::default().fg(THEME.divider)),
+                .style(Style::default().fg(app.theme.divider)),
             prompt_divider_area,
         );
         draw_input(app, frame, bottom_area);
@@ -112,7 +125,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 
     // 4. Draw Help Overlay if toggled
     if app.show_help {
-        draw_help_overlay(frame);
+        draw_help_overlay(app, frame);
     }
 }
 
@@ -125,29 +138,29 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
         Span::styled(
             "Today",
             Style::default()
-                .fg(THEME.accent)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )
     } else {
-        Span::styled("Today", Style::default().fg(THEME.dim))
+        Span::styled("Today", Style::default().fg(app.theme.dim))
     };
 
     let history_tab = if app.current_view == View::History {
         Span::styled(
             "History",
             Style::default()
-                .fg(THEME.accent)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
         )
     } else {
-        Span::styled("History", Style::default().fg(THEME.dim))
+        Span::styled("History", Style::default().fg(app.theme.dim))
     };
 
     let line = Line::from(vec![
         Span::styled(
             "Slate",
             Style::default()
-                .fg(THEME.accent)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
@@ -198,23 +211,25 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
     };
 
     // Friendly title row: "Friday, 23 October   3 of 5 done  ████░░░░░░"
-    let date_str = today.format("%A, %-d %B").to_string();
+    let date_str = today.format(&app.config.date_format).to_string();
     let bar_width = if area.width > 70 { 10 } else { 6 };
     let mut title_spans = vec![
         Span::styled(
             date_str,
-            Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
+            Style::default()
+                .fg(app.theme.text)
+                .add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
         Span::styled(
             format!("{done} of {total} done"),
-            Style::default().fg(THEME.dim),
+            Style::default().fg(app.theme.dim),
         ),
     ];
 
     if total > 0 {
         title_spans.push(Span::raw("  "));
-        title_spans.extend(render_progress_blocks(done, total, bar_width));
+        title_spans.extend(render_progress_blocks(done, total, bar_width, &app.theme));
     }
 
     let overdue_count = app
@@ -226,7 +241,7 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
         title_spans.push(Span::raw("    "));
         title_spans.push(Span::styled(
             format!("{overdue_count} overdue"),
-            Style::default().fg(THEME.warn),
+            Style::default().fg(app.theme.warn),
         ));
     }
 
@@ -237,20 +252,20 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
         let date_label = if prev_date == today.pred_opt().unwrap_or(today) {
             "yesterday".to_string()
         } else {
-            format_friendly_date(prev_date, today)
+            format_friendly_date(prev_date, today, &app.config.short_date_format)
         };
         let hint_line = Line::from(vec![
             Span::styled(
                 format!("{count} unfinished from {date_label}  ·  "),
-                Style::default().fg(THEME.dim),
+                Style::default().fg(app.theme.dim),
             ),
             Span::styled(
                 "c",
                 Style::default()
-                    .fg(THEME.accent)
+                    .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" to carry over", Style::default().fg(THEME.dim)),
+            Span::styled(" to carry over", Style::default().fg(app.theme.dim)),
         ]);
         frame.render_widget(Paragraph::new(hint_line), parts[1]);
     }
@@ -260,14 +275,17 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
     // Empty state or task list
     if today_todos.is_empty() {
         let empty_text = Line::from(vec![
-            Span::styled("No todos yet. Press ", Style::default().fg(THEME.dim)),
+            Span::styled("No todos yet. Press ", Style::default().fg(app.theme.dim)),
             Span::styled(
                 "a",
                 Style::default()
-                    .fg(THEME.accent)
+                    .fg(app.theme.accent)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(" to add your first one.", Style::default().fg(THEME.dim)),
+            Span::styled(
+                " to add your first one.",
+                Style::default().fg(app.theme.dim),
+            ),
         ]);
         frame.render_widget(Paragraph::new(empty_text), list_area);
         return;
@@ -278,7 +296,7 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
         .enumerate()
         .map(|(idx, todo)| {
             let is_selected = idx == app.today_selected_index;
-            format_todo_row(todo, is_selected, list_area.width as usize)
+            format_todo_row(todo, is_selected, list_area.width as usize, &app.theme)
         })
         .collect();
 
@@ -336,17 +354,17 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
                     Span::styled(
                         "› ",
                         Style::default()
-                            .fg(THEME.accent)
+                            .fg(app.theme.accent)
                             .add_modifier(Modifier::BOLD),
                     )
                 } else {
-                    Span::styled("› ", Style::default().fg(THEME.dim))
+                    Span::styled("› ", Style::default().fg(app.theme.dim))
                 }
             } else {
                 Span::raw("  ")
             };
 
-            let friendly_date = format_friendly_date(date, today);
+            let friendly_date = format_friendly_date(date, today, &app.config.short_date_format);
             let count_str = format!("{done}/{total}");
 
             // Calculate spacing so count aligns to the right edge of the date column
@@ -355,15 +373,17 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
             let pad_spaces = text_space.saturating_sub(date_truncated.chars().count());
 
             let date_style = if is_selected && is_date_pane_active {
-                Style::default().fg(THEME.text).add_modifier(Modifier::BOLD)
+                Style::default()
+                    .fg(app.theme.text)
+                    .add_modifier(Modifier::BOLD)
             } else {
-                Style::default().fg(THEME.text)
+                Style::default().fg(app.theme.text)
             };
 
             let count_style = if is_overdue {
-                Style::default().fg(THEME.warn)
+                Style::default().fg(app.theme.warn)
             } else {
-                Style::default().fg(THEME.dim)
+                Style::default().fg(app.theme.dim)
             };
 
             let line = Line::from(vec![
@@ -387,7 +407,7 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
     // 2. Draw Thin Vertical Divider
     let divider_line = "│\n".repeat(area.height as usize);
     frame.render_widget(
-        Paragraph::new(divider_line).style(Style::default().fg(THEME.divider)),
+        Paragraph::new(divider_line).style(Style::default().fg(app.theme.divider)),
         divider_area,
     );
 
@@ -412,16 +432,18 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
             .split(todo_area);
 
         // Heading: "Monday, 19 October  •  3 of 5 done"
-        let full_date_str = date.format("%A, %-d %B").to_string();
+        let full_date_str = date.format(&app.config.date_format).to_string();
         let heading_line = Line::from(vec![
             Span::styled(
                 full_date_str,
-                Style::default().fg(THEME.text).add_modifier(Modifier::BOLD),
+                Style::default()
+                    .fg(app.theme.text)
+                    .add_modifier(Modifier::BOLD),
             ),
-            Span::styled("   •   ", Style::default().fg(THEME.dim)),
+            Span::styled("   •   ", Style::default().fg(app.theme.dim)),
             Span::styled(
                 format!("{done} of {total} done"),
-                Style::default().fg(THEME.dim),
+                Style::default().fg(app.theme.dim),
             ),
         ]);
         frame.render_widget(Paragraph::new(heading_line), right_rows[0]);
@@ -430,7 +452,7 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
             frame.render_widget(
                 Paragraph::new(Span::styled(
                     "No todos recorded for this date.",
-                    Style::default().fg(THEME.dim),
+                    Style::default().fg(app.theme.dim),
                 )),
                 right_rows[2],
             );
@@ -445,7 +467,9 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
                     let is_todo_overdue = is_date_overdue && !todo.done;
                     let time_str = if todo.done {
                         match todo.done_at {
-                            Some(dt) => Some(format!("done {}", dt.format("%H:%M"))),
+                            Some(dt) => {
+                                Some(format!("done {}", format_time(&dt, app.config.time_format)))
+                            }
                             None => Some("done".to_string()),
                         }
                     } else {
@@ -459,6 +483,7 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
                         is_todo_overdue,
                         right_rows[2].width as usize,
                         time_str.as_deref(),
+                        &app.theme,
                     )
                 })
                 .collect();
@@ -484,7 +509,7 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     let prompt_symbol = Span::styled(
         prompt_label,
         Style::default()
-            .fg(THEME.accent)
+            .fg(app.theme.accent)
             .add_modifier(Modifier::BOLD),
     );
 
@@ -515,21 +540,24 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
             crate::model::InputMode::Editing(_) => "",
             _ => "What needs doing today?",
         };
-        spans.push(Span::styled(placeholder, Style::default().fg(THEME.dim)));
+        spans.push(Span::styled(
+            placeholder,
+            Style::default().fg(app.theme.dim),
+        ));
         let placeholder_len = placeholder.chars().count();
         let pad = (area.width as usize).saturating_sub(prompt_len + placeholder_len + hints_len);
         spans.push(Span::raw(" ".repeat(pad)));
     } else {
         spans.push(Span::styled(
             &visible_input,
-            Style::default().fg(THEME.text),
+            Style::default().fg(app.theme.text),
         ));
         let pad = (area.width as usize)
             .saturating_sub(prompt_len + visible_input.chars().count() + hints_len);
         spans.push(Span::raw(" ".repeat(pad)));
     }
 
-    spans.push(Span::styled(hints, Style::default().fg(THEME.dim)));
+    spans.push(Span::styled(hints, Style::default().fg(app.theme.dim)));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
@@ -550,17 +578,20 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
             Span::styled(
                 "save error: ",
                 Style::default()
-                    .fg(THEME.error)
+                    .fg(app.theme.error)
                     .add_modifier(Modifier::BOLD),
             ),
-            Span::styled(err, Style::default().fg(THEME.error)),
+            Span::styled(err, Style::default().fg(app.theme.error)),
         ]);
         frame.render_widget(Paragraph::new(error_line), area);
         return;
     }
 
     if let Some(ref msg) = app.transient_message {
-        let msg_line = Line::from(vec![Span::styled(msg, Style::default().fg(THEME.subtext))]);
+        let msg_line = Line::from(vec![Span::styled(
+            msg,
+            Style::default().fg(app.theme.subtext),
+        )]);
         frame.render_widget(Paragraph::new(msg_line), area);
         return;
     }
@@ -593,22 +624,30 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     let mut spans: Vec<Span> = Vec::new();
     for (i, (key, action)) in hints.iter().enumerate() {
         if i > 0 {
-            spans.push(Span::styled("  ·  ", Style::default().fg(THEME.divider)));
+            spans.push(Span::styled(
+                "  ·  ",
+                Style::default().fg(app.theme.divider),
+            ));
         }
-        spans.push(Span::styled(*key, Style::default().fg(THEME.subtext)));
+        spans.push(Span::styled(*key, Style::default().fg(app.theme.subtext)));
         spans.push(Span::raw(" "));
-        spans.push(Span::styled(*action, Style::default().fg(THEME.dim)));
+        spans.push(Span::styled(*action, Style::default().fg(app.theme.dim)));
     }
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
-fn format_todo_row(todo: &Todo, is_selected: bool, max_width: usize) -> ListItem<'static> {
+fn format_todo_row(
+    todo: &Todo,
+    is_selected: bool,
+    max_width: usize,
+    theme: &Theme,
+) -> ListItem<'static> {
     let marker = if is_selected {
         Span::styled(
             "› ",
             Style::default()
-                .fg(THEME.accent)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         )
     } else {
@@ -616,9 +655,9 @@ fn format_todo_row(todo: &Todo, is_selected: bool, max_width: usize) -> ListItem
     };
 
     let checkbox = if todo.done {
-        Span::styled("✓ ", Style::default().fg(THEME.accent))
+        Span::styled("✓ ", Style::default().fg(theme.accent))
     } else {
-        Span::styled("○ ", Style::default().fg(THEME.dim))
+        Span::styled("○ ", Style::default().fg(theme.dim))
     };
 
     // Available space for text = width - marker (2) - checkbox (2)
@@ -629,11 +668,11 @@ fn format_todo_row(todo: &Todo, is_selected: bool, max_width: usize) -> ListItem
         Span::styled(
             text_truncated,
             Style::default()
-                .fg(THEME.dim)
+                .fg(theme.dim)
                 .add_modifier(Modifier::CROSSED_OUT),
         )
     } else {
-        Span::styled(text_truncated, Style::default().fg(THEME.text))
+        Span::styled(text_truncated, Style::default().fg(theme.text))
     };
 
     ListItem::new(Line::from(vec![marker, checkbox, text_span]))
@@ -646,28 +685,29 @@ fn format_todo_row_history(
     is_overdue: bool,
     max_width: usize,
     time_str: Option<&str>,
+    theme: &Theme,
 ) -> ListItem<'static> {
     let marker = if is_selected {
         if is_active {
             Span::styled(
                 "› ",
                 Style::default()
-                    .fg(THEME.accent)
+                    .fg(theme.accent)
                     .add_modifier(Modifier::BOLD),
             )
         } else {
-            Span::styled("› ", Style::default().fg(THEME.dim))
+            Span::styled("› ", Style::default().fg(theme.dim))
         }
     } else {
         Span::raw("  ")
     };
 
     let checkbox = if todo.done {
-        Span::styled("✓ ", Style::default().fg(THEME.accent))
+        Span::styled("✓ ", Style::default().fg(theme.accent))
     } else if is_overdue {
-        Span::styled("! ", Style::default().fg(THEME.warn))
+        Span::styled("! ", Style::default().fg(theme.warn))
     } else {
-        Span::styled("○ ", Style::default().fg(THEME.dim))
+        Span::styled("○ ", Style::default().fg(theme.dim))
     };
 
     let suffix_str = time_str.unwrap_or("").to_string();
@@ -685,11 +725,11 @@ fn format_todo_row_history(
         Span::styled(
             text_truncated.clone(),
             Style::default()
-                .fg(THEME.dim)
+                .fg(theme.dim)
                 .add_modifier(Modifier::CROSSED_OUT),
         )
     } else {
-        Span::styled(text_truncated.clone(), Style::default().fg(THEME.text))
+        Span::styled(text_truncated.clone(), Style::default().fg(theme.text))
     };
 
     let pad_len = max_width.saturating_sub(4 + text_truncated.chars().count() + suffix_len);
@@ -697,20 +737,20 @@ fn format_todo_row_history(
     let mut spans = vec![marker, checkbox, text_span, Span::raw(" ".repeat(pad_len))];
 
     if !suffix_str.is_empty() {
-        spans.push(Span::styled(suffix_str, Style::default().fg(THEME.dim)));
+        spans.push(Span::styled(suffix_str, Style::default().fg(theme.dim)));
     }
 
     ListItem::new(Line::from(spans))
 }
 
 /// Formats dates friendly: "Today", "Yesterday", or "Mon 19 Oct"
-fn format_friendly_date(date: NaiveDate, today: NaiveDate) -> String {
+fn format_friendly_date(date: NaiveDate, today: NaiveDate, short_date_format: &str) -> String {
     if date == today {
         "Today".to_string()
     } else if today.pred_opt() == Some(date) {
         "Yesterday".to_string()
     } else {
-        date.format("%a %-d %b").to_string()
+        date.format(short_date_format).to_string()
     }
 }
 
@@ -732,14 +772,19 @@ fn truncate_text(text: &str, max_len: usize) -> String {
 }
 
 /// Renders a quiet slim progress bar using block characters
-fn render_progress_blocks(done: usize, total: usize, bar_width: usize) -> Vec<Span<'static>> {
+fn render_progress_blocks(
+    done: usize,
+    total: usize,
+    bar_width: usize,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
     if bar_width == 0 {
         return Vec::new();
     }
     if total == 0 {
         return vec![Span::styled(
             "─".repeat(bar_width),
-            Style::default().fg(THEME.dim),
+            Style::default().fg(theme.dim),
         )];
     }
     let filled = ((done as f64 / total as f64) * bar_width as f64).round() as usize;
@@ -747,12 +792,12 @@ fn render_progress_blocks(done: usize, total: usize, bar_width: usize) -> Vec<Sp
     let empty = bar_width.saturating_sub(filled);
 
     vec![
-        Span::styled("█".repeat(filled), Style::default().fg(THEME.accent)),
-        Span::styled("░".repeat(empty), Style::default().fg(THEME.dim)),
+        Span::styled("█".repeat(filled), Style::default().fg(theme.accent)),
+        Span::styled("░".repeat(empty), Style::default().fg(theme.dim)),
     ]
 }
 
-fn draw_help_overlay(frame: &mut Frame) {
+fn draw_help_overlay(app: &App, frame: &mut Frame) {
     let area = frame.area();
     if area.width < 10 || area.height < 4 {
         return;
@@ -780,17 +825,17 @@ fn draw_help_overlay(frame: &mut Frame) {
         Span::styled(
             "Help",
             Style::default()
-                .fg(THEME.accent)
+                .fg(app.theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat((chunks[0].width as usize).saturating_sub(25))),
-        Span::styled("esc / q / ? to close", Style::default().fg(THEME.dim)),
+        Span::styled("esc / q / ? to close", Style::default().fg(app.theme.dim)),
     ]);
     frame.render_widget(Paragraph::new(title_line), chunks[0]);
 
     frame.render_widget(
         Paragraph::new("─".repeat(chunks[1].width as usize))
-            .style(Style::default().fg(THEME.divider)),
+            .style(Style::default().fg(app.theme.divider)),
         chunks[1],
     );
 
@@ -810,76 +855,76 @@ fn draw_help_overlay(frame: &mut Frame) {
             ])
             .split(body_area);
 
-        frame.render_widget(Paragraph::new(build_left_help_lines()), cols[0]);
-        frame.render_widget(Paragraph::new(build_right_help_lines()), cols[2]);
+        frame.render_widget(Paragraph::new(build_left_help_lines(&app.theme)), cols[0]);
+        frame.render_widget(Paragraph::new(build_right_help_lines(&app.theme)), cols[2]);
     } else {
-        frame.render_widget(Paragraph::new(build_all_help_lines()), body_area);
+        frame.render_widget(Paragraph::new(build_all_help_lines(&app.theme)), body_area);
     }
 }
 
-fn help_entry(key: &str, desc: &str, pad_key: usize) -> Line<'static> {
+fn help_entry(key: &str, desc: &str, pad_key: usize, theme: &Theme) -> Line<'static> {
     let key_pad = pad_key.saturating_sub(key.chars().count());
     Line::from(vec![
         Span::styled(
             format!("  {key}"),
             Style::default()
-                .fg(THEME.accent)
+                .fg(theme.accent)
                 .add_modifier(Modifier::BOLD),
         ),
         Span::raw(" ".repeat(key_pad + 2)),
-        Span::styled(desc.to_string(), Style::default().fg(THEME.dim)),
+        Span::styled(desc.to_string(), Style::default().fg(theme.dim)),
     ])
 }
 
-fn help_header(title: &str) -> Line<'static> {
+fn help_header(title: &str, theme: &Theme) -> Line<'static> {
     Line::from(vec![Span::styled(
         title.to_string(),
         Style::default()
-            .fg(THEME.text)
+            .fg(theme.text)
             .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
     )])
 }
 
-fn build_left_help_lines() -> Vec<Line<'static>> {
+fn build_left_help_lines(theme: &Theme) -> Vec<Line<'static>> {
     vec![
-        help_header("Navigation"),
-        help_entry("Tab", "switch views", 10),
-        help_entry("j / k", "navigate down / up", 10),
-        help_entry("g / G", "jump top / bottom", 10),
-        help_entry("Ctrl+d/u", "half page down / up", 10),
-        help_entry("?", "toggle help", 10),
-        help_entry("q", "quit", 10),
+        help_header("Navigation", theme),
+        help_entry("Tab", "switch views", 10, theme),
+        help_entry("j / k", "navigate down / up", 10, theme),
+        help_entry("g / G", "jump top / bottom", 10, theme),
+        help_entry("Ctrl+d/u", "half page down / up", 10, theme),
+        help_entry("?", "toggle help", 10, theme),
+        help_entry("q", "quit", 10, theme),
         Line::raw(""),
-        help_header("History"),
-        help_entry("enter/l", "focus tasks column", 10),
-        help_entry("h", "focus dates column", 10),
+        help_header("History", theme),
+        help_entry("enter/l", "focus tasks column", 10, theme),
+        help_entry("h", "focus dates column", 10, theme),
         Line::raw(""),
-        help_header("Input"),
-        help_entry("enter", "save", 10),
-        help_entry("esc", "cancel", 10),
+        help_header("Input", theme),
+        help_entry("enter", "save", 10, theme),
+        help_entry("esc", "cancel", 10, theme),
     ]
 }
 
-fn build_right_help_lines() -> Vec<Line<'static>> {
+fn build_right_help_lines(theme: &Theme) -> Vec<Line<'static>> {
     vec![
-        help_header("Tasks"),
-        help_entry("a", "add new task", 10),
-        help_entry("e", "edit selected task", 10),
-        help_entry("space", "toggle complete", 10),
-        help_entry("J / K", "move task down / up", 10),
-        help_entry("m", "move task to Today", 10),
-        help_entry("d", "delete task", 10),
-        help_entry("D", "clear completed tasks", 10),
-        help_entry("c", "carry over unfinished", 10),
-        help_entry("u", "undo last action", 10),
-        help_entry("Ctrl+r", "redo undone action", 10),
+        help_header("Tasks", theme),
+        help_entry("a", "add new task", 10, theme),
+        help_entry("e", "edit selected task", 10, theme),
+        help_entry("space", "toggle complete", 10, theme),
+        help_entry("J / K", "move task down / up", 10, theme),
+        help_entry("m", "move task to Today", 10, theme),
+        help_entry("d", "delete task", 10, theme),
+        help_entry("D", "clear completed tasks", 10, theme),
+        help_entry("c", "carry over unfinished", 10, theme),
+        help_entry("u", "undo last action", 10, theme),
+        help_entry("Ctrl+r", "redo undone action", 10, theme),
     ]
 }
 
-fn build_all_help_lines() -> Vec<Line<'static>> {
-    let mut lines = build_left_help_lines();
+fn build_all_help_lines(theme: &Theme) -> Vec<Line<'static>> {
+    let mut lines = build_left_help_lines(theme);
     lines.push(Line::raw(""));
-    lines.extend(build_right_help_lines());
+    lines.extend(build_right_help_lines(theme));
     lines
 }
 
@@ -962,11 +1007,11 @@ mod tests {
         // The overdue marker '!' should be rendered
         assert!(content_history.contains('!'));
 
-        // Verify that the '!' cell has fg color THEME.warn
+        // Verify that the '!' cell has fg color app.theme.warn
         let has_warn_cell = buffer
             .content()
             .iter()
-            .any(|c| c.symbol() == "!" && c.fg == THEME.warn);
+            .any(|c| c.symbol() == "!" && c.fg == app.theme.warn);
         assert!(has_warn_cell);
     }
 

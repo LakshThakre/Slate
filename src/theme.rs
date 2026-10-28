@@ -1,12 +1,8 @@
 use ratatui::style::Color;
 
-// ==============================================================================
-// THEME CONFIGURATION
-// To swap the accent color, change the `accent` field below:
-// - Soft Teal:   Color::Rgb(78, 186, 175)  (Default)
-// - Soft Orange: Color::Rgb(228, 140, 75)
-// - Soft Purple: Color::Rgb(180, 140, 220)
-// ==============================================================================
+use crate::config::Config;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Theme {
     pub accent: Color,
     pub text: Color,
@@ -15,14 +11,32 @@ pub struct Theme {
     pub divider: Color,
     pub error: Color,
     pub warn: Color,
+    pub is_mono: bool,
 }
 
-pub const THEME: Theme = Theme {
-    accent: Color::Rgb(78, 186, 175), // Soft teal
-    text: Color::Reset,               // Terminal default foreground
-    dim: Color::DarkGray,             // Dimmed secondary text
-    subtext: Color::Gray,             // Slightly brighter for key labels
-    divider: Color::DarkGray,         // Light subtle rules
-    error: Color::LightRed,           // Non-intrusive warning/error
-    warn: Color::Rgb(228, 140, 75),   // Soft orange / warning for overdue
-};
+impl Default for Theme {
+    fn default() -> Self {
+        Self {
+            accent: Color::Rgb(78, 186, 175), // Soft teal
+            text: Color::Reset,               // Terminal default foreground
+            dim: Color::DarkGray,             // Dimmed secondary text
+            subtext: Color::Gray,             // Slightly brighter for key labels
+            divider: Color::DarkGray,         // Light subtle rules
+            error: Color::LightRed,           // Non-intrusive warning/error
+            warn: Color::Rgb(228, 140, 75),   // Soft orange / warning for overdue
+            is_mono: false,
+        }
+    }
+}
+
+impl Theme {
+    pub fn from_config(config: &Config) -> Self {
+        let mut theme = Self::default();
+        if let Some(ref accent_str) = config.accent {
+            if let Ok(color) = crate::config::parse_color(accent_str) {
+                theme.accent = color;
+            }
+        }
+        theme
+    }
+}
