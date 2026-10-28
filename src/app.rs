@@ -989,11 +989,13 @@ impl App {
             }
             KeyCode::Char('q') => return true,
             KeyCode::Tab | KeyCode::BackTab => {
-                self.current_view = match self.current_view {
-                    View::Today => View::History,
-                    View::History => View::Today,
-                };
-                self.clamp_selections();
+                if self.config.ui.show_history {
+                    self.current_view = match self.current_view {
+                        View::Today => View::History,
+                        View::History => View::Today,
+                    };
+                    self.clamp_selections();
+                }
             }
             KeyCode::Char('a') => {
                 self.current_view = View::Today;
@@ -2264,5 +2266,19 @@ mod tests {
         assert!(!app.tick(day));
         assert_eq!(app.today, day);
         assert_eq!(app.transient_message, None);
+    }
+
+    #[test]
+    fn test_tab_key_no_op_when_show_history_is_false() {
+        let day = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let mut app = App::new_for_test_with_date(Vec::new(), day);
+        app.config.ui.show_history = false;
+
+        assert_eq!(app.current_view, View::Today);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Today);
+
+        app.handle_key(key_press(KeyCode::BackTab));
+        assert_eq!(app.current_view, View::Today);
     }
 }

@@ -488,7 +488,7 @@ impl Config {
                         if (4..=40).contains(&w) {
                             config.progress.width = w as u16;
                         } else {
-                            let clamped = (w as u16).clamp(4, 40);
+                            let clamped = w.clamp(4, 40) as u16;
                             warnings.push(format!(
                                 "progress.width {w} out of range 4..=40 · clamped to {clamped}"
                             ));

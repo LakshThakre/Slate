@@ -258,16 +258,21 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
         Span::styled("History", app.theme.dim_style())
     };
 
-    let line = Line::from(vec![
+    let mut header_spans = vec![
         Span::styled(
             "Slate",
             app.theme.accent_style().add_modifier(Modifier::BOLD),
         ),
         Span::raw("    "),
         today_tab,
-        Span::raw("   "),
-        history_tab,
-    ]);
+    ];
+
+    if app.config.ui.show_history {
+        header_spans.push(Span::raw("   "));
+        header_spans.push(history_tab);
+    }
+
+    let line = Line::from(header_spans);
 
     frame.render_widget(Paragraph::new(line), area);
 }
@@ -312,43 +317,55 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
 
     // Friendly title row: "Friday, 23 October   3 of 5 done  ████░░░░░░"
     let date_str = today.format(&app.config.date_format).to_string();
-    let bar_width = if area.width > 70 { 10 } else { 6 };
-    let mut title_spans = vec![
-        Span::styled(
-            date_str,
-            Style::default()
-                .fg(app.theme.text)
-                .add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("    "),
-        Span::styled(
-            format!("{done} of {total} done"),
-            Style::default().fg(app.theme.dim),
-        ),
-    ];
+    let mut title_spans = vec![Span::styled(
+        date_str,
+        app.theme.text_style().add_modifier(Modifier::BOLD),
+    )];
 
-    if total > 0 {
-        title_spans.push(Span::raw("  "));
-        title_spans.extend(render_progress_blocks(
-            done,
-            total,
-            bar_width,
-            &app.theme,
-            &app.symbols,
+    if app.config.progress.show_count {
+        title_spans.push(Span::raw("    "));
+        title_spans.push(Span::styled(
+            format!("{done} of {total} done"),
+            app.theme.dim_style(),
         ));
     }
 
-    let overdue_count = app
-        .todos
-        .iter()
-        .filter(|t| t.created_date < today && !t.done)
-        .count();
-    if overdue_count > 0 {
-        title_spans.push(Span::raw("    "));
-        title_spans.push(Span::styled(
-            format!("{overdue_count} overdue"),
-            app.theme.warn_style(),
-        ));
+    let progress_style = if app.symbols.is_ascii
+        && app.config.progress.style != crate::config::ProgressStyle::None
+    {
+        crate::config::ProgressStyle::Ascii
+    } else {
+        app.config.progress.style
+    };
+
+    if progress_style != crate::config::ProgressStyle::None {
+        let bar_spans = render_progress_bar(
+            done,
+            total,
+            app.config.progress.width as usize,
+            progress_style,
+            &app.theme,
+            &app.symbols,
+        );
+        if !bar_spans.is_empty() {
+            title_spans.push(Span::raw("  "));
+            title_spans.extend(bar_spans);
+        }
+    }
+
+    if app.config.ui.show_history {
+        let overdue_count = app
+            .todos
+            .iter()
+            .filter(|t| t.created_date < today && !t.done)
+            .count();
+        if overdue_count > 0 {
+            title_spans.push(Span::raw("    "));
+            title_spans.push(Span::styled(
+                format!("{overdue_count} overdue"),
+                app.theme.warn_style(),
+            ));
+        }
     }
 
     frame.render_widget(Paragraph::new(Line::from(title_spans)), parts[0]);
@@ -537,17 +554,21 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
 
         // Heading: "Monday, 19 October  •  3 of 5 done"
         let full_date_str = date.format(&app.config.date_format).to_string();
-        let heading_line = Line::from(vec![
-            Span::styled(
-                full_date_str,
-                app.theme.text_style().add_modifier(Modifier::BOLD),
-            ),
-            Span::styled(
+        let mut heading_spans = vec![Span::styled(
+            full_date_str,
+            app.theme.text_style().add_modifier(Modifier::BOLD),
+        )];
+        if app.config.progress.show_count {
+            heading_spans.push(Span::styled(
                 format!("   {}   ", app.symbols.bullet),
                 app.theme.dim_style(),
-            ),
-            Span::styled(format!("{done} of {total} done"), app.theme.dim_style()),
-        ]);
+            ));
+            heading_spans.push(Span::styled(
+                format!("{done} of {total} done"),
+                app.theme.dim_style(),
+            ));
+        }
+        let heading_line = Line::from(heading_spans);
         frame.render_widget(Paragraph::new(heading_line), right_rows[0]);
 
         if date_todos.is_empty() {
@@ -697,13 +718,15 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     }
 
     let hints: Vec<(&str, &str)> = match app.current_view {
-        View::Today => vec![
-            ("a", "add"),
-            ("space", "done"),
-            ("tab", "history"),
-            ("?", "help"),
-            ("q", "quit"),
-        ],
+        View::Today => {
+            let mut list = vec![("a", "add"), ("space", "done")];
+            if app.config.ui.show_history {
+                list.push(("tab", "history"));
+            }
+            list.push(("?", "help"));
+            list.push(("q", "quit"));
+            list
+        }
         View::History => match app.history_pane {
             HistoryPane::Dates => vec![
                 ("enter/l", "tasks"),
@@ -870,31 +893,51 @@ fn truncate_text(text: &str, max_len: usize, ellipsis: &str) -> String {
     format!("{truncated}{ellipsis}")
 }
 
-/// Renders a quiet slim progress bar using block characters
-fn render_progress_blocks(
+/// Renders a quiet slim progress bar using the configured style
+pub fn render_progress_bar(
     done: usize,
     total: usize,
     bar_width: usize,
+    style: crate::config::ProgressStyle,
     theme: &Theme,
     symbols: &Symbols,
 ) -> Vec<Span<'static>> {
-    if bar_width == 0 {
+    if bar_width == 0 || style == crate::config::ProgressStyle::None {
         return Vec::new();
     }
-    if total == 0 {
-        return vec![Span::styled(
-            symbols.h_rule.repeat(bar_width),
-            theme.dim_style(),
-        )];
-    }
-    let filled = ((done as f64 / total as f64) * bar_width as f64).round() as usize;
-    let filled = filled.min(bar_width);
+
+    let effective_style = if symbols.is_ascii {
+        crate::config::ProgressStyle::Ascii
+    } else {
+        style
+    };
+
+    let (filled_char, empty_char) = match effective_style {
+        crate::config::ProgressStyle::Block => ("█", "░"),
+        crate::config::ProgressStyle::Line => ("━", "─"),
+        crate::config::ProgressStyle::Dots => ("●", "○"),
+        crate::config::ProgressStyle::Ascii => ("#", "-"),
+        crate::config::ProgressStyle::None => return Vec::new(),
+    };
+
+    let filled = (done * bar_width + total / 2)
+        .checked_div(total)
+        .unwrap_or(0)
+        .min(bar_width);
     let empty = bar_width.saturating_sub(filled);
 
-    vec![
-        Span::styled(symbols.progress_filled.repeat(filled), theme.accent_style()),
-        Span::styled(symbols.progress_empty.repeat(empty), theme.dim_style()),
-    ]
+    let mut spans = Vec::new();
+    if filled > 0 {
+        spans.push(Span::styled(
+            filled_char.repeat(filled),
+            theme.accent_style(),
+        ));
+    }
+    if empty > 0 {
+        spans.push(Span::styled(empty_char.repeat(empty), theme.dim_style()));
+    }
+
+    spans
 }
 
 fn draw_help_overlay(app: &App, frame: &mut Frame) {
@@ -953,10 +996,25 @@ fn draw_help_overlay(app: &App, frame: &mut Frame) {
             ])
             .split(body_area);
 
-        frame.render_widget(Paragraph::new(build_left_help_lines(&app.theme)), cols[0]);
-        frame.render_widget(Paragraph::new(build_right_help_lines(&app.theme)), cols[2]);
+        frame.render_widget(
+            Paragraph::new(build_left_help_lines(
+                &app.theme,
+                app.config.ui.show_history,
+            )),
+            cols[0],
+        );
+        frame.render_widget(
+            Paragraph::new(build_right_help_lines(
+                &app.theme,
+                app.config.ui.show_history,
+            )),
+            cols[2],
+        );
     } else {
-        frame.render_widget(Paragraph::new(build_all_help_lines(&app.theme)), body_area);
+        frame.render_widget(
+            Paragraph::new(build_all_help_lines(&app.theme, app.config.ui.show_history)),
+            body_area,
+        );
     }
 }
 
@@ -981,46 +1039,59 @@ fn help_header(title: &str, theme: &Theme) -> Line<'static> {
     )])
 }
 
-fn build_left_help_lines(theme: &Theme) -> Vec<Line<'static>> {
-    vec![
-        help_header("Navigation", theme),
-        help_entry("Tab", "switch views", 10, theme),
+fn build_left_help_lines(theme: &Theme, show_history: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![help_header("Navigation", theme)];
+    if show_history {
+        lines.push(help_entry("Tab", "switch views", 10, theme));
+    }
+    lines.extend(vec![
         help_entry("j / k", "navigate down / up", 10, theme),
         help_entry("g / G", "jump top / bottom", 10, theme),
         help_entry("Ctrl+d/u", "half page down / up", 10, theme),
         help_entry("?", "toggle help", 10, theme),
         help_entry("q", "quit", 10, theme),
-        Line::raw(""),
-        help_header("History", theme),
-        help_entry("enter/l", "focus tasks column", 10, theme),
-        help_entry("h", "focus dates column", 10, theme),
-        Line::raw(""),
-        help_header("Input", theme),
-        help_entry("enter", "save", 10, theme),
-        help_entry("esc", "cancel", 10, theme),
-    ]
+    ]);
+
+    if show_history {
+        lines.push(Line::raw(""));
+        lines.push(help_header("History", theme));
+        lines.push(help_entry("enter/l", "focus tasks column", 10, theme));
+        lines.push(help_entry("h", "focus dates column", 10, theme));
+    }
+
+    lines.push(Line::raw(""));
+    lines.push(help_header("Input", theme));
+    lines.push(help_entry("enter", "save", 10, theme));
+    lines.push(help_entry("esc", "cancel", 10, theme));
+
+    lines
 }
 
-fn build_right_help_lines(theme: &Theme) -> Vec<Line<'static>> {
-    vec![
+fn build_right_help_lines(theme: &Theme, show_history: bool) -> Vec<Line<'static>> {
+    let mut lines = vec![
         help_header("Tasks", theme),
         help_entry("a", "add new task", 10, theme),
         help_entry("e", "edit selected task", 10, theme),
         help_entry("space", "toggle complete", 10, theme),
         help_entry("J / K", "move task down / up", 10, theme),
-        help_entry("m", "move task to Today", 10, theme),
+    ];
+    if show_history {
+        lines.push(help_entry("m", "move task to Today", 10, theme));
+    }
+    lines.extend(vec![
         help_entry("d", "delete task", 10, theme),
         help_entry("D", "clear completed tasks", 10, theme),
         help_entry("c", "carry over unfinished", 10, theme),
         help_entry("u", "undo last action", 10, theme),
         help_entry("Ctrl+r", "redo undone action", 10, theme),
-    ]
+    ]);
+    lines
 }
 
-fn build_all_help_lines(theme: &Theme) -> Vec<Line<'static>> {
-    let mut lines = build_left_help_lines(theme);
+fn build_all_help_lines(theme: &Theme, show_history: bool) -> Vec<Line<'static>> {
+    let mut lines = build_left_help_lines(theme, show_history);
     lines.push(Line::raw(""));
-    lines.extend(build_right_help_lines(theme));
+    lines.extend(build_right_help_lines(theme, show_history));
     lines
 }
 
@@ -1493,5 +1564,183 @@ mod tests {
         let mut small_terminal = Terminal::new(small_backend).unwrap();
         small_terminal.draw(|f| render(&mut app, f)).unwrap();
         assert_all_ascii(&small_terminal, "Too Small Screen");
+    }
+
+    #[test]
+    fn test_progress_bar_styles_widths_and_edge_cases() {
+        let theme = Theme::default();
+        let unicode_sym = Symbols::unicode();
+        let ascii_sym = Symbols::ascii();
+
+        // 1. Widths 4, 10, 40 with Block style
+        for width in [4, 10, 40] {
+            // 0 of 0 tasks (safe integer math, no divide by zero)
+            let spans = render_progress_bar(
+                0,
+                0,
+                width,
+                crate::config::ProgressStyle::Block,
+                &theme,
+                &unicode_sym,
+            );
+            let text: String = spans.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text.chars().count(), width);
+            assert_eq!(text, "░".repeat(width));
+
+            // All done (5 of 5)
+            let spans_done = render_progress_bar(
+                5,
+                5,
+                width,
+                crate::config::ProgressStyle::Block,
+                &theme,
+                &unicode_sym,
+            );
+            let text_done: String = spans_done.iter().map(|s| s.content.as_ref()).collect();
+            assert_eq!(text_done.chars().count(), width);
+            assert_eq!(text_done, "█".repeat(width));
+        }
+
+        // 2. Each style: Line, Dots, Ascii, None
+        let width = 10;
+        // Line
+        let line_spans = render_progress_bar(
+            5,
+            10,
+            width,
+            crate::config::ProgressStyle::Line,
+            &theme,
+            &unicode_sym,
+        );
+        let line_text: String = line_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(line_text, "━━━━━─────");
+
+        // Dots
+        let dots_spans = render_progress_bar(
+            5,
+            10,
+            width,
+            crate::config::ProgressStyle::Dots,
+            &theme,
+            &unicode_sym,
+        );
+        let dots_text: String = dots_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(dots_text, "●●●●●○○○○○");
+
+        // Ascii
+        let ascii_spans = render_progress_bar(
+            5,
+            10,
+            width,
+            crate::config::ProgressStyle::Ascii,
+            &theme,
+            &unicode_sym,
+        );
+        let ascii_text: String = ascii_spans.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(ascii_text, "#####-----");
+
+        // None
+        let none_spans = render_progress_bar(
+            5,
+            10,
+            width,
+            crate::config::ProgressStyle::None,
+            &theme,
+            &unicode_sym,
+        );
+        assert!(none_spans.is_empty());
+
+        // 3. ASCII symbols mode forces Ascii progress bar style even if config is Block
+        let forced_ascii = render_progress_bar(
+            5,
+            10,
+            width,
+            crate::config::ProgressStyle::Block,
+            &theme,
+            &ascii_sym,
+        );
+        let forced_text: String = forced_ascii.iter().map(|s| s.content.as_ref()).collect();
+        assert_eq!(forced_text, "#####-----");
+    }
+
+    #[test]
+    fn test_render_show_history_false_hides_history_tab_and_hints() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let past = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Task 1 today".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 2,
+                text: "Task 2 overdue in past".to_string(),
+                created_date: past,
+                done: false,
+                done_at: None,
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos, today);
+        app.config.ui.show_history = false;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // 1. In normal view: History tab must NOT be rendered, and overdue marker must NOT be rendered
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content.contains("Slate"));
+        assert!(content.contains("Today"));
+        assert!(
+            !content.contains("History"),
+            "Expected 'History' tab not to appear in header when show_history=false, but found it"
+        );
+        assert!(
+            !content.contains("overdue"),
+            "Expected overdue count not to appear in header when show_history=false"
+        );
+        assert!(
+            !content.contains("tab  history"),
+            "Expected 'tab history' hint not to appear in footer"
+        );
+
+        // 2. In help overlay: History section, move-to-today, and Tab switch views must NOT be rendered
+        app.show_help = true;
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let help_content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(help_content.contains("Help"));
+        assert!(help_content.contains("Navigation"));
+        assert!(help_content.contains("Tasks"));
+        assert!(
+            !help_content.contains("History"),
+            "Expected 'History' section not to appear in help overlay when show_history=false"
+        );
+        assert!(
+            !help_content.contains("switch views"),
+            "Expected 'switch views' not to appear in help overlay when show_history=false"
+        );
+        assert!(
+            !help_content.contains("move task to Today"),
+            "Expected 'move task to Today' not to appear in help overlay when show_history=false"
+        );
     }
 }
