@@ -10,11 +10,16 @@ Slate is designed in the spirit of modern, quiet developer tools like Claude Cod
 
 ## Features
 
-- **Quiet, Minimal Interface**: Clean layout without heavy box borders, using a soft teal accent and breathable spacing.
+- **Quiet, Minimal Interface**: Clean layout without heavy box borders, using subtle accents and breathable spacing.
 - **Cross-Platform**: Works smoothly across Linux, macOS, and Windows.
+- **Runtime Theming & Presets**: Choose between `teal` (default), `orange`, `lavender`, or pure `mono` presets, or specify any custom hex (`#4ebaaf`) or ANSI accent color. Automatic 256-color fallback on terminals without 24-bit truecolor.
+- **`NO_COLOR` & ASCII Compatibility**: Honors `NO_COLOR` per no-color.org (pure monochrome with text modifiers) and supports pure ASCII symbols fallback (`SLATE_ASCII=1` or `[ui] symbols = "ascii"`).
+- **Customizable Progress Bar**: Tailor progress bar style (`block`, `line`, `dots`, `ascii`, or `none`), width (clamped to `4..=40`), and done counters.
+- **Remappable Keybindings & Arrows Mode**: Customize any keybinding via `config.toml` or switch navigation to arrow keys with `keys.mode = "arrows"`. Footer hints and help overlay update automatically.
+- **Opt-In Mouse Support**: Optional mouse capture for clicking task rows, toggling checkboxes, switching tabs, and mouse-wheel scrolling (`[ui] mouse = true`).
 - **Today & History Views**:
   - **Today View**: See today's tasks with a friendly weekday header and a slim block progress bar (`████░░░░░░`). Shows subtle overdue and carry-over indicators.
-  - **History View**: Browse past days by date (`Today`, `Yesterday`, `Mon 19 Oct`) with task counts, completion timestamps (`done 14:32`), and overdue indicators.
+  - **History View**: Browse past days by date (`Today`, `Yesterday`, `Mon 19 Oct`) with task counts, completion timestamps (`done 14:32`), and overdue indicators. Can be hidden entirely with `ui.show_history = false`.
 - **Task Text Editing (`e`)**: Edit tasks in Today and History views with an inline prompt pre-filled with existing text.
 - **Full Undo / Redo (`u`, `Ctrl+r`)**: In-memory snapshot stack (up to 50 operations) supporting all mutations (add, edit, toggle, delete, reorder, clear completed, carry over, move) with transient status feedback.
 - **Carry Over Unfinished Tasks (`c`)**: Subtle hint line on startup or rollover showing unfinished tasks from previous days with one-key carry-over into Today.
@@ -30,7 +35,7 @@ Slate is designed in the spirit of modern, quiet developer tools like Claude Cod
 - **Schema Versioning & Stepwise Migrations**: On-disk versioning (`{"version": 1, "todos": [...]}`) with backward-compatible migrations from legacy v0 formats, creating a one-time safety backup (`todos.v0.bak`).
 - **Terminal Resize & Small Screen Guard**: Dynamically adapts to terminal dimensions, clamping selections on resize. Renders a quiet centered notice (`Terminal too small · need 40×8, have W×H`) when below 40×8 while freezing mutations and preserving half-typed input until restored.
 - **Midnight Daily Rollover**: Automatically advances `today` at local midnight with zero idle CPU spin. Tasks from yesterday slide gracefully into History while keeping historical date selections pinned.
-- **Lightweight & Fast**: Sub-millisecond startup time, negligible memory footprint, and low CPU usage.
+- **Lightweight & Fast**: Sub-millisecond startup time, negligible memory footprint, and low CPU usage. Zero config required to run out of the box.
 
 ---
 
@@ -185,6 +190,8 @@ slate
 
 ## Keyboard Shortcuts
 
+> **Note:** The tables below show the **default** keybindings. Keybindings can be customized per action or switched to arrow-only navigation mode (`mode = "arrows"`) in [`config.toml`](#configuration). Footer hints and the help overlay (`?`) update dynamically to reflect your active keymap.
+
 ### Global Navigation
 | Key | Action |
 | :--- | :--- |
@@ -248,68 +255,160 @@ Slate is organized into small, focused modules under `src/`:
 
 ```text
 src/
-├── main.rs         # Application lifecycle, panic hook, terminal initialization, event loop with midnight timeout
-├── app.rs          # App state struct, task mutations, undo/redo stack, and key handlers
+├── main.rs         # Application lifecycle, panic hook, mouse capture, and event loop
+├── app.rs          # App state, task mutations, undo/redo stack, action dispatch, and mouse hit-testing
+├── config.rs       # Runtime TOML configuration, strftime/color validation, and OS path resolution
+├── keymap.rs       # Action enum, key chord parser, conflict detection, arrows mode, and dynamic hints
 ├── model.rs        # Data models (Todo, View, HistoryPane, InputMode)
 ├── storage/        # Storage subsystem:
 │   ├── mod.rs      # Atomic file loading and saving, external change detection
 │   ├── migrate.rs  # Stepwise schema migrations (v0 -> v1) and version detection
 │   ├── backup.rs   # Rolling backups engine, snapshot rotation, and pruning
 │   └── lock.rs     # Sidecar advisory file locking (3-second timeout retry loop)
-├── theme.rs        # Theme struct and color palette configuration
-└── ui.rs           # Ratatui layout rendering, small terminal guard, and component drawing helpers
+├── theme.rs        # Runtime Theme struct, presets (teal, orange, lavender, mono), and 256-color fallback
+└── ui.rs           # Ratatui rendering, Symbols (Unicode/ASCII), HitArea tracking, and component drawers
 ```
 
 ### Module Responsibilities
 
-1. **[`src/theme.rs`](src/theme.rs)**:
-   Defines the `THEME` palette with restrained tones: teal `accent`, soft orange `warn` for overdue states, light red `error`, and subtle dividers.
-2. **[`src/model.rs`](src/model.rs)**:
-   Declares the core `Todo` struct (with serde defaults for full backward compatibility) along with `View`, `HistoryPane`, and `InputMode` enums.
-3. **[`src/storage/`](src/storage/)**:
+1. **[`src/config.rs`](src/config.rs)**:
+   Loads configuration from `config.toml` (or `SLATE_CONFIG`), validates settings (color names/hex, strftime formats, progress width clamping), and provides per-field fallback with non-blocking transient warnings on bad input.
+2. **[`src/keymap.rs`](src/keymap.rs)**:
+   Manages keymappings through the `Action` enum (22 user actions), parses key chord strings, enforces unbinding protection on `Ctrl+c`, detects key conflicts, supports vim-style and arrow-only modes, and generates dynamic hints for the footer and help overlay.
+3. **[`src/theme.rs`](src/theme.rs)**:
+   Runtime `Theme` supporting presets (`teal`, `orange`, `lavender`, `mono`), custom accent color overrides, automatic ANSI-256 fallback when truecolor is absent, and `NO_COLOR` compliance.
+4. **[`src/ui.rs`](src/ui.rs)**:
+   Layout rendering, `Symbols` table (Unicode vs ASCII fallback), small terminal notice guard, hit area tracking for mouse interactions, and component drawers (`draw_header`, `draw_today`, `draw_history`, `draw_input`, `draw_footer`, `draw_help_overlay`).
+5. **[`src/storage/`](src/storage/)**:
    Provides robust, crash-resilient data persistence:
    - **`storage/mod.rs`**: Resolves OS paths, atomic save engine (PID-tagged tempfiles, fsync, rename with retries, parent sync on Unix), and external change detection.
    - **`storage/migrate.rs`**: Stepwise schema migrations. Detects v0 legacy formats (unversioned arrays or objects) and migrates them safely in memory.
    - **`storage/backup.rs`**: Rolling backup system taking timestamped snapshots (`todos-YYYYMMDD-HHMMSS.json`), pruning old snapshots to the 10 newest, and deduplicating identical snapshots.
    - **`storage/lock.rs`**: Advisory file locking via a sidecar lock file (`todos.json.lock`), held only during saves or atomic load-modify-save blocks.
-4. **[`src/app.rs`](src/app.rs)**:
-   Maintains application memory, implements the centralized snapshot-based mutation engine (`mutate`) powering instant undo/redo, manages selection clamping, daily rollover tracking, and routes keyboard events.
-5. **[`src/ui.rs`](src/ui.rs)**:
-   Handles all screen painting with dedicated helpers:
-   - `draw_header`: Top brand title, navigation tabs, and overdue counter.
-   - `draw_today`: Title row, block progress bar, carry-over hint, and today's task rows.
-   - `draw_history`: Responsive date column, vertical line rule (`│`), and date task pane with completion timestamps and overdue markers.
-   - `draw_help`: Minimal centered overlay displaying grouped keyboard shortcuts.
-   - `draw_input`: Prompt line with cursor placement for adding and editing.
-   - `draw_footer`: Compact context-aware key hints and transient status messages.
-6. **[`src/main.rs`](src/main.rs)**:
-   Lightweight orchestrator that initializes the terminal in raw mode, installs a panic hook for safe recovery, computes local midnight timeouts for zero-CPU idle polling, and restores the terminal on exit.
+6. **[`src/app.rs`](src/app.rs)**:
+   Maintains application memory, implements the centralized snapshot-based mutation engine (`mutate`) powering instant undo/redo, manages selection clamping, daily rollover tracking, routes actions, and executes mouse hit-testing.
+7. **[`src/main.rs`](src/main.rs)**:
+   Lightweight orchestrator that initializes the terminal in raw mode, installs a panic hook for safe recovery (including mouse capture reset), computes local midnight timeouts for zero-CPU idle polling, handles mouse events, and restores the terminal on exit.
 
 ---
 
-## Theming & Customization
+## Configuration
 
-To change colors, open [`src/theme.rs`](src/theme.rs) and edit the `THEME` constant:
+Slate is completely zero-config out of the box. Without a configuration file, Slate runs with default styling and vim-style keybindings. Slate never creates or writes a configuration file automatically.
 
-```rust
-pub const THEME: Theme = Theme {
-    // Soft Teal (Default):
-    accent: Color::Rgb(78, 186, 175),
+To customize Slate, create a `config.toml` file in your operating system's standard configuration directory:
 
-    text: Color::Reset,
-    dim: Color::DarkGray,
-    subtext: Color::Gray,
-    divider: Color::DarkGray,
-    error: Color::LightRed,
-    warn: Color::Rgb(228, 140, 75), // Soft orange warning for overdue
-};
-```
+- **Linux**: `~/.config/slate/config.toml`
+- **macOS**: `~/Library/Application Support/slate/config.toml`
+- **Windows**: `%APPDATA%\slate\config.toml` *(e.g. `C:\Users\<Username>\AppData\Roaming\slate\config.toml`)*
 
-After modifying, recompile and install with:
-
+You can override the config file location using the `SLATE_CONFIG` environment variable:
 ```bash
-cargo install --path .
+export SLATE_CONFIG="$HOME/dotfiles/slate.toml"
 ```
+
+A fully commented example configuration file is included in the repository root: [`config.example.toml`](config.example.toml).
+
+### Precedence (Lowest to Highest)
+
+1. **Built-in Defaults**: Hardcoded safe defaults.
+2. **Theme Preset**: Selected preset colors (`teal`, `orange`, `lavender`, `mono`).
+3. **`config.toml` Values**: User options specified in the config file.
+4. **Environment Variables**: `NO_COLOR`, `SLATE_CONFIG`, and `SLATE_ASCII`.
+
+### Fault-Tolerant Fallbacks
+
+Slate is crash-proof: a missing file, invalid TOML syntax, unknown key, invalid color format, or invalid strftime string will **never crash Slate**. Instead, Slate falls back to the safe default for that specific field and displays a dim, non-intrusive one-line warning in the footer status area.
+
+### Configuration Schema
+
+| Setting | Type | Default | Description |
+| :--- | :--- | :--- | :--- |
+| `theme` | string | `"teal"` | Theme preset: `"teal"`, `"orange"`, `"lavender"`, or `"mono"`. |
+| `accent` | string | *(preset accent)* | Optional accent override: hex (`"#4ebaaf"`) or ANSI name (`"cyan"`, `"lightmagenta"`). |
+| `date_format` | string | `"%A, %d %B"` | strftime format for Today and selected date headers (e.g. `"Friday, 23 October"`). |
+| `short_date_format` | string | `"%a %d %b"` | strftime format for History dates column (e.g. `"Mon 19 Oct"`). |
+| `time_format` | string | `"24h"` | Completion timestamp format in History: `"24h"` (`"done 14:32"`) or `"12h"` (`"done 2:32 pm"`). |
+| `week_start` | string | `"monday"` | Week start day: `"monday"`, `"sunday"`, or `"saturday"`. *(Validated and stored; the week summary view is planned for a later phase so no current view consumes this setting yet).* |
+| `[ui]` | table | | UI display settings. |
+| `ui.symbols` | string | `"unicode"` | Symbol mode: `"unicode"` (`○`, `✓`, `█`) or `"ascii"` (`[ ]`, `[x]`, `#`). |
+| `ui.show_history` | boolean | `true` | When `false`, hides the History tab and view entirely. `Tab`/`Shift+Tab` do nothing, and History shortcuts are hidden. Historical data remains safely preserved on disk. |
+| `ui.mouse` | boolean | `false` | When `true`, enables mouse interaction. When `false`, mouse capture is not enabled so terminal text selection remains uninterrupted. |
+| `[progress]` | table | | Progress bar styling. |
+| `progress.style` | string | `"block"` | Bar style: `"block"` (`█░`), `"line"` (`━─`), `"dots"` (`●○`), `"ascii"` (`#-`), or `"none"` (hide bar). |
+| `progress.width` | integer | `10` | Progress bar column width (clamped to range `4..=40`). Safe against zero tasks. |
+| `progress.show_count` | boolean | `true` | Show or hide completion counter text (`"2 of 3 done"`). |
+| `[keys]` | table | | Keybinding settings. |
+| `keys.mode` | string | `"default"` | Navigation mode: `"default"` (vim-style `j`/`k`/`h`/`l` + arrows) or `"arrows"` (arrows, PageUp/PageDown, Home/End only). |
+| `keys.<action>` | array | *(varies)* | Per-action key overrides. Replaces the default keys for that action. |
+
+### Keybinding Customization
+
+To customize keybindings, define action overrides under `[keys]`:
+
+```toml
+[keys]
+mode = "default" # "default" | "arrows"
+
+# Overrides replace the defaults for that action
+quit = ["q", "ctrl+c"]
+add = ["a", "ctrl+n"]
+toggle = ["space", "enter"]
+delete = ["d", "delete"]
+reorder_up = ["alt+up", "K"]
+reorder_down = ["alt+down", "J"]
+```
+
+#### Key String Syntax
+- **Single characters**: `"a"`, `"e"`, `"j"`, `"k"`, `"J"`, `"?"`
+- **Named keys**: `"enter"`, `"esc"`, `"space"`, `"tab"`, `"backtab"`, `"up"`, `"down"`, `"left"`, `"right"`, `"home"`, `"end"`, `"pageup"`, `"pagedown"`, `"delete"`, `"backspace"`
+- **Modifiers**: `"ctrl+"`, `"alt+"`, `"shift+"` (case-insensitive, e.g. `"ctrl+d"`, `"Shift+Up"`)
+
+#### Safety & Conflict Rules
+- `Ctrl+c` always quits and cannot be unbound.
+- Overriding an action **replaces** that action's default bindings.
+- Conflicting bindings (assigning the same key to two different actions) generate a transient footer warning, keep the first assigned action, and ignore the second.
+- Text input prompt keys (`Enter`, `Esc`, arrows, `Backspace`, `Home`/`End`) and the help overlay close keys remain fixed for typing.
+
+### Opt-In Mouse Support
+
+When `[ui] mouse = true` is enabled in `config.toml`:
+- **Left click** on a task row selects it.
+- **Left click** directly on a task's checkbox (`○` / `✓` / `[ ]` / `[x]`) toggles completion.
+- **Left click** on the `Today` or `History` tab switches the active view.
+- In **History view**, left clicking a date selects it; left clicking a task in the right pane focuses the Tasks column and selects it.
+- **Mouse scroll wheel** moves selection up or down by one item.
+- Clicks outside interactive elements or on empty lists are safe no-ops.
+- Mouse events are automatically ignored while typing in the input prompt or viewing the help overlay.
+- Mouse capture is automatically released on exit and in the panic hook, ensuring your terminal is never left in an unselectable state.
+
+### Environment Variables
+
+| Variable | Description |
+| :--- | :--- |
+| `NO_COLOR` | When set to any non-empty value (per [no-color.org](https://no-color.org)), disables all color output. Slate switches to monochrome mode using text modifiers (bold, dim, underline) only. |
+| `SLATE_ASCII` | When set (`SLATE_ASCII=1`), forces ASCII symbol mode (`[ui] symbols = "ascii"` and `progress.style = "ascii"`). |
+| `SLATE_CONFIG` | Overrides the default config file path (useful for testing or dotfiles management). |
+
+---
+
+## Theming
+
+Slate includes four built-in theme presets and supports custom accent overrides in `config.toml`:
+
+```toml
+theme = "teal"       # teal | orange | lavender | mono
+accent = "#4ebaaf"   # optional override (hex or ANSI name)
+```
+
+- **`teal`** *(default)*: Calm, restrained soft teal (`Rgb(78, 186, 175)`) with warm orange overdue warnings.
+- **`orange`**: Warm, energetic amber accent (`Rgb(228, 140, 75)`).
+- **`lavender`**: Soft purple pastel accent (`Rgb(180, 140, 220)`).
+- **`mono`**: Pure monochrome without any hue. Uses your terminal's natural foreground color with bold for selection, dim for secondary text, and underline/reverse for emphasis. Overdue and error states remain distinguishable through styling and symbols, not color alone.
+
+### Terminal Compatibility & 256-Color Fallback
+
+If your terminal does not advertise 24-bit truecolor (i.e. `COLORTERM` is not `truecolor` or `24bit`), Slate automatically converts 24-bit RGB colors to the nearest matching ANSI 256-color palette index.
 
 ---
 

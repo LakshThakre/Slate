@@ -1,0 +1,125 @@
+# Slate Configuration Example
+#
+# Place this file in your OS configuration directory:
+#   Linux:   ~/.config/slate/config.toml
+#   macOS:   ~/Library/Application Support/slate/config.toml
+#   Windows: %APPDATA%\slate\config.toml
+#
+# Or point the SLATE_CONFIG environment variable to any file path:
+#   export SLATE_CONFIG="$HOME/dotfiles/slate.toml"
+#
+# Precedence (lowest to highest):
+#   built-in defaults < theme preset < config.toml values < environment variables
+#   (Environment variables: NO_COLOR, SLATE_CONFIG, SLATE_ASCII)
+
+# Theme preset
+# Options: "teal" (default), "orange", "lavender", "mono"
+# "mono" strips all hue: uses terminal default colors with bold/dim/underline modifiers.
+# Overdue and error states remain distinguishable in mono.
+theme = "teal"
+
+# Optional accent color override
+# Overrides only the accent color of the chosen preset.
+# Accepts hex ("#rrggbb" or "#rgb") or standard ANSI color names:
+#   "black", "red", "green", "yellow", "blue", "magenta", "cyan", "gray", "darkgray", "white"
+#   and light variants like "lightred", "lightgreen", "lightcyan", etc.
+# If the terminal lacks 24-bit truecolor support, RGB colors automatically map to the nearest 256-color index.
+# accent = "#4ebaaf"
+
+# Header date format on Today and selected date in History (strftime syntax)
+# Default: "%A, %d %B" (e.g. "Friday, 23 October")
+date_format = "%A, %d %B"
+
+# History dates column format (strftime syntax)
+# Default: "%a %d %b" (e.g. "Mon 19 Oct")
+short_date_format = "%a %d %b"
+
+# Time format for completed task timestamps in History
+# Options: "24h" (e.g. "done 14:32") or "12h" (e.g. "done 2:32 pm")
+# Default: "24h"
+time_format = "24h"
+
+# Week start day
+# Options: "monday", "sunday", "saturday"
+# Default: "monday"
+# NOTE: This setting is parsed and validated now, but no current view consumes it yet
+# because the week summary view is planned for a later phase.
+week_start = "monday"
+
+[ui]
+# Icon and glyph style
+# Options: "unicode" (default) or "ascii"
+# "ascii" replaces all non-ASCII glyphs (e.g. ○ -> [ ], ✓ -> [x], █ -> #, ░ -> -).
+# Can also be enabled via the SLATE_ASCII=1 environment variable.
+symbols = "unicode"
+
+# Show or hide the History view and tab
+# Default: true
+# When false, the History tab is removed, Tab/Shift+Tab do nothing, and History-only
+# hints/shortcuts are omitted from the footer and help overlay. Historical data is preserved.
+show_history = true
+
+# Opt-in mouse support
+# Default: false
+# When true, enables mouse capture for clicking tabs, selecting task rows, clicking checkboxes,
+# and mouse-wheel scrolling. When false, mouse capture is disabled so normal terminal text
+# selection remains uninterrupted.
+mouse = false
+
+[progress]
+# Progress bar rendering style
+# Options: "block" (█░), "line" (━─), "dots" (●○), "ascii" (#-), "none" (hide bar)
+# Default: "block"
+# When [ui] symbols = "ascii" or SLATE_ASCII=1 is active, "ascii" style is enforced.
+style = "block"
+
+# Width of the progress bar in columns (clamped to 4..=40)
+# Default: 10
+width = 10
+
+# Show the count text alongside the progress bar (e.g. "2 of 3 done")
+# Default: true
+show_count = true
+
+[keys]
+# Keybinding navigation mode
+# Options: "default" (vim-style j/k/h/l plus arrows) or "arrows" (arrow keys and Home/End only)
+# Default: "default"
+mode = "default"
+
+# Optional per-action keybinding overrides.
+# Overriding an action REPLACES its default bindings with the list provided below.
+# Supported key formats:
+#   Single characters: "a", "e", "j", "k", "J", "?"
+#   Named keys: "enter", "esc", "space", "tab", "backtab", "up", "down", "left", "right",
+#               "home", "end", "pageup", "pagedown", "delete", "backspace"
+#   Modifiers: "ctrl+", "alt+", "shift+" (case-insensitive, e.g. "ctrl+c", "ctrl+r")
+#
+# Safety rules:
+#   - Ctrl+c always quits and cannot be unbound.
+#   - Conflicts (same key bound to two actions) produce a transient warning and keep the first binding.
+#   - Text input prompt keys (Enter, Esc, arrows, Backspace) remain fixed for typing.
+#
+# Available actions to override:
+# quit = ["q", "ctrl+c"]
+# add = ["a"]
+# edit = ["e"]
+# toggle = ["space", "enter"]
+# delete = ["d", "delete"]
+# clear_completed = ["D"]
+# undo = ["u"]
+# redo = ["ctrl+r"]
+# carry_over = ["c"]
+# move_to_today = ["m"]
+# move_up = ["k", "up"]
+# move_down = ["j", "down"]
+# reorder_up = ["K"]
+# reorder_down = ["J"]
+# jump_top = ["g", "home"]
+# jump_bottom = ["G", "end"]
+# half_page_up = ["ctrl+u", "pageup"]
+# half_page_down = ["ctrl+d", "pagedown"]
+# help = ["?"]
+# switch_view = ["tab", "backtab"]
+# focus_tasks = ["l", "right", "enter"]
+# focus_dates = ["h", "left"]

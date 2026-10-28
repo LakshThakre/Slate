@@ -675,4 +675,26 @@ mod tests {
         assert_eq!(WeekStart::Sunday.weekday(), chrono::Weekday::Sun);
         assert_eq!(WeekStart::Saturday.weekday(), chrono::Weekday::Sat);
     }
+
+    #[test]
+    fn test_config_example_file_loads_without_warnings() {
+        let example_content = include_str!("../config.example.toml");
+        let (config, warnings) = Config::from_str(example_content);
+        assert!(
+            warnings.is_empty(),
+            "Expected config.example.toml to parse cleanly, but got warnings: {warnings:?}"
+        );
+        assert_eq!(config.theme, "teal");
+        assert_eq!(config.date_format, "%A, %d %B");
+        assert_eq!(config.short_date_format, "%a %d %b");
+        assert_eq!(config.time_format, TimeFormat::TwentyFourHour);
+        assert_eq!(config.week_start, WeekStart::Monday);
+        assert_eq!(config.ui.symbols, SymbolsMode::Unicode);
+        assert!(config.ui.show_history);
+        assert!(!config.ui.mouse);
+        assert_eq!(config.progress.style, ProgressStyle::Block);
+        assert_eq!(config.progress.width, 10);
+        assert!(config.progress.show_count);
+        assert_eq!(config.keys.mode, KeyMode::Default);
+    }
 }
