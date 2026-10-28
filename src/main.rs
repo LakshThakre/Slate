@@ -1,8 +1,12 @@
 use std::time::Duration;
 
 use chrono::Local;
-use ratatui::crossterm::event::{self, Event, KeyEventKind};
+use ratatui::crossterm::event::{
+    self, DisableMouseCapture, EnableMouseCapture, Event, KeyEventKind,
+};
+use ratatui::crossterm::execute;
 use ratatui::DefaultTerminal;
+use std::io::stdout;
 
 mod app;
 pub mod config;
@@ -55,6 +59,9 @@ fn run_app(terminal: &mut DefaultTerminal, mut app: App) -> Result<(), Box<dyn s
                     }
                     needs_redraw = true;
                 }
+                Event::Mouse(mouse_event) if app.handle_mouse(mouse_event) => {
+                    needs_redraw = true;
+                }
                 _ => {}
             }
         }
@@ -73,18 +80,30 @@ fn run_app(terminal: &mut DefaultTerminal, mut app: App) -> Result<(), Box<dyn s
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let (config, warnings) = config::Config::load();
+    let mouse_enabled = config.ui.mouse;
     let app = App::load_or_exit_with_config(config, warnings);
 
     // Install panic hook to restore terminal mode safely even on panic
     let original_hook = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |panic_info| {
+        if mouse_enabled {
+            let _ = execute!(stdout(), DisableMouseCapture);
+        }
         ratatui::restore();
         original_hook(panic_info);
     }));
 
+    if mouse_enabled {
+        let _ = execute!(stdout(), EnableMouseCapture);
+    }
+
     let mut terminal = ratatui::init();
     let res = run_app(&mut terminal, app);
     ratatui::restore();
+
+    if mouse_enabled {
+        let _ = execute!(stdout(), DisableMouseCapture);
+    }
 
     if let Err(e) = res {
         eprintln!("Application error: {e}");

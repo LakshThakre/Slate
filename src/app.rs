@@ -38,6 +38,7 @@ pub struct App {
     pub theme: crate::theme::Theme,
     pub symbols: crate::ui::Symbols,
     pub keymap: crate::keymap::Keymap,
+    pub hit_areas: Vec<crate::ui::HitArea>,
 }
 
 impl App {
@@ -129,6 +130,7 @@ impl App {
             theme,
             symbols,
             keymap,
+            hit_areas: Vec::new(),
         };
 
         if !all_warnings.is_empty() {
@@ -176,6 +178,7 @@ impl App {
             theme: crate::theme::Theme::default(),
             symbols: crate::ui::Symbols::unicode(),
             keymap: crate::keymap::Keymap::default(),
+            hit_areas: Vec::new(),
         };
         app.clamp_selections();
         app
@@ -828,6 +831,182 @@ impl App {
             InputMode::Adding => self.handle_adding_key(key),
             InputMode::Editing(id) => self.handle_editing_key(id, key),
             InputMode::Normal => self.handle_normal_key(key),
+        }
+    }
+
+    pub fn handle_mouse(&mut self, event: ratatui::crossterm::event::MouseEvent) -> bool {
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+
+        if !self.config.ui.mouse
+            || self.is_too_small()
+            || self.show_help
+            || self.input_mode != InputMode::Normal
+        {
+            return false;
+        }
+
+        match event.kind {
+            MouseEventKind::Down(MouseButton::Left) => {
+                let col = event.column;
+                let row = event.row;
+
+                // Check checkbox targets first (they are smaller, specific sub-areas of task rows)
+                for area in &self.hit_areas {
+                    if area.contains(col, row) {
+                        match area.target {
+                            crate::ui::HitTarget::TodayCheckbox { index } => {
+                                self.today_selected_index = index;
+                                self.toggle_today_todo();
+                                return true;
+                            }
+                            crate::ui::HitTarget::HistoryCheckbox { index } => {
+                                self.history_pane = HistoryPane::Todos;
+                                self.history_todo_index = index;
+                                self.toggle_history_todo();
+                                return true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                // Check other hit targets
+                for area in &self.hit_areas {
+                    if area.contains(col, row) {
+                        match area.target {
+                            crate::ui::HitTarget::TabToday => {
+                                self.current_view = View::Today;
+                                self.clamp_selections();
+                                return true;
+                            }
+                            crate::ui::HitTarget::TabHistory => {
+                                if self.config.ui.show_history {
+                                    self.current_view = View::History;
+                                    self.clamp_selections();
+                                    return true;
+                                }
+                            }
+                            crate::ui::HitTarget::TodayTask { index } => {
+                                self.today_selected_index = index;
+                                return true;
+                            }
+                            crate::ui::HitTarget::HistoryDate { index } => {
+                                self.history_pane = HistoryPane::Dates;
+                                self.history_date_index = index;
+                                self.history_todo_index = 0;
+                                self.clamp_selections();
+                                return true;
+                            }
+                            crate::ui::HitTarget::HistoryTask { index } => {
+                                self.history_pane = HistoryPane::Todos;
+                                self.history_todo_index = index;
+                                return true;
+                            }
+                            _ => {}
+                        }
+                    }
+                }
+
+                false
+            }
+            MouseEventKind::ScrollDown => {
+                let col = event.column;
+                let row = event.row;
+                match self.current_view {
+                    View::Today => {
+                        let count = self
+                            .todos
+                            .iter()
+                            .filter(|t| t.created_date == self.today)
+                            .count();
+                        if count > 0 && self.today_selected_index + 1 < count {
+                            self.today_selected_index += 1;
+                            return true;
+                        }
+                    }
+                    View::History => {
+                        let in_date_area = self.hit_areas.iter().any(|a| {
+                            a.target == crate::ui::HitTarget::DateArea && a.contains(col, row)
+                        });
+                        let in_todo_area = self.hit_areas.iter().any(|a| {
+                            a.target == crate::ui::HitTarget::TodoArea && a.contains(col, row)
+                        });
+
+                        let scroll_dates = if in_date_area {
+                            true
+                        } else if in_todo_area {
+                            false
+                        } else {
+                            self.history_pane == HistoryPane::Dates
+                        };
+
+                        if scroll_dates {
+                            let dates = self.dates_list();
+                            if !dates.is_empty() && self.history_date_index + 1 < dates.len() {
+                                self.history_date_index += 1;
+                                self.history_todo_index = 0;
+                                self.clamp_selections();
+                                return true;
+                            }
+                        } else {
+                            let dates = self.dates_list();
+                            let selected_date = dates.get(self.history_date_index).copied();
+                            let count = if let Some(d) = selected_date {
+                                self.todos.iter().filter(|t| t.created_date == d).count()
+                            } else {
+                                0
+                            };
+                            if count > 0 && self.history_todo_index + 1 < count {
+                                self.history_todo_index += 1;
+                                return true;
+                            }
+                        }
+                    }
+                }
+                false
+            }
+            MouseEventKind::ScrollUp => {
+                let col = event.column;
+                let row = event.row;
+                match self.current_view {
+                    View::Today => {
+                        if self.today_selected_index > 0 {
+                            self.today_selected_index -= 1;
+                            return true;
+                        }
+                    }
+                    View::History => {
+                        let in_date_area = self.hit_areas.iter().any(|a| {
+                            a.target == crate::ui::HitTarget::DateArea && a.contains(col, row)
+                        });
+                        let in_todo_area = self.hit_areas.iter().any(|a| {
+                            a.target == crate::ui::HitTarget::TodoArea && a.contains(col, row)
+                        });
+
+                        let scroll_dates = if in_date_area {
+                            true
+                        } else if in_todo_area {
+                            false
+                        } else {
+                            self.history_pane == HistoryPane::Dates
+                        };
+
+                        if scroll_dates {
+                            if self.history_date_index > 0 {
+                                self.history_date_index -= 1;
+                                self.history_todo_index = 0;
+                                self.clamp_selections();
+                                return true;
+                            }
+                        } else if self.history_todo_index > 0 {
+                            self.history_todo_index -= 1;
+                            return true;
+                        }
+                    }
+                }
+                false
+            }
+            _ => false,
         }
     }
 
@@ -2223,5 +2402,369 @@ mod tests {
 
         app.handle_key(key_press(KeyCode::BackTab));
         assert_eq!(app.current_view, View::Today);
+    }
+
+    #[test]
+    fn test_mouse_support_selection_and_toggle_today() {
+        use crate::ui::render;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::Terminal;
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Task 1".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 2,
+                text: "Task 2".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos, today);
+        app.config.ui.mouse = true;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        assert_eq!(app.today_selected_index, 0);
+
+        // Click task row 1 -> selects row 1
+        let task_rect = app
+            .hit_areas
+            .iter()
+            .find(|a| a.target == crate::ui::HitTarget::TodayTask { index: 1 })
+            .expect("TodayTask { index: 1 } should be recorded")
+            .rect;
+        let ev = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: task_rect.x + 10,
+            row: task_rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(ev));
+        assert_eq!(app.today_selected_index, 1);
+
+        // Click checkbox for task 1 -> toggles done state
+        let cb_rect = app
+            .hit_areas
+            .iter()
+            .find(|a| a.target == crate::ui::HitTarget::TodayCheckbox { index: 1 })
+            .expect("TodayCheckbox { index: 1 } should be recorded")
+            .rect;
+        let ev_cb = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: cb_rect.x,
+            row: cb_rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(ev_cb));
+        assert_eq!(app.today_selected_index, 1);
+        assert!(app.todos.iter().find(|t| t.id == 2).unwrap().done);
+
+        // Click again -> toggles back to undone
+        assert!(app.handle_mouse(ev_cb));
+        assert!(!app.todos.iter().find(|t| t.id == 2).unwrap().done);
+    }
+
+    #[test]
+    fn test_mouse_support_tabs_and_history_selection_and_toggle() {
+        use crate::ui::render;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::Terminal;
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let past = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Today task".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 2,
+                text: "Past task".to_string(),
+                created_date: past,
+                done: false,
+                done_at: None,
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos, today);
+        app.config.ui.mouse = true;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        // 1. Click History tab -> switches to History view
+        let tab_hist_rect = app
+            .hit_areas
+            .iter()
+            .find(|a| a.target == crate::ui::HitTarget::TabHistory)
+            .expect("TabHistory should be recorded")
+            .rect;
+        let ev = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: tab_hist_rect.x,
+            row: tab_hist_rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(ev));
+        assert_eq!(app.current_view, View::History);
+
+        // Render History view so its hit areas are recorded
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        // 2. Click a date in the dates column
+        let date_rect = app
+            .hit_areas
+            .iter()
+            .find(|a| a.target == crate::ui::HitTarget::HistoryDate { index: 1 })
+            .expect("HistoryDate index 1 should be recorded")
+            .rect;
+        let ev_date = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: date_rect.x,
+            row: date_rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(ev_date));
+        assert_eq!(app.history_pane, HistoryPane::Dates);
+        assert_eq!(app.history_date_index, 1);
+
+        // Render to update task pane for the selected past date
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        // 3. Click task in right pane -> focuses tasks and selects it
+        let task_rect = app
+            .hit_areas
+            .iter()
+            .find(|a| a.target == crate::ui::HitTarget::HistoryTask { index: 0 })
+            .expect("HistoryTask index 0 should be recorded")
+            .rect;
+        let ev_task = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: task_rect.x + 5,
+            row: task_rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(ev_task));
+        assert_eq!(app.history_pane, HistoryPane::Todos);
+        assert_eq!(app.history_todo_index, 0);
+
+        // 4. Click checkbox in history pane -> toggles task done
+        let cb_rect = app
+            .hit_areas
+            .iter()
+            .find(|a| a.target == crate::ui::HitTarget::HistoryCheckbox { index: 0 })
+            .expect("HistoryCheckbox index 0 should be recorded")
+            .rect;
+        let ev_cb = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: cb_rect.x,
+            row: cb_rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(ev_cb));
+        assert!(app.todos.iter().find(|t| t.id == 2).unwrap().done);
+
+        // 5. Click Today tab -> switches back to Today view
+        let tab_today_rect = app
+            .hit_areas
+            .iter()
+            .find(|a| a.target == crate::ui::HitTarget::TabToday)
+            .expect("TabToday should be recorded")
+            .rect;
+        let ev_today = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: tab_today_rect.x,
+            row: tab_today_rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(ev_today));
+        assert_eq!(app.current_view, View::Today);
+    }
+
+    #[test]
+    fn test_mouse_support_scroll() {
+        use crate::ui::render;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::MouseEventKind;
+        use ratatui::Terminal;
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Task 1".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 2,
+                text: "Task 2".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 3,
+                text: "Task 3".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos, today);
+        app.config.ui.mouse = true;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        assert_eq!(app.today_selected_index, 0);
+
+        // Scroll down
+        let scroll_down = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(scroll_down));
+        assert_eq!(app.today_selected_index, 1);
+
+        assert!(app.handle_mouse(scroll_down));
+        assert_eq!(app.today_selected_index, 2);
+
+        // At end of list, scroll down returns false and does not overflow
+        assert!(!app.handle_mouse(scroll_down));
+        assert_eq!(app.today_selected_index, 2);
+
+        // Scroll up
+        let scroll_up = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(scroll_up));
+        assert_eq!(app.today_selected_index, 1);
+
+        assert!(app.handle_mouse(scroll_up));
+        assert_eq!(app.today_selected_index, 0);
+
+        // At start of list, scroll up returns false and does not underflow
+        assert!(!app.handle_mouse(scroll_up));
+        assert_eq!(app.today_selected_index, 0);
+    }
+
+    #[test]
+    fn test_mouse_support_edge_cases_and_ignores() {
+        use crate::ui::render;
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEventKind};
+        use ratatui::Terminal;
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let mut app = App::new_for_test_with_date(Vec::new(), today);
+        app.config.ui.mouse = true;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        let click = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 20,
+            row: 10,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // 1. Empty list: clicking list area is no-op
+        assert!(!app.handle_mouse(click));
+
+        // 2. Out-of-bounds click
+        let oob_click = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: 79,
+            row: 23,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!app.handle_mouse(oob_click));
+
+        // Add a todo and render
+        app.todos.push(Todo {
+            id: 1,
+            text: "Task".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+        });
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        let cb_rect = app
+            .hit_areas
+            .iter()
+            .find(|a| a.target == crate::ui::HitTarget::TodayCheckbox { index: 0 })
+            .expect("Checkbox hit area exists")
+            .rect;
+        let valid_click = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: cb_rect.x,
+            row: cb_rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+
+        // 3. Ignored while prompting (Adding)
+        app.input_mode = InputMode::Adding;
+        assert!(!app.handle_mouse(valid_click));
+
+        // 4. Ignored while prompting (Editing)
+        app.input_mode = InputMode::Editing(1);
+        assert!(!app.handle_mouse(valid_click));
+        app.input_mode = InputMode::Normal;
+
+        // 5. Ignored while help overlay is shown
+        app.show_help = true;
+        assert!(!app.handle_mouse(valid_click));
+        app.show_help = false;
+
+        // 6. Ignored when config.ui.mouse is false
+        app.config.ui.mouse = false;
+        assert!(!app.handle_mouse(valid_click));
+        app.config.ui.mouse = true;
+
+        // 7. Ignored when right click or drag
+        let right_click = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Right),
+            column: cb_rect.x,
+            row: cb_rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!app.handle_mouse(right_click));
+
+        let drag = ratatui::crossterm::event::MouseEvent {
+            kind: MouseEventKind::Drag(MouseButton::Left),
+            column: cb_rect.x,
+            row: cb_rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(!app.handle_mouse(drag));
     }
 }

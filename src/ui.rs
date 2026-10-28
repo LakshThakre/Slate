@@ -100,6 +100,34 @@ impl Symbols {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HitTarget {
+    TabToday,
+    TabHistory,
+    TodayTask { index: usize },
+    TodayCheckbox { index: usize },
+    HistoryDate { index: usize },
+    HistoryTask { index: usize },
+    HistoryCheckbox { index: usize },
+    DateArea,
+    TodoArea,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct HitArea {
+    pub rect: Rect,
+    pub target: HitTarget,
+}
+
+impl HitArea {
+    pub fn contains(&self, col: u16, row: u16) -> bool {
+        col >= self.rect.x
+            && col < self.rect.x.saturating_add(self.rect.width)
+            && row >= self.rect.y
+            && row < self.rect.y.saturating_add(self.rect.height)
+    }
+}
+
 pub const MIN_WIDTH: u16 = 40;
 pub const MIN_HEIGHT: u16 = 8;
 
@@ -120,6 +148,7 @@ pub fn format_time(dt: &chrono::DateTime<chrono::Local>, fmt: TimeFormat) -> Str
 }
 
 pub fn render(app: &mut App, frame: &mut Frame) {
+    app.hit_areas.clear();
     let terminal_area = frame.area();
     app.terminal_width = terminal_area.width;
     app.terminal_height = terminal_area.height;
@@ -232,7 +261,7 @@ pub fn render(app: &mut App, frame: &mut Frame) {
 }
 
 /// Slim top header line: App name + plain text view tabs
-fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
+fn draw_header(app: &mut App, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -267,18 +296,26 @@ fn draw_header(app: &App, frame: &mut Frame, area: Rect) {
         today_tab,
     ];
 
+    app.hit_areas.push(HitArea {
+        rect: Rect::new(area.x + 9, area.y, 5, 1),
+        target: HitTarget::TabToday,
+    });
+
     if app.config.ui.show_history {
         header_spans.push(Span::raw("   "));
         header_spans.push(history_tab);
+        app.hit_areas.push(HitArea {
+            rect: Rect::new(area.x + 17, area.y, 7, 1),
+            target: HitTarget::TabHistory,
+        });
     }
 
     let line = Line::from(header_spans);
 
     frame.render_widget(Paragraph::new(line), area);
 }
-
 /// Quiet Today view: Title row with date, count, slim block progress bar, and todo list
-fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
+fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -429,10 +466,30 @@ fn draw_today(app: &App, frame: &mut Frame, area: Rect) {
     let mut list_state = ListState::default();
     list_state.select(Some(app.today_selected_index));
     frame.render_stateful_widget(list, list_area, &mut list_state);
+
+    let offset = list_state.offset();
+    let visible_count = today_todos
+        .len()
+        .saturating_sub(offset)
+        .min(list_area.height as usize);
+    let marker_len = app.symbols.marker.chars().count() as u16;
+    let checkbox_len = app.symbols.check_done.chars().count() as u16;
+    for i in 0..visible_count {
+        let item_idx = offset + i;
+        let row_y = list_area.y + i as u16;
+        app.hit_areas.push(HitArea {
+            rect: Rect::new(list_area.x + marker_len, row_y, checkbox_len, 1),
+            target: HitTarget::TodayCheckbox { index: item_idx },
+        });
+        app.hit_areas.push(HitArea {
+            rect: Rect::new(list_area.x, row_y, list_area.width, 1),
+            target: HitTarget::TodayTask { index: item_idx },
+        });
+    }
 }
 
 /// History view: Narrow Date column + thin vertical rule + Todo list for selected date
-fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
+fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
@@ -455,6 +512,15 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
     let date_area = cols[0];
     let divider_area = cols[1];
     let todo_area = cols[3];
+
+    app.hit_areas.push(HitArea {
+        rect: date_area,
+        target: HitTarget::DateArea,
+    });
+    app.hit_areas.push(HitArea {
+        rect: todo_area,
+        target: HitTarget::TodoArea,
+    });
 
     let is_date_pane_active = app.history_pane == HistoryPane::Dates;
     let is_todo_pane_active = app.history_pane == HistoryPane::Todos;
@@ -530,6 +596,20 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
         date_state.select(Some(app.history_date_index));
     }
     frame.render_stateful_widget(date_list, date_area, &mut date_state);
+
+    let date_offset = date_state.offset();
+    let visible_dates = dates
+        .len()
+        .saturating_sub(date_offset)
+        .min(date_area.height as usize);
+    for i in 0..visible_dates {
+        let date_idx = date_offset + i;
+        let row_y = date_area.y + i as u16;
+        app.hit_areas.push(HitArea {
+            rect: Rect::new(date_area.x, row_y, date_area.width, 1),
+            target: HitTarget::HistoryDate { index: date_idx },
+        });
+    }
 
     // 2. Draw Thin Vertical Divider
     let divider_line = format!("{}\n", app.symbols.v_divider).repeat(area.height as usize);
@@ -622,6 +702,26 @@ fn draw_history(app: &App, frame: &mut Frame, area: Rect) {
             let mut todo_state = ListState::default();
             todo_state.select(Some(app.history_todo_index));
             frame.render_stateful_widget(list, right_rows[2], &mut todo_state);
+
+            let todo_offset = todo_state.offset();
+            let visible_todos = date_todos
+                .len()
+                .saturating_sub(todo_offset)
+                .min(right_rows[2].height as usize);
+            let marker_len = app.symbols.marker.chars().count() as u16;
+            let checkbox_len = app.symbols.check_done.chars().count() as u16;
+            for i in 0..visible_todos {
+                let todo_idx = todo_offset + i;
+                let row_y = right_rows[2].y + i as u16;
+                app.hit_areas.push(HitArea {
+                    rect: Rect::new(right_rows[2].x + marker_len, row_y, checkbox_len, 1),
+                    target: HitTarget::HistoryCheckbox { index: todo_idx },
+                });
+                app.hit_areas.push(HitArea {
+                    rect: Rect::new(right_rows[2].x, row_y, right_rows[2].width, 1),
+                    target: HitTarget::HistoryTask { index: todo_idx },
+                });
+            }
         }
     }
 }
@@ -1933,5 +2033,57 @@ mod tests {
             help_content.contains("x") && help_content.contains("toggle complete"),
             "Expected help overlay to contain remapped 'x' for toggle complete"
         );
+    }
+
+    #[test]
+    fn test_render_small_terminal_all_options_on_no_panic() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let past = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Task 1 today".to_string(),
+                created_date: today,
+                done: false,
+                done_at: None,
+            },
+            Todo {
+                id: 2,
+                text: "Task 2 overdue in past".to_string(),
+                created_date: past,
+                done: false,
+                done_at: None,
+            },
+        ];
+
+        for (w, h) in [(0, 0), (1, 1), (5, 2), (10, 4), (20, 5), (39, 7), (40, 8)] {
+            let backend = TestBackend::new(w, h);
+            let mut terminal = Terminal::new(backend).unwrap();
+
+            let mut app = App::new_for_test_with_date(todos.clone(), today);
+            app.config.ui.mouse = true;
+            app.config.ui.show_history = true;
+            app.config.progress.show_count = true;
+            app.config.progress.width = 40;
+            app.config.progress.style = crate::config::ProgressStyle::Block;
+
+            // Render normal view
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+
+            // Render with help open
+            app.show_help = true;
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+            app.show_help = false;
+
+            // Render with adding prompt
+            app.input_mode = crate::model::InputMode::Adding;
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+            app.input_mode = crate::model::InputMode::Normal;
+
+            // Render in history view
+            app.current_view = crate::model::View::History;
+            terminal.draw(|f| render(&mut app, f)).unwrap();
+        }
     }
 }
