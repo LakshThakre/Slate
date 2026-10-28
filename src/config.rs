@@ -18,7 +18,7 @@ impl EnvLookup for SystemEnv {
 
 pub struct MapEnv<'a>(pub HashMap<&'a str, String>);
 
-impl<'a> EnvLookup for MapEnv<'a> {
+impl EnvLookup for MapEnv<'_> {
     fn get(&self, key: &str) -> Option<String> {
         self.0.get(key).cloned()
     }
