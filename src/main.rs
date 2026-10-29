@@ -82,6 +82,11 @@ fn main() {
         }
     };
 
+    let (config, warnings) = slate::config::Config::load_from_path_or_env(
+        cli.config.as_deref(),
+        &slate::config::SystemEnv,
+    );
+
     match cli.command {
         None => {
             if !stdout().is_terminal() {
@@ -89,10 +94,6 @@ fn main() {
                 std::process::exit(1);
             }
 
-            let (config, warnings) = slate::config::Config::load_from_path_or_env(
-                cli.config.as_deref(),
-                &slate::config::SystemEnv,
-            );
             let mouse_enabled = config.ui.mouse;
             let app = App::load_or_exit_with_path_and_config(data_path, config, warnings);
 
@@ -126,7 +127,7 @@ fn main() {
         Some(cmd) => {
             let mut writer = slate::output::SafeWriter::new(stdout());
             let today = Local::now().date_naive();
-            if let Err(err) = slate::commands::run(cmd, &data_path, today, &mut writer) {
+            if let Err(err) = slate::commands::run(cmd, &data_path, today, &config, &mut writer) {
                 eprintln!("slate: {}", err.message());
                 std::process::exit(err.exit_code());
             }
