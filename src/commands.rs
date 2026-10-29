@@ -281,19 +281,11 @@ pub fn handle_list(
     all: bool,
     pending: bool,
     limit: Option<usize>,
-    plain: bool,
-    json: bool,
     data_path: &Path,
     today: NaiveDate,
     config: &crate::config::Config,
     out: &mut dyn Write,
 ) -> Result<(), CmdError> {
-    if plain && json {
-        return Err(CmdError::Usage(
-            "--plain and --json are mutually exclusive".to_string(),
-        ));
-    }
-
     let load_res =
         crate::storage::load_todos(data_path).map_err(|e| CmdError::Runtime(e.to_string()))?;
     let todos = load_res.todos;
@@ -353,36 +345,18 @@ pub fn handle_list(
         vec![(date, matching)]
     };
 
-    if plain {
-        crate::output::write_list_plain(&days_and_tasks, all, out)
-            .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
-    } else if json {
-        crate::output::write_list_json(&days_and_tasks, all, out)
-            .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
-    } else {
-        crate::output::write_list_human(&days_and_tasks, all, config, out)
-            .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
-    }
+    crate::output::write_list_human(&days_and_tasks, all, config, out)
+        .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
 
     Ok(())
 }
 
 pub fn handle_today(
-    plain: bool,
-    json: bool,
-    waybar: bool,
     data_path: &Path,
     today: NaiveDate,
     config: &crate::config::Config,
     out: &mut dyn Write,
 ) -> Result<(), CmdError> {
-    let flag_count = [plain, json, waybar].into_iter().filter(|&b| b).count();
-    if flag_count > 1 {
-        return Err(CmdError::Usage(
-            "--plain, --json, and --waybar are mutually exclusive".to_string(),
-        ));
-    }
-
     let load_res =
         crate::storage::load_todos(data_path).map_err(|e| CmdError::Runtime(e.to_string()))?;
     let todos = load_res.todos;
@@ -395,19 +369,8 @@ pub fn handle_today(
         .map(|(i, t)| (i + 1, *t))
         .collect();
 
-    if plain {
-        crate::output::write_today_plain(done, total, out)
-            .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
-    } else if json {
-        crate::output::write_today_json(today, done, total, &indexed_tasks, out)
-            .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
-    } else if waybar {
-        crate::output::write_today_waybar(done, total, &indexed_tasks, out)
-            .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
-    } else {
-        crate::output::write_today_human(today, done, total, &indexed_tasks, config, out)
-            .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
-    }
+    crate::output::write_today_human(today, done, total, &indexed_tasks, config, out)
+        .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
 
     Ok(())
 }
@@ -442,16 +405,8 @@ pub fn run(
             all,
             pending,
             limit,
-            plain,
-            json,
-        } => handle_list(
-            date, all, pending, limit, plain, json, data_path, today, config, out,
-        ),
-        Commands::Today {
-            plain,
-            json,
-            waybar,
-        } => handle_today(plain, json, waybar, data_path, today, config, out),
+        } => handle_list(date, all, pending, limit, data_path, today, config, out),
+        Commands::Today => handle_today(data_path, today, config, out),
         Commands::Path => {
             writeln!(out, "{}", data_path.display())
                 .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
@@ -659,16 +614,10 @@ mod tests {
         let config = crate::config::Config::default();
         let mut out = Vec::new();
 
-        // Empty today --plain gives 0/0
-        handle_today(true, false, false, path, today, &config, &mut out).unwrap();
-        assert_eq!(String::from_utf8_lossy(&out), "0/0\n");
-        out.clear();
-
-        // Empty today --waybar gives empty class
-        handle_today(false, false, true, path, today, &config, &mut out).unwrap();
-        let waybar_str = String::from_utf8_lossy(&out);
-        assert!(waybar_str.contains("\"class\":\"empty\""));
-        assert!(waybar_str.contains("\"text\":\"0/0\""));
+        // Empty today
+        handle_today(path, today, &config, &mut out).unwrap();
+        let today_out = String::from_utf8_lossy(&out);
+        assert!(today_out.contains("0 of 0 done"));
         out.clear();
 
         // Add 2 tasks
@@ -696,62 +645,34 @@ mod tests {
         // Mark task 1 done
         handle_done(vec![1], None, None, path, today).unwrap();
 
-        // today --plain gives 1/2
-        handle_today(true, false, false, path, today, &config, &mut out).unwrap();
-        assert_eq!(String::from_utf8_lossy(&out), "1/2\n");
+        // today shows 1 of 2 done
+        handle_today(path, today, &config, &mut out).unwrap();
+        let today_out = String::from_utf8_lossy(&out);
+        assert!(today_out.contains("1 of 2 done"));
+        assert!(today_out.contains("Task 1"));
+        assert!(today_out.contains("Task 2"));
         out.clear();
 
-        // list --plain gives tab-separated tasks
-        handle_list(
-            None, false, false, None, true, false, path, today, &config, &mut out,
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&out),
-            "1\tx\tTask 1\n2\t-\tTask 2\n"
-        );
+        // list gives human-readable tasks
+        handle_list(None, false, false, None, path, today, &config, &mut out).unwrap();
+        let list_out = String::from_utf8_lossy(&out);
+        assert!(list_out.contains("Task 1"));
+        assert!(list_out.contains("Task 2"));
         out.clear();
 
-        // list --plain --pending gives only unfinished
-        handle_list(
-            None, false, true, None, true, false, path, today, &config, &mut out,
-        )
-        .unwrap();
-        assert_eq!(String::from_utf8_lossy(&out), "2\t-\tTask 2\n");
+        // list pending gives only unfinished
+        handle_list(None, false, true, None, path, today, &config, &mut out).unwrap();
+        let pending_out = String::from_utf8_lossy(&out);
+        assert!(!pending_out.contains("Task 1"));
+        assert!(pending_out.contains("Task 2"));
         out.clear();
 
-        // list --plain --all prefixes ISO date
-        handle_list(
-            None, true, false, None, true, false, path, today, &config, &mut out,
-        )
-        .unwrap();
-        assert_eq!(
-            String::from_utf8_lossy(&out),
-            "2026-10-29\t1\tx\tTask 1\n2026-10-29\t2\t-\tTask 2\n"
-        );
+        // list all prefixes ISO date
+        handle_list(None, true, false, None, path, today, &config, &mut out).unwrap();
+        let all_out = String::from_utf8_lossy(&out);
+        assert!(all_out.contains("2026-10-29"));
+        assert!(all_out.contains("Task 1"));
+        assert!(all_out.contains("Task 2"));
         out.clear();
-    }
-
-    #[test]
-    fn test_flag_mutual_exclusion() {
-        let file = NamedTempFile::new().unwrap();
-        let path = file.path();
-        let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
-        let config = crate::config::Config::default();
-        let mut out = Vec::new();
-
-        // list with plain and json errors with Usage (code 2)
-        let res = handle_list(
-            None, false, false, None, true, true, path, today, &config, &mut out,
-        );
-        assert!(matches!(res, Err(CmdError::Usage(_))));
-
-        // today with plain and json errors with Usage (code 2)
-        let res = handle_today(true, true, false, path, today, &config, &mut out);
-        assert!(matches!(res, Err(CmdError::Usage(_))));
-
-        // today with plain and waybar errors with Usage (code 2)
-        let res = handle_today(true, false, true, path, today, &config, &mut out);
-        assert!(matches!(res, Err(CmdError::Usage(_))));
     }
 }

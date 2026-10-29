@@ -32,15 +32,16 @@ fn test_cli_add_list_done_rm_flow() {
         .success()
         .stdout("");
 
-    // 3. List --plain
+    // 3. List
     let mut cmd = Command::cargo_bin("slate").unwrap();
     cmd.arg("--data-file")
         .arg(&data_file)
         .arg("list")
-        .arg("--plain")
         .assert()
         .success()
-        .stdout("1\t-\tBuy fresh milk\n2\t-\tReview PR\n");
+        .stdout(
+            predicate::str::contains("Buy fresh milk").and(predicate::str::contains("Review PR")),
+        );
 
     // 4. Mark 1 done
     let mut cmd = Command::cargo_bin("slate").unwrap();
@@ -51,25 +52,26 @@ fn test_cli_add_list_done_rm_flow() {
         .assert()
         .success();
 
-    // 5. List --plain shows task 1 is done
+    // 5. List shows task 1 is done
     let mut cmd = Command::cargo_bin("slate").unwrap();
     cmd.arg("--data-file")
         .arg(&data_file)
         .arg("list")
-        .arg("--plain")
         .assert()
         .success()
-        .stdout("1\tx\tBuy fresh milk\n2\t-\tReview PR\n");
+        .stdout(
+            predicate::str::contains("[x]  Buy fresh milk")
+                .and(predicate::str::contains("[ ]  Review PR")),
+        );
 
-    // 6. today --plain shows 1/2
+    // 6. today shows 1 of 2 done
     let mut cmd = Command::cargo_bin("slate").unwrap();
     cmd.arg("--data-file")
         .arg(&data_file)
         .arg("today")
-        .arg("--plain")
         .assert()
         .success()
-        .stdout("1/2\n");
+        .stdout(predicate::str::contains("1 of 2 done"));
 
     // 7. rm 1
     let mut cmd = Command::cargo_bin("slate").unwrap();
@@ -80,15 +82,17 @@ fn test_cli_add_list_done_rm_flow() {
         .assert()
         .success();
 
-    // 8. List --plain shows only task 2 remains
+    // 8. List shows only task 2 remains
     let mut cmd = Command::cargo_bin("slate").unwrap();
     cmd.arg("--data-file")
         .arg(&data_file)
         .arg("list")
-        .arg("--plain")
         .assert()
         .success()
-        .stdout("1\t-\tReview PR\n");
+        .stdout(
+            predicate::str::contains("Review PR")
+                .and(predicate::str::contains("Buy fresh milk").not()),
+        );
 }
 
 #[test]
@@ -134,17 +138,6 @@ fn test_exit_codes() {
         .arg("list")
         .arg("--date")
         .arg("not-a-valid-date")
-        .assert()
-        .code(2)
-        .stderr(predicate::str::starts_with("slate: "));
-
-    // Exit 2: usage error (--plain and --json mutual exclusion)
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("list")
-        .arg("--plain")
-        .arg("--json")
         .assert()
         .code(2)
         .stderr(predicate::str::starts_with("slate: "));
@@ -221,7 +214,6 @@ fn test_list_nonexistent_file_returns_no_tasks_and_exit_0() {
     cmd.arg("--data-file")
         .arg(&missing_file)
         .arg("list")
-        .arg("--plain")
         .assert()
         .code(0)
         .stdout("");
@@ -231,7 +223,7 @@ fn test_list_nonexistent_file_returns_no_tasks_and_exit_0() {
 }
 
 #[test]
-fn test_today_plain_empty_prints_0_0() {
+fn test_today_empty_prints_0_of_0_done() {
     let dir = tempdir().unwrap();
     let data_file = dir.path().join("todos.json");
 
@@ -239,10 +231,9 @@ fn test_today_plain_empty_prints_0_0() {
     cmd.arg("--data-file")
         .arg(&data_file)
         .arg("today")
-        .arg("--plain")
         .assert()
         .code(0)
-        .stdout("0/0\n");
+        .stdout(predicate::str::contains("0 of 0 done"));
 }
 
 #[test]
@@ -325,10 +316,13 @@ fn test_legacy_v0_todos_json_loads_unchanged() {
         .arg(&data_file)
         .arg("list")
         .arg("--all")
-        .arg("--plain")
         .assert()
         .success()
-        .stdout("2026-10-25\t1\tx\tLegacy task 1\n2026-10-25\t2\t-\tLegacy task 2\n");
+        .stdout(
+            predicate::str::contains("2026-10-25")
+                .and(predicate::str::contains("[x]  Legacy task 1"))
+                .and(predicate::str::contains("[ ]  Legacy task 2")),
+        );
 }
 
 #[test]

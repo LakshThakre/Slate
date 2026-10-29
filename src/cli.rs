@@ -127,7 +127,7 @@ pub enum Commands {
 
     #[command(
         about = "List tasks",
-        after_help = "Examples:\n  slate list\n  slate list --date tomorrow\n  slate list --all --pending\n  slate list --limit 5\n  slate list --plain\n  slate list --json"
+        after_help = "Examples:\n  slate list\n  slate list --date tomorrow\n  slate list --all --pending\n  slate list --limit 5"
     )]
     List {
         #[arg(
@@ -145,28 +145,13 @@ pub enum Commands {
 
         #[arg(long, value_name = "N", help = "Limit number of tasks displayed")]
         limit: Option<usize>,
-
-        #[arg(long, help = "Plain tab-separated output")]
-        plain: bool,
-
-        #[arg(long, help = "JSON output")]
-        json: bool,
     },
 
     #[command(
         about = "Summary for today (weekday header, progress, tasks)",
-        after_help = "Examples:\n  slate today\n  slate today --plain\n  slate today --json\n  slate today --waybar"
+        after_help = "Examples:\n  slate today"
     )]
-    Today {
-        #[arg(long, help = "Plain text output: done/total (e.g. 2/3)")]
-        plain: bool,
-
-        #[arg(long, help = "JSON output with stats and tasks")]
-        json: bool,
-
-        #[arg(long, help = "Single JSON line formatted for Waybar custom module")]
-        waybar: bool,
-    },
+    Today,
 
     #[command(
         about = "Print the resolved storage data path",
