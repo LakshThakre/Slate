@@ -41,6 +41,12 @@ pub struct App {
     pub hit_areas: Vec<crate::ui::HitArea>,
 }
 
+impl Default for App {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl App {
     pub fn load_or_exit() -> Self {
         let (config, warnings) = crate::config::Config::load();
@@ -50,6 +56,14 @@ impl App {
     pub fn load_or_exit_with_config(config: crate::config::Config, warnings: Vec<String>) -> Self {
         let data_path =
             crate::storage::get_storage_path().unwrap_or_else(|_| PathBuf::from("todos.json"));
+        Self::load_or_exit_with_path_and_config(data_path, config, warnings)
+    }
+
+    pub fn load_or_exit_with_path_and_config(
+        data_path: PathBuf,
+        config: crate::config::Config,
+        warnings: Vec<String>,
+    ) -> Self {
         let today = Local::now().date_naive();
         match Self::try_with_config_and_settings(data_path, today, config, warnings) {
             Ok(app) => app,

@@ -547,12 +547,25 @@ impl Config {
         (config, warnings)
     }
 
-    pub fn load_with_env(env: &impl EnvLookup) -> (Self, Vec<String>) {
-        let Some(path) = get_config_path_with_env(env) else {
+    pub fn load_from_path_or_env(
+        path_override: Option<&std::path::Path>,
+        env: &impl EnvLookup,
+    ) -> (Self, Vec<String>) {
+        let path = match path_override {
+            Some(p) => Some(p.to_path_buf()),
+            None => get_config_path_with_env(env),
+        };
+        let Some(path) = path else {
             return (Config::default(), Vec::new());
         };
 
         if !path.exists() {
+            if path_override.is_some() {
+                return (
+                    Config::default(),
+                    vec![format!("Config file not found: {}", path.display())],
+                );
+            }
             return (Config::default(), Vec::new());
         }
 
@@ -566,6 +579,10 @@ impl Config {
                 )],
             ),
         }
+    }
+
+    pub fn load_with_env(env: &impl EnvLookup) -> (Self, Vec<String>) {
+        Self::load_from_path_or_env(None, env)
     }
 
     pub fn load() -> (Self, Vec<String>) {
