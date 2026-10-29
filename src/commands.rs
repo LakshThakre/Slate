@@ -407,11 +407,6 @@ pub fn run(
             limit,
         } => handle_list(date, all, pending, limit, data_path, today, config, out),
         Commands::Today => handle_today(data_path, today, config, out),
-        Commands::Path => {
-            writeln!(out, "{}", data_path.display())
-                .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
-            Ok(())
-        }
     }
 }
 

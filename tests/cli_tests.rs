@@ -104,7 +104,7 @@ fn test_exit_codes() {
     let mut cmd = Command::cargo_bin("slate").unwrap();
     cmd.arg("--data-file")
         .arg(&data_file)
-        .arg("path")
+        .arg("list")
         .assert()
         .code(0);
 
@@ -243,31 +243,6 @@ fn test_no_subcommand_non_tty_guard() {
     cmd.assert()
         .code(1)
         .stderr("slate: not a terminal (try \"slate list\")\n");
-}
-
-#[test]
-fn test_slate_data_env_var_precedence() {
-    let dir = tempdir().unwrap();
-    let env_file = dir.path().join("env_todos.json");
-    let flag_file = dir.path().join("flag_todos.json");
-
-    // 1. Set SLATE_DATA env var
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.env("SLATE_DATA", &env_file)
-        .arg("path")
-        .assert()
-        .success()
-        .stdout(format!("{}\n", env_file.display()));
-
-    // 2. Flag overrides SLATE_DATA
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.env("SLATE_DATA", &env_file)
-        .arg("--data-file")
-        .arg(&flag_file)
-        .arg("path")
-        .assert()
-        .success()
-        .stdout(format!("{}\n", flag_file.display()));
 }
 
 #[test]

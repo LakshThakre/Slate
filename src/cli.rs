@@ -152,10 +152,4 @@ pub enum Commands {
         after_help = "Examples:\n  slate today"
     )]
     Today,
-
-    #[command(
-        about = "Print the resolved storage data path",
-        after_help = "Examples:\n  slate path\n  slate --data-file /tmp/test.json path"
-    )]
-    Path,
 }
