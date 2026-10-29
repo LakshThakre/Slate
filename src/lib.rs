@@ -2,7 +2,6 @@ pub mod app;
 pub mod cli;
 pub mod commands;
 pub mod config;
-pub mod exchange;
 pub mod keymap;
 pub mod model;
 pub mod output;

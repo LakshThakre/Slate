@@ -458,32 +458,6 @@ pub fn run(
             Ok(())
         }
         Commands::Completions { shell } => handle_completions(shell, out),
-        Commands::Export {
-            format,
-            from,
-            to,
-            date,
-            output,
-        } => crate::exchange::handle_export(
-            format,
-            from,
-            to,
-            date,
-            output.as_deref(),
-            data_path,
-            today,
-            out,
-        ),
-        Commands::Import {
-            file,
-            format,
-            date,
-            replace,
-            yes,
-            dry_run,
-        } => crate::exchange::handle_import(
-            &file, format, date, replace, yes, dry_run, data_path, today, out,
-        ),
     }
 }
 
@@ -810,8 +784,6 @@ mod tests {
             assert!(script.contains("done"), "shell {shell:?} missing done");
             assert!(script.contains("list"), "shell {shell:?} missing list");
             assert!(script.contains("today"), "shell {shell:?} missing today");
-            assert!(script.contains("export"), "shell {shell:?} missing export");
-            assert!(script.contains("import"), "shell {shell:?} missing import");
         }
     }
 }
