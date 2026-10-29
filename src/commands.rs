@@ -458,7 +458,32 @@ pub fn run(
             Ok(())
         }
         Commands::Completions { shell } => handle_completions(shell, out),
-        _ => Err(CmdError::Runtime("not implemented yet".to_string())),
+        Commands::Export {
+            format,
+            from,
+            to,
+            date,
+            output,
+        } => crate::exchange::handle_export(
+            format,
+            from,
+            to,
+            date,
+            output.as_deref(),
+            data_path,
+            today,
+            out,
+        ),
+        Commands::Import {
+            file,
+            format,
+            date,
+            replace,
+            yes,
+            dry_run,
+        } => crate::exchange::handle_import(
+            &file, format, date, replace, yes, dry_run, data_path, today, out,
+        ),
     }
 }
 
