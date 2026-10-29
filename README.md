@@ -249,19 +249,252 @@ slate
 
 ---
 
+## Command Line
+
+Slate features a first-class scriptable command-line interface. You can add tasks, mark them complete, inspect progress in status bars (tmux, Waybar, Polybar), generate shell completions, and import/export task archives without touching the terminal state.
+
+### Running with No Arguments
+- **Interactive Terminal (TTY)**: Running `slate` with no arguments launches the full TUI.
+- **Non-Interactive (Piped / Scripted)**: If `stdout` is not a TTY, Slate refuses to start the TUI, prints `slate: not a terminal (try "slate list")` to `stderr`, and exits with code `1`.
+
+### Core CLI Design Principles
+- **Clean Standard Streams**: `stdout` carries data only (ready for UNIX piping). Warnings, errors, and hints go exclusively to `stderr`.
+- **Zero Terminal State Alteration**: Subcommands never enter raw mode, never switch to the alternate screen, and never enable mouse capture.
+- **Broken-Pipe Safe**: Commands like `slate list | head -n 1` exit cleanly without panic or broken pipe errors (`EPIPE`).
+- **Data Safety**: Every mutating command executes load -> modify -> atomic save (via temporary file and atomic rename) under an advisory sidecar file lock (`todos.json.lock`).
+- **TTY & Color Detection**: Respects `NO_COLOR` and ASCII symbols settings. Piped output is always plain text without ANSI escape sequences.
+
+---
+
+### Global Options
+
+These options apply to both the TUI and all CLI subcommands:
+
+| Option | Environment Variable | Description |
+| :--- | :--- | :--- |
+| `--data-file <PATH>` | `SLATE_DATA` | Path to storage JSON file. Precedence: flag > `SLATE_DATA` > OS default. Missing parent directories are created on first write; reading a nonexistent file returns no tasks without error. |
+| `--config <PATH>` | `SLATE_CONFIG` | Path to TOML configuration file. Overrides `SLATE_CONFIG` and the OS default. |
+| `-V`, `--version` | | Print version. |
+| `-h`, `--help` | | Print help and subcommand usage examples. |
+
+---
+
+### Subcommands Summary
+
+| Command | Arguments & Options | Description |
+| :--- | :--- | :--- |
+| `slate add <TEXT>...` | `[--date <DATE>]` `[-q \| --quiet]` | Joins words into one task. Pass `-` to read one task per line from stdin. Trims text and rejects empty tasks (exit code 2). |
+| `slate done <N>...` | `[--date <DATE>]` `[--match <TEXT>]` | Marks tasks done and records completion timestamp. Already-done tasks are a no-op. |
+| `slate undone <N>...` | `[--date <DATE>]` `[--match <TEXT>]` | Marks tasks unfinished (clears completion timestamp). |
+| `slate rm <N>...` | `[--date <DATE>]` `[--match <TEXT>]` | Deletes tasks. Multiple indices are resolved against the original list before any deletion. |
+| `slate list` | `[--date <DATE>]` `[--all]` `[--pending]` `[--limit <N>]` `[--plain \| --json]` | Lists tasks for a day or across all days (`--all`, newest first). |
+| `slate today` | `[--plain \| --json \| --waybar]` | Summary for today: weekday header, progress bar, and tasks, or custom format. |
+| `slate path` | | Prints the resolved data file path. |
+| `slate export` | `[--format <FMT>]` `[--from <DATE>]` `[--to <DATE>]` `[--date <DATE>]` `[-o <FILE>]` | Exports tasks to JSON, Markdown, CSV, or plain text (stdout by default). |
+| `slate import <FILE\|->` | `[--format <FMT>]` `[--date <DATE>]` `[--replace --yes]` `[--dry-run]` | Imports tasks from JSON, Markdown, CSV, or text (stdin requires `--format`). |
+| `slate completions <SHELL>` | `<bash\|zsh\|fish\|powershell>` | Outputs shell completion script to stdout. |
+
+---
+
+### Addressing Tasks & Dates
+
+#### Addressing by Index or Substring
+Tasks in mutating commands (`done`, `undone`, `rm`) are addressed by their **1-based index** in that day's list (matching `slate list`), or by `--match <TEXT>`:
+- **1-based Index**: Positional numbers are always 1-based indices (e.g. `slate done 1 3`).
+- **Substring Match (`--match <TEXT>`)**: Case-insensitive substring matching. Must match exactly one task. If no tasks or multiple tasks match, the command fails with exit code `3` and lists the candidate matches on `stderr`.
+- **Atomic Validation**: Multi-index commands validate all indices before applying mutations. If any index is invalid, no tasks are modified.
+- **Stable Multi-Index Removal**: In `slate rm 1 2`, indices are resolved against the list as it existed *before* any deletions occur, correctly removing the original first and second tasks.
+
+#### Date Syntax (`--date`)
+The `--date` option accepts:
+- `today` *(default)*
+- `yesterday`
+- `tomorrow`
+- `YYYY-MM-DD` (e.g. `2026-10-27`)
+
+---
+
+### Output Formats
+
+Every query command (`list`, `today`) supports structured output formats. `--plain`, `--json`, and `--waybar` are mutually exclusive.
+
+#### `slate list`
+- **Human (TTY)**:
+  ```text
+    1  ○  Review project architecture
+    2  ✓  Buy fresh bread           done 11:53
+  ```
+  *(Uses active theme symbols and time format. `--all` prints a dim date header before each day's group).*
+- **Plain (`--plain`)**: Tab-separated `<index>\t<done>\t<text>`. Done is represented as `x`, pending as `-`. When `--all` is used, the ISO date is prefixed: `<date>\t<index>\t<done>\t<text>`. Tabs and newlines in task text are sanitized to spaces.
+  ```text
+  1	-	Review project architecture
+  2	x	Buy fresh bread
+  ```
+- **JSON (`--json`)**: Single-line JSON with schema version and timestamps:
+  ```json
+  {"schema_version":1,"date":"2026-10-27","tasks":[{"index":1,"text":"Review project architecture","done":false,"done_at":null},{"index":2,"text":"Buy fresh bread","done":true,"done_at":"2026-10-27T11:53:00+02:00"}]}
+  ```
+  *(With `--all`, the output contains a `"days": [...]` array).*
+
+#### `slate today`
+- **Human (TTY)**: Prints the full weekday header, done/total counter, progress bar, and today's task list.
+- **Plain (`--plain`)**: Exactly one line: `done/total` (e.g. `2/3`). If there are zero tasks, prints `0/0`. Ideal for status bars.
+- **JSON (`--json`)**: Single-line JSON with completion percentages:
+  ```json
+  {"schema_version":1,"date":"2026-10-27","done":2,"total":3,"percent":66,"tasks":[...]}
+  ```
+- **Waybar (`--waybar`)**: Single JSON line designed for Waybar's custom JSON module:
+  ```json
+  {"text":"2/3","tooltip":"Review project architecture\nBuy fresh bread","class":"pending","percentage":66}
+  ```
+  *(The `class` attribute is `empty` when there are no tasks, `done` when all tasks are complete, or `pending`).*
+
+---
+
+### Exit Codes
+
+Slate uses standard, predictable exit codes for scripting:
+
+| Code | Meaning | Description |
+| :---: | :--- | :--- |
+| `0` | **Success** | Command completed successfully. |
+| `1` | **Runtime / I/O Error** | Unreadable storage file, corrupt JSON database, lock acquisition timeout, or non-terminal environment without a subcommand. |
+| `2` | **Usage Error** | Invalid date format, empty task text, missing arguments, or mutually exclusive options (e.g. `--plain` and `--json`). |
+| `3` | **No Such Task** | Specified task index out of range, or `--match` found 0 matches or multiple ambiguous candidates. |
+
+---
+
+### Status Bar Integrations
+
+#### 1. tmux
+Display today's task counter in your tmux status bar:
+```tmux
+# ~/.tmux.conf
+set -g status-right "#(slate today --plain) | %H:%M"
+```
+
+#### 2. Waybar
+Add a custom module to your Waybar configuration:
+```jsonc
+// ~/.config/waybar/config
+"custom/slate": {
+    "exec": "slate today --waybar",
+    "return-type": "json",
+    "interval": 60,
+    "format": "✓ {}",
+    "on-click": "alacritty -e slate"
+}
+```
+
+Style the module in `~/.config/waybar/style.css`:
+```css
+#custom-slate.pending {
+    color: #e48c4b;
+}
+
+#custom-slate.done {
+    color: #4ebaaf;
+}
+
+#custom-slate.empty {
+    color: #888888;
+}
+```
+
+#### 3. Polybar
+Add a script module to Polybar:
+```ini
+; ~/.config/polybar/config.ini
+[module/slate]
+type = custom/script
+exec = slate today --plain
+interval = 60
+format-prefix = "✓ "
+click-left = alacritty -e slate
+```
+
+---
+
+### Shell Completions
+
+Generate shell completions for your shell using `slate completions <SHELL>`:
+
+#### Bash
+```bash
+mkdir -p ~/.local/share/bash-completion/completions
+slate completions bash > ~/.local/share/bash-completion/completions/slate
+```
+
+#### Zsh
+```zsh
+mkdir -p ~/.zfunc
+slate completions zsh > ~/.zfunc/_slate
+
+# Ensure ~/.zfunc is in your fpath by adding this to ~/.zshrc (before compinit):
+# fpath=(~/.zfunc $fpath)
+# autoload -Uz compinit && compinit
+```
+
+#### Fish
+```fish
+mkdir -p ~/.config/fish/completions
+slate completions fish > ~/.config/fish/completions/slate.fish
+```
+
+#### PowerShell
+```powershell
+if (!(Test-Path -Path $PROFILE)) { New-Item -ItemType File -Path $PROFILE -Force }
+slate completions powershell >> $PROFILE
+```
+
+---
+
+### Export & Import
+
+Slate allows exporting and importing your tasks across multiple formats (`json`, `md`, `csv`, `txt`). Format is automatically inferred from the file extension (`-o tasks.md` or `slate import tasks.csv`), or can be specified explicitly via `--format`.
+
+| Format | Export Description | Import Description |
+| :--- | :--- | :--- |
+| **`json`** | Wrapped model `{"schema_version": 1, "days": [...]}` with ISO dates and RFC 3339 timestamps. Lossless round trip. | Validates schema version and task structure. Lossless round trip. |
+| **`md`** | Per-day `## YYYY-MM-DD` headings, `- [x]` / `- [ ]` task items, and HTML comment timestamps `<!-- done RFC3339 -->`. | Parses `## YYYY-MM-DD` headers and `-`/`*` checkboxes (`[ ]`, `[x]`, `[X]`). Tasks before any heading default to `--date` (today). |
+| **`csv`** | RFC 4180 quoting with header `date,text,done,done_at`. Quoted fields survive commas, quotes, and newlines. | Same columns. `done` accepts `true`, `false`, `1`, `0`, or `x`. Missing `done_at` defaults to `null`. |
+| **`txt`** | Single day only (`--date`, default today). Tasks prefixed with `[x]` / `[ ]`. Multi-day export fails with hint to use `md` or `csv`. | Single day into `--date` (default today). Optional `[x]`/`[ ]` prefix. Blank lines and `#` comments ignored. |
+
+#### Import Modes & Safety
+- **All-or-Nothing Validation**: The entire file is parsed and validated before modifying storage. If any row is malformed, nothing is written and the exact line number and error reason are printed to `stderr`.
+- **Merge Mode (Default)**: Appends tasks into their respective days while skipping exact duplicates (same date and same trimmed text, case-sensitive). Existing tasks are never modified or reordered.
+- **Replace Mode (`--replace --yes`)**: Overwrites the entire task dataset. Requires the `--yes` confirmation flag. Automatically creates a safety backup of your existing data at `<datafile>.bak` before replacing.
+- **Dry Run (`--dry-run`)**: Validates input and prints summary statistics without modifying storage (e.g. `would add 12, skip 3 duplicates`).
+- **Encodings**: Transparently handles UTF-8 Byte Order Marks (BOM), Windows CRLF line endings, and empty files (treated as a successful no-op with a warning).
+
+---
+
+### Concurrency & Advisory Locking
+
+- **Sidecar Advisory Lock**: Every mutating CLI command wraps its load-modify-save sequence in an exclusive lock on `<datafile>.lock` using `fs2`. If another process holds the lock, Slate retries for up to 3 seconds before failing with exit code `1`. The lock is released on all exit paths, including errors.
+- **Important Limitation (TUI Memory Model)**: The interactive TUI holds its task dataset in memory and writes back to disk on save. If tasks are added or modified via the CLI while the interactive TUI is actively running, the next write from the TUI will overwrite the CLI's changes (live reloading is planned for a future phase). **Avoid running mutating CLI commands while the interactive TUI is actively open.**
+
+---
+
 ## Codebase Architecture
 
 Slate is organized into small, focused modules under `src/`:
 
 ```text
 src/
-├── main.rs         # Application lifecycle, panic hook, mouse capture, and event loop
+├── main.rs         # Entrypoint, terminal guard, TUI event loop, and CLI dispatcher
+├── lib.rs          # Library root declaring public modules and path resolution helpers
+├── cli.rs          # Clap derive definitions and command-line arguments
+├── commands.rs     # CLI command handlers (add, done, undone, rm, list, today, path, completions)
+├── exchange.rs     # Import and export engines (json, md, csv, txt) with all-or-nothing validation
+├── output.rs       # Output formatters (human, plain, JSON, Waybar) and broken-pipe-safe writer
+├── store.rs        # Shared domain operations on task collections (shared between TUI and CLI)
 ├── app.rs          # App state, task mutations, undo/redo stack, action dispatch, and mouse hit-testing
 ├── config.rs       # Runtime TOML configuration, strftime/color validation, and OS path resolution
 ├── keymap.rs       # Action enum, key chord parser, conflict detection, arrows mode, and dynamic hints
 ├── model.rs        # Data models (Todo, View, HistoryPane, InputMode)
 ├── storage/        # Storage subsystem:
-│   ├── mod.rs      # Atomic file loading and saving, external change detection
+│   ├── mod.rs      # Atomic file loading and saving, external change detection, try_load_modify_save
 │   ├── migrate.rs  # Stepwise schema migrations (v0 -> v1) and version detection
 │   ├── backup.rs   # Rolling backups engine, snapshot rotation, and pruning
 │   └── lock.rs     # Sidecar advisory file locking (3-second timeout retry loop)
@@ -271,24 +504,34 @@ src/
 
 ### Module Responsibilities
 
-1. **[`src/config.rs`](src/config.rs)**:
-   Loads configuration from `config.toml` (or `SLATE_CONFIG`), validates settings (color names/hex, strftime formats, progress width clamping), and provides per-field fallback with non-blocking transient warnings on bad input.
-2. **[`src/keymap.rs`](src/keymap.rs)**:
-   Manages keymappings through the `Action` enum (22 user actions), parses key chord strings, enforces unbinding protection on `Ctrl+c`, detects key conflicts, supports vim-style and arrow-only modes, and generates dynamic hints for the footer and help overlay.
-3. **[`src/theme.rs`](src/theme.rs)**:
-   Runtime `Theme` supporting presets (`teal`, `orange`, `lavender`, `mono`), custom accent color overrides, automatic ANSI-256 fallback when truecolor is absent, and `NO_COLOR` compliance.
-4. **[`src/ui.rs`](src/ui.rs)**:
-   Layout rendering, `Symbols` table (Unicode vs ASCII fallback), small terminal notice guard, hit area tracking for mouse interactions, and component drawers (`draw_header`, `draw_today`, `draw_history`, `draw_input`, `draw_footer`, `draw_help_overlay`).
-5. **[`src/storage/`](src/storage/)**:
-   Provides robust, crash-resilient data persistence:
-   - **`storage/mod.rs`**: Resolves OS paths, atomic save engine (PID-tagged tempfiles, fsync, rename with retries, parent sync on Unix), and external change detection.
-   - **`storage/migrate.rs`**: Stepwise schema migrations. Detects v0 legacy formats (unversioned arrays or objects) and migrates them safely in memory.
-   - **`storage/backup.rs`**: Rolling backup system taking timestamped snapshots (`todos-YYYYMMDD-HHMMSS.json`), pruning old snapshots to the 10 newest, and deduplicating identical snapshots.
-   - **`storage/lock.rs`**: Advisory file locking via a sidecar lock file (`todos.json.lock`), held only during saves or atomic load-modify-save blocks.
-6. **[`src/app.rs`](src/app.rs)**:
-   Maintains application memory, implements the centralized snapshot-based mutation engine (`mutate`) powering instant undo/redo, manages selection clamping, daily rollover tracking, routes actions, and executes mouse hit-testing.
-7. **[`src/main.rs`](src/main.rs)**:
-   Lightweight orchestrator that initializes the terminal in raw mode, installs a panic hook for safe recovery (including mouse capture reset), computes local midnight timeouts for zero-CPU idle polling, handles mouse events, and restores the terminal on exit.
+1. **[`src/cli.rs`](src/cli.rs)**:
+   Defines the command-line interface using `clap` derive, including global flags (`--data-file`, `--config`), subcommands, arguments, and after-help example blocks.
+2. **[`src/commands.rs`](src/commands.rs)**:
+   Implements command execution for `add`, `done`, `undone`, `rm`, `list`, `today`, `path`, and `completions`, including 1-based index validation, case-insensitive `--match` query resolution, and structured exit codes.
+3. **[`src/output.rs`](src/output.rs)**:
+   Generates human, plain tab-separated, single-line JSON, and Waybar formatted output. Implements `SafeWriter` to handle closed pipes (`EPIPE`) gracefully without panics.
+4. **[`src/exchange.rs`](src/exchange.rs)**:
+   Handles data exchange for JSON, Markdown, CSV, and plain text formats. Enforces all-or-nothing validation, duplicate skipping on merge, safety `.bak` creation on `--replace`, and handles UTF-8 BOM and Windows CRLF line endings.
+5. **[`src/store.rs`](src/store.rs)**:
+   Pure domain logic operating on `Vec<Todo>` (`add_task`, `set_task_done`, `delete_task`, `edit_task`, `clear_completed`, `reorder_day_task`, `match_task_by_text`). Shared between the interactive TUI and scriptable CLI.
+6. **[`src/config.rs`](src/config.rs)**:
+   Loads configuration from `config.toml` (or `SLATE_CONFIG` / `--config`), validates settings, and provides per-field fallback with non-blocking transient warnings on bad input.
+7. **[`src/keymap.rs`](src/keymap.rs)**:
+   Manages keymappings through the `Action` enum, parses key chord strings, enforces unbinding protection on `Ctrl+c`, detects conflicts, and generates dynamic hints.
+8. **[`src/theme.rs`](src/theme.rs)**:
+   Runtime `Theme` supporting presets (`teal`, `orange`, `lavender`, `mono`), custom accent color overrides, automatic ANSI-256 fallback, and `NO_COLOR` compliance.
+9. **[`src/ui.rs`](src/ui.rs)**:
+   Layout rendering, `Symbols` table (Unicode vs ASCII fallback), small terminal notice guard, and mouse hit-testing areas.
+10. **[`src/storage/`](src/storage/)**:
+    Provides crash-resilient data persistence:
+    - **`storage/mod.rs`**: Resolves OS paths, atomic save engine (tempfiles, fsync, rename with retries), and locked load-modify-save helper.
+    - **`storage/migrate.rs`**: Stepwise schema migrations from v0 formats.
+    - **`storage/backup.rs`**: Rolling backup system creating timestamped snapshots in `backups/`.
+    - **`storage/lock.rs`**: Advisory file locking via `todos.json.lock` with a 3-second timeout loop.
+11. **[`src/app.rs`](src/app.rs)**:
+    Maintains interactive TUI memory, undo/redo stacks, selection clamping, and routes input events.
+12. **[`src/main.rs`](src/main.rs)**:
+    Thin dispatcher: validates TTY state, initializes terminal raw mode when running interactively, or routes directly to CLI subcommands without touching terminal state.
 
 ---
 
@@ -389,6 +632,7 @@ When `[ui] mouse = true` is enabled in `config.toml`:
 | `NO_COLOR` | When set to any non-empty value (per [no-color.org](https://no-color.org)), disables all color output. Slate switches to monochrome mode using text modifiers (bold, dim, underline) only. |
 | `SLATE_ASCII` | When set (`SLATE_ASCII=1`), forces ASCII symbol mode (`[ui] symbols = "ascii"` and `progress.style = "ascii"`). |
 | `SLATE_CONFIG` | Overrides the default config file path (useful for testing or dotfiles management). |
+| `SLATE_DATA` | Overrides the default storage file path (overridden by `--data-file`). |
 
 ---
 
