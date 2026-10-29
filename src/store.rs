@@ -33,8 +33,15 @@ pub fn add_task(todos: &mut Vec<Todo>, text: &str, date: NaiveDate) -> Option<u6
 /// Sets the completion state of a task by ID.
 pub fn set_task_done(todos: &mut [Todo], id: u64, done: bool, now: DateTime<Local>) -> bool {
     if let Some(todo) = todos.iter_mut().find(|t| t.id == id) {
-        todo.done = done;
-        todo.done_at = if done { Some(now) } else { None };
+        if done {
+            if !todo.done {
+                todo.done = true;
+                todo.done_at = Some(now);
+            }
+        } else {
+            todo.done = false;
+            todo.done_at = None;
+        }
         true
     } else {
         false

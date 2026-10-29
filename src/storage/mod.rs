@@ -296,10 +296,34 @@ where
     F: FnOnce(&mut Vec<Todo>) -> R,
 {
     // Hold lock for the duration of load-modify-save
-    let _lock = lock::acquire_lock(path, Duration::from_secs(5))?;
+    let _lock = lock::acquire_lock(path, Duration::from_secs(3))?;
     let load_res = load_todos(path)?;
     let mut todos = load_res.todos;
     let r = f(&mut todos);
+    let save_res = save_todos_unlocked(
+        path,
+        &todos,
+        load_res.was_legacy,
+        load_res.fingerprint,
+        false,
+        None,
+    )?;
+    Ok((r, save_res))
+}
+
+pub fn try_load_modify_save<F, R, E>(
+    path: &Path,
+    f: F,
+) -> Result<(R, SaveResult), Box<dyn std::error::Error>>
+where
+    F: FnOnce(&mut Vec<Todo>) -> Result<R, E>,
+    E: Into<Box<dyn std::error::Error>>,
+{
+    // Hold lock for the duration of load-modify-save
+    let _lock = lock::acquire_lock(path, Duration::from_secs(3))?;
+    let load_res = load_todos(path)?;
+    let mut todos = load_res.todos;
+    let r = f(&mut todos).map_err(Into::into)?;
     let save_res = save_todos_unlocked(
         path,
         &todos,
