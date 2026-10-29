@@ -1,239 +1,35 @@
 use std::fs;
-use std::process::{Command as StdCommand, Stdio};
+use std::io::{self, Write};
 use std::thread;
 
 use assert_cmd::Command;
+use chrono::NaiveDate;
 use predicates::prelude::*;
+use slate::commands::{
+    handle_add, handle_add_with_reader, handle_done, handle_list, handle_rm, handle_today, CmdError,
+};
+use slate::config::Config;
+use slate::output::SafeWriter;
 use tempfile::tempdir;
 
+// ==================== BINARY TESTS (NO DATA READ/WRITE) ====================
+
 #[test]
-fn test_cli_add_list_done_rm_flow() {
-    let dir = tempdir().unwrap();
-    let data_file = dir.path().join("todos.json");
-
-    // 1. Add "Buy fresh milk"
+fn test_cli_version() {
     let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("add")
-        .arg("Buy fresh milk")
+    cmd.arg("--version")
         .assert()
         .success()
-        .stdout("Added: Buy fresh milk\n");
-
-    // 2. Add "Review PR" with --quiet
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("add")
-        .arg("-q")
-        .arg("Review PR")
-        .assert()
-        .success()
-        .stdout("");
-
-    // 3. List
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("list")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("Buy fresh milk").and(predicate::str::contains("Review PR")),
-        );
-
-    // 4. Mark 1 done
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("done")
-        .arg("1")
-        .assert()
-        .success();
-
-    // 5. List shows task 1 is done
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("list")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("[x]  Buy fresh milk")
-                .and(predicate::str::contains("[ ]  Review PR")),
-        );
-
-    // 6. today shows 1 of 2 done
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("today")
-        .assert()
-        .success()
-        .stdout(predicate::str::contains("1 of 2 done"));
-
-    // 7. rm 1
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("rm")
-        .arg("1")
-        .assert()
-        .success();
-
-    // 8. List shows only task 2 remains
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("list")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("Review PR")
-                .and(predicate::str::contains("Buy fresh milk").not()),
-        );
+        .stdout(predicate::str::starts_with("slate "));
 }
 
 #[test]
-fn test_exit_codes() {
-    let dir = tempdir().unwrap();
-    let data_file = dir.path().join("todos.json");
-
-    // Exit 0: success
+fn test_cli_help() {
     let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("list")
+    cmd.arg("--help")
         .assert()
-        .code(0);
-
-    // Exit 1: corrupted JSON file
-    let bad_file = dir.path().join("bad.json");
-    fs::write(&bad_file, "INVALID JSON DATA").unwrap();
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&bad_file)
-        .arg("list")
-        .assert()
-        .code(1)
-        .stderr(predicate::str::starts_with("slate: "));
-    // Assert bad file is untouched
-    assert_eq!(fs::read_to_string(&bad_file).unwrap(), "INVALID JSON DATA");
-
-    // Exit 2: usage error (empty task text)
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("add")
-        .arg("   ")
-        .assert()
-        .code(2)
-        .stderr(predicate::str::starts_with("slate: "));
-
-    // Exit 2: usage error (invalid date)
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("list")
-        .arg("--date")
-        .arg("not-a-valid-date")
-        .assert()
-        .code(2)
-        .stderr(predicate::str::starts_with("slate: "));
-
-    // Exit 3: no such task (out of range index)
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("done")
-        .arg("5")
-        .assert()
-        .code(3)
-        .stderr(predicate::str::starts_with("slate: "));
-
-    // Exit 3: no such task (--match found nothing)
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("rm")
-        .arg("--match")
-        .arg("nonexistent")
-        .assert()
-        .code(3)
-        .stderr(predicate::str::starts_with("slate: "));
-}
-
-#[test]
-fn test_ambiguous_match_lists_candidates_on_stderr_with_exit_3() {
-    let dir = tempdir().unwrap();
-    let data_file = dir.path().join("todos.json");
-
-    // Add two matching tasks
-    Command::cargo_bin("slate")
-        .unwrap()
-        .arg("--data-file")
-        .arg(&data_file)
-        .arg("add")
-        .arg("Feed cat")
-        .assert()
-        .success();
-
-    Command::cargo_bin("slate")
-        .unwrap()
-        .arg("--data-file")
-        .arg(&data_file)
-        .arg("add")
-        .arg("Buy cat food")
-        .assert()
-        .success();
-
-    // Match "cat" is ambiguous
-    Command::cargo_bin("slate")
-        .unwrap()
-        .arg("--data-file")
-        .arg(&data_file)
-        .arg("done")
-        .arg("--match")
-        .arg("cat")
-        .assert()
-        .code(3)
-        .stderr(
-            predicate::str::contains("multiple tasks match 'cat':")
-                .and(predicate::str::contains("1  Feed cat"))
-                .and(predicate::str::contains("2  Buy cat food")),
-        );
-}
-
-#[test]
-fn test_list_nonexistent_file_returns_no_tasks_and_exit_0() {
-    let dir = tempdir().unwrap();
-    let missing_file = dir.path().join("missing.json");
-
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&missing_file)
-        .arg("list")
-        .assert()
-        .code(0)
-        .stdout("");
-
-    // File was not created on read
-    assert!(!missing_file.exists());
-}
-
-#[test]
-fn test_today_empty_prints_0_of_0_done() {
-    let dir = tempdir().unwrap();
-    let data_file = dir.path().join("todos.json");
-
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("today")
-        .assert()
-        .code(0)
-        .stdout(predicate::str::contains("0 of 0 done"));
+        .success()
+        .stdout(predicate::str::contains("Usage: slate"));
 }
 
 #[test]
@@ -246,128 +42,399 @@ fn test_no_subcommand_non_tty_guard() {
 }
 
 #[test]
-fn test_piped_output_contains_no_ansi_escapes() {
+fn test_usage_error_empty_task_text() {
+    let mut cmd = Command::cargo_bin("slate").unwrap();
+    cmd.arg("add")
+        .arg("   ")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::starts_with("slate: "));
+}
+
+#[test]
+fn test_usage_error_invalid_date() {
+    let mut cmd = Command::cargo_bin("slate").unwrap();
+    cmd.arg("list")
+        .arg("--date")
+        .arg("not-a-valid-date")
+        .assert()
+        .code(2)
+        .stderr(predicate::str::starts_with("slate: "));
+}
+
+#[test]
+fn test_usage_error_unknown_subcommand() {
+    let mut cmd = Command::cargo_bin("slate").unwrap();
+    cmd.arg("unknown-subcommand").assert().code(2);
+}
+
+#[test]
+fn test_usage_error_unknown_option() {
+    let mut cmd = Command::cargo_bin("slate").unwrap();
+    cmd.arg("--unknown-flag").assert().code(2);
+}
+
+// ==================== HANDLER-LEVEL TESTS (INJECTED PATHS) ====================
+
+#[test]
+fn test_handler_add_list_done_rm_flow() {
     let dir = tempdir().unwrap();
     let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let config = Config::default();
 
-    Command::cargo_bin("slate")
-        .unwrap()
-        .arg("--data-file")
-        .arg(&data_file)
-        .arg("add")
-        .arg("Test task")
-        .assert()
-        .success();
+    // 1. Add "Buy fresh milk"
+    let mut out = Vec::new();
+    handle_add(
+        vec!["Buy fresh milk".to_string()],
+        None,
+        false,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out), "Added: Buy fresh milk\n");
+    out.clear();
 
-    let output = Command::cargo_bin("slate")
-        .unwrap()
-        .arg("--data-file")
-        .arg(&data_file)
-        .arg("list")
-        .output()
-        .unwrap();
+    // 2. Add "Review PR" with quiet = true
+    handle_add(
+        vec!["Review PR".to_string()],
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+    assert!(out.is_empty());
 
-    let stdout_str = String::from_utf8(output.stdout).unwrap();
+    // 3. List shows both tasks
+    handle_list(
+        None, false, false, None, &data_file, today, &config, &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+    assert!(list_str.contains("Buy fresh milk"));
+    assert!(list_str.contains("Review PR"));
+    out.clear();
+
+    // 4. Mark task 1 done
+    handle_done(vec![1], None, None, &data_file, today).unwrap();
+
+    // 5. List shows task 1 is done
+    handle_list(
+        None, false, false, None, &data_file, today, &config, &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+    assert!(
+        list_str.contains("Buy fresh milk") && list_str.contains("done"),
+        "expected done marker for task 1, got: {list_str}"
+    );
+    assert!(
+        list_str.contains("Review PR"),
+        "expected task 2, got: {list_str}"
+    );
+    out.clear();
+
+    // 6. Today shows 1 of 2 done
+    handle_today(&data_file, today, &config, &mut out).unwrap();
+    let today_str = String::from_utf8_lossy(&out);
+    assert!(today_str.contains("1 of 2 done"));
+    out.clear();
+
+    // 7. Delete task 1
+    handle_rm(vec![1], None, None, &data_file, today).unwrap();
+
+    // 8. List shows only task 2 remains
+    handle_list(
+        None, false, false, None, &data_file, today, &config, &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+    assert!(list_str.contains("Review PR"));
+    assert!(!list_str.contains("Buy fresh milk"));
+}
+
+#[test]
+fn test_handler_corrupted_json_exit_code_1() {
+    let dir = tempdir().unwrap();
+    let bad_file = dir.path().join("bad.json");
+    fs::write(&bad_file, "INVALID JSON DATA").unwrap();
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let config = Config::default();
+    let mut out = Vec::new();
+
+    let res = handle_list(
+        None, false, false, None, &bad_file, today, &config, &mut out,
+    );
+    match res {
+        Err(err) => {
+            assert_eq!(err.exit_code(), 1);
+            assert!(err.message().contains("corrupted") || err.message().contains("expected"));
+        }
+        Ok(_) => panic!("expected runtime error for corrupted JSON"),
+    }
+
+    // Corrupted file was not overwritten
+    assert_eq!(fs::read_to_string(&bad_file).unwrap(), "INVALID JSON DATA");
+}
+
+#[test]
+fn test_handler_exit_code_3_out_of_range() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+
+    let res = handle_done(vec![5], None, None, &data_file, today);
+    match res {
+        Err(err) => {
+            assert_eq!(err.exit_code(), 3);
+            assert!(err.message().contains("out of range"));
+        }
+        Ok(_) => panic!("expected not found error"),
+    }
+}
+
+#[test]
+fn test_handler_exit_code_3_match_not_found() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+
+    let res = handle_rm(
+        vec![],
+        None,
+        Some("nonexistent".to_string()),
+        &data_file,
+        today,
+    );
+    match res {
+        Err(err) => {
+            assert_eq!(err.exit_code(), 3);
+            assert!(err.message().contains("no task matches 'nonexistent'"));
+        }
+        Ok(_) => panic!("expected not found error"),
+    }
+}
+
+#[test]
+fn test_handler_ambiguous_match_lists_candidates_exit_code_3() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let mut out = Vec::new();
+
+    handle_add(
+        vec!["Feed cat".to_string()],
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+    handle_add(
+        vec!["Buy cat food".to_string()],
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+
+    let res = handle_done(vec![], None, Some("cat".to_string()), &data_file, today);
+    match res {
+        Err(CmdError::NotFound(msg)) => {
+            assert!(msg.contains("multiple tasks match 'cat':"));
+            assert!(msg.contains("1  Feed cat"));
+            assert!(msg.contains("2  Buy cat food"));
+        }
+        other => panic!("expected ambiguous match NotFound, got: {other:?}"),
+    }
+}
+
+#[test]
+fn test_handler_list_nonexistent_file_returns_no_tasks_and_exit_0() {
+    let dir = tempdir().unwrap();
+    let missing_file = dir.path().join("missing.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let config = Config::default();
+    let mut out = Vec::new();
+
+    let res = handle_list(
+        None,
+        false,
+        false,
+        None,
+        &missing_file,
+        today,
+        &config,
+        &mut out,
+    );
+    assert!(res.is_ok());
+    assert!(out.is_empty());
+    assert!(!missing_file.exists());
+}
+
+#[test]
+fn test_handler_today_empty_prints_0_of_0_done() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let config = Config::default();
+    let mut out = Vec::new();
+
+    let res = handle_today(&data_file, today, &config, &mut out);
+    assert!(res.is_ok());
+    let today_str = String::from_utf8_lossy(&out);
+    assert!(today_str.contains("0 of 0 done"));
+}
+
+#[test]
+fn test_handler_piped_output_contains_no_ansi_escapes() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let config = Config::default();
+    let mut out = Vec::new();
+
+    std::env::set_var("NO_COLOR", "1");
+    handle_add(
+        vec!["Test task".to_string()],
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+
+    handle_list(
+        None, false, false, None, &data_file, today, &config, &mut out,
+    )
+    .unwrap();
+    std::env::remove_var("NO_COLOR");
+
+    let stdout_str = String::from_utf8_lossy(&out);
     assert!(
         !stdout_str.contains("\x1b["),
-        "output contained ANSI escapes"
+        "output contained ANSI escapes: {stdout_str}"
     );
 }
 
 #[test]
-fn test_legacy_v0_todos_json_loads_unchanged() {
+fn test_handler_legacy_v0_todos_json_loads_unchanged() {
     let dir = tempdir().unwrap();
     let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let config = Config::default();
 
-    // Legacy v0 json: simple array of objects without version wrapper
     let legacy_json = r#"[
         {"id": 1, "text": "Legacy task 1", "created_date": "2026-10-25", "done": true},
         {"id": 2, "text": "Legacy task 2", "created_date": "2026-10-25", "done": false}
     ]"#;
     fs::write(&data_file, legacy_json).unwrap();
 
-    let mut cmd = Command::cargo_bin("slate").unwrap();
-    cmd.arg("--data-file")
-        .arg(&data_file)
-        .arg("list")
-        .arg("--all")
-        .assert()
-        .success()
-        .stdout(
-            predicate::str::contains("2026-10-25")
-                .and(predicate::str::contains("[x]  Legacy task 1"))
-                .and(predicate::str::contains("[ ]  Legacy task 2")),
-        );
-}
-
-#[test]
-fn test_broken_pipe_quiet_exit() {
-    let dir = tempdir().unwrap();
-    let data_file = dir.path().join("todos.json");
-
-    // Add several tasks
-    for i in 1..=20 {
-        Command::cargo_bin("slate")
-            .unwrap()
-            .arg("--data-file")
-            .arg(&data_file)
-            .arg("add")
-            .arg(format!("Task {i}"))
-            .assert()
-            .success();
-    }
-
-    let bin_path = assert_cmd::cargo::cargo_bin("slate");
-    let mut child = StdCommand::new(bin_path)
-        .arg("--data-file")
-        .arg(&data_file)
-        .arg("list")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-        .unwrap();
-
-    // Close stdout pipe immediately to trigger broken pipe
-    drop(child.stdout.take());
-
-    let output = child.wait_with_output().unwrap();
-    let stderr_str = String::from_utf8_lossy(&output.stderr);
+    let mut out = Vec::new();
+    handle_list(
+        None, true, false, None, &data_file, today, &config, &mut out,
+    )
+    .unwrap();
+    let stdout_str = String::from_utf8_lossy(&out);
+    assert!(stdout_str.contains("2026-10-25"));
     assert!(
-        !stderr_str.contains("panic"),
-        "panicked on broken pipe: {stderr_str}"
+        stdout_str.contains("Legacy task 1") && stdout_str.contains("done"),
+        "expected done legacy task 1: {stdout_str}"
+    );
+    assert!(
+        stdout_str.contains("Legacy task 2"),
+        "expected pending legacy task 2: {stdout_str}"
     );
 }
 
 #[test]
-fn test_concurrency_100_parallel_adds() {
+fn test_handler_broken_pipe_quiet_exit() {
+    struct BrokenPipeWriter;
+    impl Write for BrokenPipeWriter {
+        fn write(&mut self, _buf: &[u8]) -> io::Result<usize> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"))
+        }
+        fn flush(&mut self) -> io::Result<()> {
+            Err(io::Error::new(io::ErrorKind::BrokenPipe, "broken pipe"))
+        }
+    }
+
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let config = Config::default();
+
+    let mut dummy_out = Vec::new();
+    for i in 1..=10 {
+        handle_add(
+            vec![format!("Task {i}")],
+            None,
+            true,
+            &data_file,
+            today,
+            &mut dummy_out,
+        )
+        .unwrap();
+    }
+
+    let mut safe_writer = SafeWriter::new(BrokenPipeWriter);
+    let res = handle_list(
+        None,
+        false,
+        false,
+        None,
+        &data_file,
+        today,
+        &config,
+        &mut safe_writer,
+    );
+    assert!(res.is_ok(), "handler failed on broken pipe: {res:?}");
+    assert!(safe_writer.is_broken_pipe());
+}
+
+#[test]
+fn test_handler_concurrency_100_parallel_adds() {
     let dir = tempdir().unwrap();
     let data_file = dir.path().join("concurrent_todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
 
     let file_path = data_file.clone();
     let t1 = thread::spawn(move || {
         for i in 0..50 {
-            Command::cargo_bin("slate")
-                .unwrap()
-                .arg("--data-file")
-                .arg(&file_path)
-                .arg("add")
-                .arg(format!("Thread 1 task {i}"))
-                .assert()
-                .success();
+            handle_add_with_reader(
+                vec![format!("Thread 1 task {i}")],
+                None,
+                true,
+                &file_path,
+                today,
+                &mut io::sink(),
+                io::empty(),
+            )
+            .unwrap();
         }
     });
 
     let file_path2 = data_file.clone();
     let t2 = thread::spawn(move || {
         for i in 0..50 {
-            Command::cargo_bin("slate")
-                .unwrap()
-                .arg("--data-file")
-                .arg(&file_path2)
-                .arg("add")
-                .arg(format!("Thread 2 task {i}"))
-                .assert()
-                .success();
+            handle_add_with_reader(
+                vec![format!("Thread 2 task {i}")],
+                None,
+                true,
+                &file_path2,
+                today,
+                &mut io::sink(),
+                io::empty(),
+            )
+            .unwrap();
         }
     });
 

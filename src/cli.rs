@@ -11,14 +11,6 @@ use clap::{Parser, Subcommand};
 )]
 pub struct Cli {
     #[arg(
-        long = "data-file",
-        global = true,
-        value_name = "PATH",
-        help = "Path to storage file"
-    )]
-    pub data_file: Option<PathBuf>,
-
-    #[arg(
         long = "config",
         global = true,
         value_name = "PATH",

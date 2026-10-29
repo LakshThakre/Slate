@@ -74,7 +74,7 @@ fn run_app(terminal: &mut DefaultTerminal, mut app: App) -> Result<(), Box<dyn s
 fn main() {
     let cli = Cli::parse();
 
-    let data_path = match slate::resolve_data_path(cli.data_file.as_deref()) {
+    let data_path = match slate::resolve_data_path() {
         Ok(path) => path,
         Err(e) => {
             eprintln!("slate: {e}");
