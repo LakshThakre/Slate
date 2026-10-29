@@ -173,13 +173,4 @@ pub enum Commands {
         after_help = "Examples:\n  slate path\n  slate --data-file /tmp/test.json path"
     )]
     Path,
-
-    #[command(
-        about = "Generate shell completions",
-        after_help = "Examples:\n  slate completions bash > ~/.local/share/bash-completion/completions/slate\n  slate completions zsh > ~/.zfunc/_slate\n  slate completions fish > ~/.config/fish/completions/slate.fish\n  slate completions powershell >> $PROFILE"
-    )]
-    Completions {
-        #[arg(value_name = "SHELL", help = "Shell to generate completions for")]
-        shell: clap_complete::Shell,
-    },
 }

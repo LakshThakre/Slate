@@ -457,18 +457,7 @@ pub fn run(
                 .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
             Ok(())
         }
-        Commands::Completions { shell } => handle_completions(shell, out),
     }
-}
-
-pub fn handle_completions(
-    shell: clap_complete::Shell,
-    out: &mut dyn Write,
-) -> Result<(), CmdError> {
-    use clap::CommandFactory;
-    let mut cmd = crate::cli::Cli::command();
-    clap_complete::generate(shell, &mut cmd, "slate", out);
-    Ok(())
 }
 
 #[cfg(test)]
@@ -764,26 +753,5 @@ mod tests {
         // today with plain and waybar errors with Usage (code 2)
         let res = handle_today(true, false, true, path, today, &config, &mut out);
         assert!(matches!(res, Err(CmdError::Usage(_))));
-    }
-
-    #[test]
-    fn test_completions_all_shells() {
-        let shells = [
-            clap_complete::Shell::Bash,
-            clap_complete::Shell::Zsh,
-            clap_complete::Shell::Fish,
-            clap_complete::Shell::PowerShell,
-        ];
-
-        for shell in shells {
-            let mut out = Vec::new();
-            handle_completions(shell, &mut out).unwrap();
-            let script = String::from_utf8(out).unwrap();
-            assert!(!script.is_empty(), "shell {shell:?} generated empty script");
-            assert!(script.contains("add"), "shell {shell:?} missing add");
-            assert!(script.contains("done"), "shell {shell:?} missing done");
-            assert!(script.contains("list"), "shell {shell:?} missing list");
-            assert!(script.contains("today"), "shell {shell:?} missing today");
-        }
     }
 }
