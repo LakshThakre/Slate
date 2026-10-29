@@ -412,18 +412,7 @@ impl App {
             let today = self.today;
             let count = ids.len();
             self.mutate(|todos| {
-                let mut carried = Vec::new();
-                let mut i = 0;
-                while i < todos.len() {
-                    if ids.contains(&todos[i].id) {
-                        let mut t = todos.remove(i);
-                        t.created_date = today;
-                        carried.push(t);
-                    } else {
-                        i += 1;
-                    }
-                }
-                todos.extend(carried);
+                crate::store::carry_over_tasks(todos, &ids, today);
             });
             self.set_transient_message(format!(
                 "Carried over {count} unfinished task{} · u to undo",
@@ -434,33 +423,16 @@ impl App {
 
     pub fn reorder_today(&mut self, down: bool) {
         let today = self.today;
-        let today_indices: Vec<usize> = self
-            .todos
-            .iter()
-            .enumerate()
-            .filter(|(_, t)| t.created_date == today)
-            .map(|(i, _)| i)
-            .collect();
-
-        if today_indices.len() <= 1 {
+        let selected = self.today_selected_index;
+        if !crate::store::can_reorder_day_task(&self.todos, today, selected, down) {
             return;
         }
-
+        self.mutate(|todos| {
+            crate::store::reorder_day_task(todos, today, selected, down);
+        });
         if down {
-            if self.today_selected_index + 1 < today_indices.len() {
-                let pos_curr = today_indices[self.today_selected_index];
-                let pos_next = today_indices[self.today_selected_index + 1];
-                self.mutate(|todos| {
-                    todos.swap(pos_curr, pos_next);
-                });
-                self.today_selected_index += 1;
-            }
+            self.today_selected_index += 1;
         } else if self.today_selected_index > 0 {
-            let pos_curr = today_indices[self.today_selected_index];
-            let pos_prev = today_indices[self.today_selected_index - 1];
-            self.mutate(|todos| {
-                todos.swap(pos_curr, pos_prev);
-            });
             self.today_selected_index -= 1;
         }
     }
@@ -468,33 +440,16 @@ impl App {
     pub fn reorder_history(&mut self, down: bool) {
         let dates = self.dates_list();
         if let Some(&selected_date) = dates.get(self.history_date_index) {
-            let date_indices: Vec<usize> = self
-                .todos
-                .iter()
-                .enumerate()
-                .filter(|(_, t)| t.created_date == selected_date)
-                .map(|(i, _)| i)
-                .collect();
-
-            if date_indices.len() <= 1 {
+            let selected = self.history_todo_index;
+            if !crate::store::can_reorder_day_task(&self.todos, selected_date, selected, down) {
                 return;
             }
-
+            self.mutate(|todos| {
+                crate::store::reorder_day_task(todos, selected_date, selected, down);
+            });
             if down {
-                if self.history_todo_index + 1 < date_indices.len() {
-                    let pos_curr = date_indices[self.history_todo_index];
-                    let pos_next = date_indices[self.history_todo_index + 1];
-                    self.mutate(|todos| {
-                        todos.swap(pos_curr, pos_next);
-                    });
-                    self.history_todo_index += 1;
-                }
+                self.history_todo_index += 1;
             } else if self.history_todo_index > 0 {
-                let pos_curr = date_indices[self.history_todo_index];
-                let pos_prev = date_indices[self.history_todo_index - 1];
-                self.mutate(|todos| {
-                    todos.swap(pos_curr, pos_prev);
-                });
                 self.history_todo_index -= 1;
             }
         }
@@ -507,14 +462,12 @@ impl App {
             .iter()
             .filter(|t| t.created_date == today && t.done)
             .count();
-
         if completed_count == 0 {
             self.set_transient_message("No completed tasks");
             return;
         }
-
         self.mutate(|todos| {
-            todos.retain(|t| !(t.created_date == today && t.done));
+            crate::store::clear_completed(todos, today);
         });
         self.set_transient_message(format!("Cleared {completed_count} completed · u to undo"));
     }
@@ -527,14 +480,12 @@ impl App {
                 .iter()
                 .filter(|t| t.created_date == selected_date && t.done)
                 .count();
-
             if completed_count == 0 {
                 self.set_transient_message("No completed tasks");
                 return;
             }
-
             self.mutate(|todos| {
-                todos.retain(|t| !(t.created_date == selected_date && t.done));
+                crate::store::clear_completed(todos, selected_date);
             });
             self.set_transient_message(format!("Cleared {completed_count} completed · u to undo"));
         }
@@ -658,27 +609,21 @@ impl App {
         }
 
         let today = self.today;
-        let next_id = self.todos.iter().map(|t| t.id).max().unwrap_or(0) + 1;
-        let new_todo = Todo {
-            id: next_id,
-            text: clean_text.to_string(),
-            created_date: today,
-            done: false,
-            done_at: None,
-        };
-
+        let mut added = false;
         self.mutate(|todos| {
-            todos.push(new_todo);
+            added = crate::store::add_task(todos, clean_text, today).is_some();
         });
 
-        // Selection lands on the newly added todo
-        let today_count = self
-            .todos
-            .iter()
-            .filter(|t| t.created_date == today)
-            .count();
-        self.today_selected_index = today_count.saturating_sub(1);
-        self.clamp_selections();
+        if added {
+            // Selection lands on the newly added todo
+            let today_count = self
+                .todos
+                .iter()
+                .filter(|t| t.created_date == today)
+                .count();
+            self.today_selected_index = today_count.saturating_sub(1);
+            self.clamp_selections();
+        }
     }
 
     pub fn toggle_today_todo(&mut self) {
@@ -691,11 +636,9 @@ impl App {
             .collect();
 
         if let Some(&target_id) = today_ids.get(self.today_selected_index) {
+            let now = Local::now();
             self.mutate(|todos| {
-                if let Some(todo) = todos.iter_mut().find(|t| t.id == target_id) {
-                    todo.done = !todo.done;
-                    todo.done_at = if todo.done { Some(Local::now()) } else { None };
-                }
+                crate::store::toggle_task(todos, target_id, now);
             });
         }
     }
@@ -710,15 +653,13 @@ impl App {
             .collect();
 
         if let Some(&target_id) = today_ids.get(self.today_selected_index) {
-            let task_text = self
-                .todos
-                .iter()
-                .find(|t| t.id == target_id)
-                .map(|t| t.text.clone());
+            let mut deleted_text = None;
             self.mutate(|todos| {
-                todos.retain(|t| t.id != target_id);
+                if let Some(t) = crate::store::delete_task(todos, target_id) {
+                    deleted_text = Some(t.text);
+                }
             });
-            if let Some(text) = task_text {
+            if let Some(text) = deleted_text {
                 self.set_transient_message(format!(
                     "Deleted \"{}\" · u to undo",
                     truncate_str(&text, 24)
@@ -738,11 +679,9 @@ impl App {
                 .collect();
 
             if let Some(&target_id) = date_ids.get(self.history_todo_index) {
+                let now = Local::now();
                 self.mutate(|todos| {
-                    if let Some(todo) = todos.iter_mut().find(|t| t.id == target_id) {
-                        todo.done = !todo.done;
-                        todo.done_at = if todo.done { Some(Local::now()) } else { None };
-                    }
+                    crate::store::toggle_task(todos, target_id, now);
                 });
             }
         }
@@ -759,15 +698,13 @@ impl App {
                 .collect();
 
             if let Some(&target_id) = date_ids.get(self.history_todo_index) {
-                let task_text = self
-                    .todos
-                    .iter()
-                    .find(|t| t.id == target_id)
-                    .map(|t| t.text.clone());
+                let mut deleted_text = None;
                 self.mutate(|todos| {
-                    todos.retain(|t| t.id != target_id);
+                    if let Some(t) = crate::store::delete_task(todos, target_id) {
+                        deleted_text = Some(t.text);
+                    }
                 });
-                if let Some(text) = task_text {
+                if let Some(text) = deleted_text {
                     self.set_transient_message(format!(
                         "Deleted \"{}\" · u to undo",
                         truncate_str(&text, 24)
@@ -802,13 +739,7 @@ impl App {
 
         if let Some(&todo_id) = date_todos.get(self.history_todo_index) {
             self.mutate(|todos| {
-                if let Some(pos) = todos.iter().position(|t| t.id == todo_id) {
-                    let mut todo = todos.remove(pos);
-                    todo.created_date = today;
-                    todo.done = false;
-                    todo.done_at = None;
-                    todos.push(todo);
-                }
+                crate::store::move_task_to_date(todos, todo_id, today);
             });
             self.set_transient_message("Moved to Today");
         }
@@ -1086,9 +1017,7 @@ impl App {
                     if let Some(old) = old_text {
                         if old != clean_text {
                             self.mutate(|todos| {
-                                if let Some(todo) = todos.iter_mut().find(|t| t.id == target_id) {
-                                    todo.text = clean_text;
-                                }
+                                crate::store::edit_task(todos, target_id, &clean_text);
                             });
                             self.set_transient_message("Edited task · u to undo");
                         }

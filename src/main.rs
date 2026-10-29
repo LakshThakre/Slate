@@ -13,6 +13,7 @@ pub mod config;
 pub mod keymap;
 mod model;
 mod storage;
+pub mod store;
 pub mod theme;
 mod ui;
 
