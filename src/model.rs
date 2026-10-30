@@ -156,4 +156,5 @@ pub enum InputMode {
     EditingNote(u64),
     SettingRecurrence(u64),
     ConfirmDeleteRecurring(u64),
+    ReschedulingBulk,
 }

@@ -36,10 +36,12 @@ pub enum Action {
     AddSubtask,
     ToggleFocus,
     Recurrence,
+    ToggleMark,
+    ToggleMarkAll,
 }
 
 impl Action {
-    pub const ALL: [Action; 31] = [
+    pub const ALL: [Action; 33] = [
         Action::Quit,
         Action::Add,
         Action::AddSubtask,
@@ -71,6 +73,8 @@ impl Action {
         Action::EditNote,
         Action::ToggleFocus,
         Action::Recurrence,
+        Action::ToggleMark,
+        Action::ToggleMarkAll,
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -106,6 +110,8 @@ impl Action {
             "edit_note" | "note" => Some(Action::EditNote),
             "toggle_focus" | "focus" | "pin" => Some(Action::ToggleFocus),
             "recurrence" | "recur" => Some(Action::Recurrence),
+            "toggle_mark" | "mark" => Some(Action::ToggleMark),
+            "toggle_mark_all" | "mark_all" => Some(Action::ToggleMarkAll),
             _ => None,
         }
     }
@@ -143,6 +149,8 @@ impl Action {
             Action::AddSubtask => "add_subtask",
             Action::ToggleFocus => "toggle_focus",
             Action::Recurrence => "recurrence",
+            Action::ToggleMark => "toggle_mark",
+            Action::ToggleMarkAll => "toggle_mark_all",
         }
     }
 }
@@ -678,6 +686,20 @@ impl Keymap {
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
+                (
+                    Action::ToggleMark,
+                    vec![KeyChord {
+                        code: KeyCode::Char('v'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::ToggleMarkAll,
+                    vec![KeyChord {
+                        code: KeyCode::Char('v'),
+                        modifiers: KeyModifiers::SHIFT,
+                    }],
+                ),
             ],
             KeyMode::Arrows => vec![
                 (
@@ -915,6 +937,20 @@ impl Keymap {
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
+                (
+                    Action::ToggleMark,
+                    vec![KeyChord {
+                        code: KeyCode::Char('v'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::ToggleMarkAll,
+                    vec![KeyChord {
+                        code: KeyCode::Char('v'),
+                        modifiers: KeyModifiers::SHIFT,
+                    }],
+                ),
             ],
         }
     }
@@ -1097,6 +1133,8 @@ impl Keymap {
             Action::AddSubtask => "A".to_string(),
             Action::ToggleFocus => "P".to_string(),
             Action::Recurrence => "r".to_string(),
+            Action::ToggleMark => "v".to_string(),
+            Action::ToggleMarkAll => "V".to_string(),
         }
     }
 }

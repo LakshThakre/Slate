@@ -16,6 +16,7 @@ pub struct Symbols {
     pub check_todo: &'static str,
     pub check_overdue: &'static str,
     pub marker: &'static str,
+    pub mark: &'static str,
     pub prompt_default: &'static str,
     pub prompt_subtask: &'static str,
     pub prompt_edit: &'static str,
@@ -51,6 +52,7 @@ impl Symbols {
             check_todo: "○ ",
             check_overdue: "! ",
             marker: "› ",
+            mark: "◆ ",
             prompt_default: "› ",
             prompt_subtask: "› Add subtask ",
             prompt_edit: "› Edit task ",
@@ -80,6 +82,7 @@ impl Symbols {
             check_todo: "[ ] ",
             check_overdue: "[!] ",
             marker: "> ",
+            mark: "* ",
             prompt_default: "> ",
             prompt_subtask: "> Add subtask ",
             prompt_edit: "> Edit task ",
@@ -595,11 +598,13 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
                 None
             };
             let is_pinned = app.focus == Some(todo.id);
+            let is_marked = app.marks.contains(&todo.id);
             Some(format_todo_row(
                 todo,
                 row.depth,
                 subtask_progress,
                 is_selected,
+                is_marked,
                 is_pinned,
                 list_area.width as usize,
                 app.terminal_width,
@@ -899,12 +904,14 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
                     };
 
                     let is_pinned = app.focus == Some(todo.id);
+                    let is_marked = app.marks.contains(&todo.id);
                     Some(format_todo_row_history(
                         todo,
                         row.depth,
                         subtask_progress,
                         is_selected,
                         active_marker,
+                        is_marked,
                         is_todo_overdue,
                         is_pinned,
                         tasks_list_area.width as usize,
@@ -1210,12 +1217,14 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
                     };
 
                     let is_pinned = app.focus == Some(todo.id);
+                    let is_marked = app.marks.contains(&todo.id);
                     Some(format_todo_row_history(
                         todo,
                         row.depth,
                         subtask_progress,
                         is_selected,
                         active_marker,
+                        is_marked,
                         false,
                         is_pinned,
                         tasks_list_area.width as usize,
@@ -1297,7 +1306,9 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     let prompt_label = match app.input_mode {
         crate::model::InputMode::Editing(_) => app.symbols.prompt_edit,
         crate::model::InputMode::AddingSubtask(_) => app.symbols.prompt_subtask,
-        crate::model::InputMode::Rescheduling(_) => app.symbols.prompt_reschedule,
+        crate::model::InputMode::Rescheduling(_) | crate::model::InputMode::ReschedulingBulk => {
+            app.symbols.prompt_reschedule
+        }
         crate::model::InputMode::Filtering => app.symbols.prompt_filter,
         crate::model::InputMode::SettingRecurrence(_) => app.symbols.prompt_recurrence,
         _ => app.symbols.prompt_default,
@@ -1341,7 +1352,8 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     if app.input_buffer.is_empty() {
         let placeholder = match app.input_mode {
             crate::model::InputMode::Editing(_) => "",
-            crate::model::InputMode::Rescheduling(_) => "tomorrow, fri, +3d, YYYY-MM-DD",
+            crate::model::InputMode::Rescheduling(_)
+            | crate::model::InputMode::ReschedulingBulk => "tomorrow, fri, +3d, YYYY-MM-DD",
             crate::model::InputMode::Filtering => "#tag, ! (empty clears)",
             crate::model::InputMode::SettingRecurrence(_) => "daily, weekdays, weekly, off",
             _ => "What needs doing today?",
@@ -1398,6 +1410,43 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
         };
         let msg_line = Line::from(vec![Span::styled(sanitized, app.theme.subtext_style())]);
         frame.render_widget(Paragraph::new(msg_line), area);
+        return;
+    }
+
+    if !app.marks.is_empty() {
+        let count = app.marks.len();
+        let toggle_hint = app.keymap.hint(crate::keymap::Action::Toggle);
+        let del_hint = app.keymap.hint(crate::keymap::Action::Delete);
+        let move_hint = app.keymap.hint(crate::keymap::Action::MoveToToday);
+        let resched_hint = app.keymap.hint(crate::keymap::Action::Reschedule);
+        let hints = [
+            (format!("{count} marked"), ""),
+            (toggle_hint, "toggle"),
+            (del_hint, "delete"),
+            (move_hint, "today"),
+            (resched_hint, "reschedule"),
+            ("esc".to_string(), "unmark"),
+        ];
+        let mut spans: Vec<Span> = Vec::new();
+        for (i, (key, action)) in hints.iter().enumerate() {
+            if i > 0 {
+                spans.push(Span::styled(
+                    format!("  {}  ", app.symbols.dot),
+                    app.theme.divider_style(),
+                ));
+            }
+            if action.is_empty() {
+                spans.push(Span::styled(
+                    key.clone(),
+                    app.theme.accent_style().add_modifier(Modifier::BOLD),
+                ));
+            } else {
+                spans.push(Span::styled(key.clone(), app.theme.subtext_style()));
+                spans.push(Span::raw(" "));
+                spans.push(Span::styled(*action, app.theme.dim_style()));
+            }
+        }
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
         return;
     }
 
@@ -1487,6 +1536,7 @@ fn format_todo_row(
     depth: usize,
     subtask_progress: Option<(usize, usize)>,
     is_selected: bool,
+    is_marked: bool,
     is_pinned: bool,
     max_width: usize,
     terminal_width: u16,
@@ -1495,7 +1545,16 @@ fn format_todo_row(
     symbols: &Symbols,
 ) -> ListItem<'static> {
     let marker_len = symbols.marker.chars().count();
-    let marker = if is_selected {
+    let marker = if is_marked {
+        let style = if is_selected {
+            theme
+                .accent_style()
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            theme.accent_style()
+        };
+        Span::styled(symbols.mark, style)
+    } else if is_selected {
         Span::styled(
             symbols.marker,
             theme.accent_style().add_modifier(Modifier::BOLD),
@@ -1647,6 +1706,7 @@ fn format_todo_row_history(
     subtask_progress: Option<(usize, usize)>,
     is_selected: bool,
     is_active: bool,
+    is_marked: bool,
     is_overdue: bool,
     is_pinned: bool,
     max_width: usize,
@@ -1657,7 +1717,16 @@ fn format_todo_row_history(
     symbols: &Symbols,
 ) -> ListItem<'static> {
     let marker_len = symbols.marker.chars().count();
-    let marker = if is_selected {
+    let marker = if is_marked {
+        let style = if is_selected {
+            theme
+                .accent_style()
+                .add_modifier(Modifier::BOLD | Modifier::REVERSED)
+        } else {
+            theme.accent_style()
+        };
+        Span::styled(symbols.mark, style)
+    } else if is_selected {
         if is_active {
             Span::styled(
                 symbols.marker,
@@ -2369,6 +2438,18 @@ fn build_right_help_lines(
         help_entry(
             &keymap.hint(crate::keymap::Action::Recurrence),
             "set recurrence",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::ToggleMark),
+            "mark task",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::ToggleMarkAll),
+            "mark all visible",
             12,
             theme,
         ),
@@ -3587,5 +3668,63 @@ mod tests {
             .collect();
         assert!(content_prompt.contains("Delete (t)his instance or (a)ll (template + future)?"));
         assert!(content_prompt.contains("esc cancel"));
+    }
+
+    #[test]
+    fn test_render_marked_rows_marker_unicode_and_ascii() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Marked task".to_string(),
+                    created_date: today,
+                    done: false,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Unmarked task".to_string(),
+                    created_date: today,
+                    done: false,
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        app.marks.insert(1);
+
+        // 1. Unicode mode renders '◆' for marked task and '›' for unmarked selected task
+        app.today_selected_index = 1;
+        app.today_selected_id = Some(2);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content.contains('◆'));
+        assert!(content.contains('›'));
+
+        // 2. ASCII mode renders '*' for marked task and '>' for unmarked selected task
+        app.symbols = Symbols::ascii();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_ascii: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content_ascii.contains('*'));
+        assert!(content_ascii.contains('>'));
     }
 }

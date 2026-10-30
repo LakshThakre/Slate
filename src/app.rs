@@ -555,6 +555,7 @@ impl App {
             }
 
             self.clamp_selections();
+            self.marks.clear();
             let added = crate::store::materialize_recurring(
                 &mut self.todos,
                 &mut self.recurring,
@@ -1289,6 +1290,145 @@ impl App {
         self.re_resolve_selections();
     }
 
+    pub fn toggle_mark_selected(&mut self) {
+        if let Some(id) = self.selected_task_id() {
+            if self.marks.contains(&id) {
+                self.marks.remove(&id);
+            } else {
+                self.marks.insert(id);
+            }
+        }
+    }
+
+    pub fn toggle_mark_all_visible(&mut self) {
+        let visible_ids: Vec<u64> = match self.current_view {
+            View::Today => self.visible_rows_today().iter().map(|r| r.id).collect(),
+            View::Upcoming => {
+                if self.upcoming_pane == HistoryPane::Todos {
+                    self.visible_rows_upcoming().iter().map(|r| r.id).collect()
+                } else {
+                    Vec::new()
+                }
+            }
+            View::History => {
+                if self.history_pane == HistoryPane::Todos {
+                    self.visible_rows_history().iter().map(|r| r.id).collect()
+                } else {
+                    Vec::new()
+                }
+            }
+        };
+
+        if visible_ids.is_empty() {
+            return;
+        }
+
+        let all_marked = visible_ids.iter().all(|id| self.marks.contains(id));
+        if all_marked {
+            for id in &visible_ids {
+                self.marks.remove(id);
+            }
+        } else {
+            for id in visible_ids {
+                self.marks.insert(id);
+            }
+        }
+    }
+
+    pub fn bulk_toggle(&mut self) {
+        if self.marks.is_empty() {
+            return;
+        }
+        let marked_ids: std::collections::HashSet<u64> = self.marks.clone();
+        let all_done = self
+            .todos
+            .iter()
+            .filter(|t| marked_ids.contains(&t.id))
+            .all(|t| t.done);
+        let now = Local::now();
+
+        self.mutate(|todos| {
+            if all_done {
+                for t in todos.iter_mut() {
+                    if marked_ids.contains(&t.id) {
+                        t.done = false;
+                        t.done_at = None;
+                    }
+                }
+                let undone_parents: Vec<u64> = todos
+                    .iter()
+                    .filter(|t| !t.done && t.parent.is_some())
+                    .filter_map(|t| t.parent)
+                    .collect();
+                for t in todos.iter_mut() {
+                    if undone_parents.contains(&t.id) {
+                        t.done = false;
+                        t.done_at = None;
+                    }
+                }
+            } else {
+                for t in todos.iter_mut() {
+                    if marked_ids.contains(&t.id) {
+                        t.done = true;
+                        t.done_at = Some(now);
+                    }
+                }
+                let done_parents: Vec<u64> = todos
+                    .iter()
+                    .filter(|t| t.done && t.parent.is_none())
+                    .map(|t| t.id)
+                    .collect();
+                for t in todos.iter_mut() {
+                    if let Some(p) = t.parent {
+                        if done_parents.contains(&p) {
+                            t.done = true;
+                            t.done_at = Some(now);
+                        }
+                    }
+                }
+            }
+        });
+        self.marks.clear();
+        self.re_resolve_selections();
+    }
+
+    pub fn bulk_delete(&mut self) {
+        if self.marks.is_empty() {
+            return;
+        }
+        let marked_ids: Vec<u64> = self.marks.iter().copied().collect();
+        let count = marked_ids.len();
+
+        self.mutate(|todos| {
+            for id in marked_ids {
+                crate::store::delete_task(todos, id);
+            }
+        });
+
+        self.marks.clear();
+        self.re_resolve_selections();
+        self.set_transient_message(format!("Deleted {count} tasks · u to undo"));
+    }
+
+    pub fn bulk_move_to_today(&mut self) {
+        if self.marks.is_empty() {
+            return;
+        }
+        let marked_ids: Vec<u64> = self.marks.iter().copied().collect();
+        let count = marked_ids.len();
+        let today = self.today;
+
+        self.mutate(|todos| {
+            for id in marked_ids {
+                crate::store::move_task_to_date(todos, id, today);
+            }
+        });
+
+        self.marks.clear();
+        self.re_resolve_selections();
+        self.set_transient_message(format!("Moved {count} tasks to Today · u to undo"));
+    }
+
     pub fn set_recurrence_off(&mut self, target_id: u64) {
         let Some(todo) = self.todos.iter().find(|t| t.id == target_id).cloned() else {
             return;
@@ -1467,6 +1607,7 @@ impl App {
             InputMode::AddingSubtask(parent_id) => self.handle_adding_subtask_key(parent_id, key),
             InputMode::Editing(id) => self.handle_editing_key(id, key),
             InputMode::Rescheduling(id) => self.handle_rescheduling_key(id, key),
+            InputMode::ReschedulingBulk => self.handle_rescheduling_bulk_key(key),
             InputMode::Filtering => self.handle_filtering_key(key),
             InputMode::EditingNote(id) => self.handle_note_key(id, key),
             InputMode::SettingRecurrence(id) => self.handle_recurrence_key(id, key),
@@ -1525,12 +1666,14 @@ impl App {
                         match area.target {
                             crate::ui::HitTarget::TabToday => {
                                 self.current_view = View::Today;
+                                self.marks.clear();
                                 self.clamp_selections();
                                 return true;
                             }
                             crate::ui::HitTarget::TabUpcoming => {
                                 if self.config.ui.show_upcoming {
                                     self.current_view = View::Upcoming;
+                                    self.marks.clear();
                                     self.clamp_selections();
                                     return true;
                                 }
@@ -1538,6 +1681,7 @@ impl App {
                             crate::ui::HitTarget::TabHistory => {
                                 if self.config.ui.show_history {
                                     self.current_view = View::History;
+                                    self.marks.clear();
                                     self.clamp_selections();
                                     return true;
                                 }
@@ -2162,11 +2306,100 @@ impl App {
                 let today = self.today;
                 match crate::parser::parse_date_expression(&input, today) {
                     Ok(target_date) => {
+                        if target_date < today {
+                            self.prompt_error =
+                                Some("Cannot reschedule to a past date".to_string());
+                            return false;
+                        }
                         self.reschedule_task(target_id, target_date);
                         self.input_mode = InputMode::Normal;
                         self.input_buffer.clear();
                         self.cursor_position = 0;
                         self.prompt_error = None;
+                    }
+                    Err(e) => {
+                        self.prompt_error = Some(e);
+                    }
+                }
+            }
+            KeyCode::Left => {
+                self.cursor_position = self.cursor_position.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_len = self.input_buffer.chars().count();
+                if self.cursor_position < char_len {
+                    self.cursor_position += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor_position = 0;
+            }
+            KeyCode::End => {
+                self.cursor_position = self.input_buffer.chars().count();
+            }
+            KeyCode::Backspace => {
+                self.prompt_error = None;
+                if self.cursor_position > 0 {
+                    let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                    chars.remove(self.cursor_position - 1);
+                    self.input_buffer = chars.into_iter().collect();
+                    self.cursor_position -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                if self.cursor_position < chars.len() {
+                    chars.remove(self.cursor_position);
+                    self.input_buffer = chars.into_iter().collect();
+                }
+            }
+            KeyCode::Char(c) => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                chars.insert(self.cursor_position, c);
+                self.input_buffer = chars.into_iter().collect();
+                self.cursor_position += 1;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_rescheduling_bulk_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.prompt_error = None;
+            }
+            KeyCode::Enter => {
+                let input = self.input_buffer.trim().to_string();
+                let today = self.today;
+                match crate::parser::parse_date_expression(&input, today) {
+                    Ok(target_date) => {
+                        if target_date < today {
+                            self.prompt_error =
+                                Some("Cannot reschedule to a past date".to_string());
+                            return false;
+                        }
+                        let marked_ids: Vec<u64> = self.marks.iter().copied().collect();
+                        let count = marked_ids.len();
+                        self.mutate(|todos| {
+                            for id in marked_ids {
+                                crate::store::move_task_to_date(todos, id, target_date);
+                            }
+                        });
+                        self.marks.clear();
+                        self.input_mode = InputMode::Normal;
+                        self.input_buffer.clear();
+                        self.cursor_position = 0;
+                        self.prompt_error = None;
+                        self.set_transient_message(format!(
+                            "Scheduled {count} tasks for {}",
+                            target_date.format(&self.config.short_date_format)
+                        ));
                     }
                     Err(e) => {
                         self.prompt_error = Some(e);
@@ -2574,6 +2807,7 @@ impl App {
                 self.show_help = true;
             }
             crate::keymap::Action::SwitchView => {
+                self.marks.clear();
                 let show_up = self.config.ui.show_upcoming;
                 let show_hist = self.config.ui.show_history;
                 self.current_view = match self.current_view {
@@ -2610,13 +2844,35 @@ impl App {
                 self.start_adding_subtask();
             }
             crate::keymap::Action::Reschedule => {
-                let target_id = self.selected_task_id();
-                if let Some(id) = target_id {
-                    self.input_mode = InputMode::Rescheduling(id);
+                if !self.marks.is_empty() {
+                    self.input_mode = InputMode::ReschedulingBulk;
                     self.input_buffer.clear();
                     self.cursor_position = 0;
                     self.prompt_error = None;
+                } else {
+                    let target_id = self.selected_task_id();
+                    if let Some(id) = target_id {
+                        self.input_mode = InputMode::Rescheduling(id);
+                        self.input_buffer.clear();
+                        self.cursor_position = 0;
+                        self.prompt_error = None;
+                    }
                 }
+            }
+            crate::keymap::Action::ToggleMark => {
+                self.toggle_mark_selected();
+            }
+            crate::keymap::Action::ToggleMarkAll => {
+                self.toggle_mark_all_visible();
+            }
+            crate::keymap::Action::Toggle if !self.marks.is_empty() => {
+                self.bulk_toggle();
+            }
+            crate::keymap::Action::Delete if !self.marks.is_empty() => {
+                self.bulk_delete();
+            }
+            crate::keymap::Action::MoveToToday if !self.marks.is_empty() => {
+                self.bulk_move_to_today();
             }
             crate::keymap::Action::CyclePriority => {
                 self.cycle_selected_priority();
@@ -5368,5 +5624,194 @@ mod tests {
             .find(|t| t.text == "Modified habit instance")
             .unwrap();
         assert_eq!(restored_todo.recurring_id, None);
+    }
+
+    #[test]
+    fn test_multiselect_and_bulk_actions() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let tomorrow = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Task 1".to_string(),
+                    created_date: today,
+                    done: false,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Task 2".to_string(),
+                    created_date: today,
+                    done: false,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 3,
+                    text: "Task 3".to_string(),
+                    created_date: today,
+                    done: false,
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        // 1. `v` toggles mark on selected row
+        app.today_selected_index = 0;
+        app.today_selected_id = Some(1);
+        app.handle_key(key_press(KeyCode::Char('v')));
+        assert_eq!(app.marks, [1].into_iter().collect());
+
+        app.today_selected_index = 1;
+        app.today_selected_id = Some(2);
+        app.handle_key(key_press(KeyCode::Char('v')));
+        assert_eq!(app.marks, [1, 2].into_iter().collect());
+
+        // Toggle task 1 off with `v`
+        app.today_selected_index = 0;
+        app.today_selected_id = Some(1);
+        app.handle_key(key_press(KeyCode::Char('v')));
+        assert_eq!(app.marks, [2].into_iter().collect());
+
+        // 2. `V` marks all visible rows, or unmarks all if all are already marked
+        app.handle_key(key_press(KeyCode::Char('V')));
+        assert_eq!(app.marks, [1, 2, 3].into_iter().collect());
+
+        app.handle_key(key_press(KeyCode::Char('V')));
+        assert!(app.marks.is_empty());
+
+        // 3. `Esc` clears marks first, then filter
+        app.marks.insert(1);
+        app.today_filter = crate::parser::parse_filter("#tag");
+        app.handle_key(key_press(KeyCode::Esc));
+        assert!(app.marks.is_empty());
+        assert!(!app.today_filter.is_empty());
+
+        app.handle_key(key_press(KeyCode::Esc));
+        assert!(app.today_filter.is_empty());
+
+        // 4. Bulk toggle (space)
+        app.marks.insert(1);
+        app.marks.insert(2);
+        app.handle_key(key_press(KeyCode::Char(' ')));
+        assert!(app.todos.iter().find(|t| t.id == 1).unwrap().done);
+        assert!(app.todos.iter().find(|t| t.id == 2).unwrap().done);
+        assert!(!app.todos.iter().find(|t| t.id == 3).unwrap().done);
+        assert!(app.marks.is_empty());
+
+        // Undo restores both undone in one step
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert!(!app.todos.iter().find(|t| t.id == 1).unwrap().done);
+        assert!(!app.todos.iter().find(|t| t.id == 2).unwrap().done);
+
+        // When all marked are done -> toggles all to undone
+        app.todos[0].done = true;
+        app.todos[1].done = true;
+        app.marks.insert(1);
+        app.marks.insert(2);
+        app.handle_key(key_press(KeyCode::Char(' ')));
+        assert!(!app.todos.iter().find(|t| t.id == 1).unwrap().done);
+        assert!(!app.todos.iter().find(|t| t.id == 2).unwrap().done);
+        assert!(app.marks.is_empty());
+
+        // 5. Bulk reschedule (`t`)
+        app.marks.insert(1);
+        app.marks.insert(2);
+        app.handle_key(key_press(KeyCode::Char('t')));
+        assert_eq!(app.input_mode, InputMode::ReschedulingBulk);
+
+        // Past date rejected
+        for c in "2026-10-01".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert!(app
+            .prompt_error
+            .as_deref()
+            .unwrap()
+            .contains("cannot be in the past"));
+        assert_eq!(app.input_mode, InputMode::ReschedulingBulk);
+
+        // Cancel with Esc leaves marks intact
+        app.handle_key(key_press(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.marks, [1, 2].into_iter().collect());
+
+        // Valid future date
+        app.handle_key(key_press(KeyCode::Char('t')));
+        for c in "tomorrow".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.marks.is_empty());
+        assert_eq!(
+            app.todos.iter().find(|t| t.id == 1).unwrap().created_date,
+            tomorrow
+        );
+        assert_eq!(
+            app.todos.iter().find(|t| t.id == 2).unwrap().created_date,
+            tomorrow
+        );
+        assert_eq!(
+            app.todos.iter().find(|t| t.id == 3).unwrap().created_date,
+            today
+        );
+
+        // Undo restores dates in one step
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(
+            app.todos.iter().find(|t| t.id == 1).unwrap().created_date,
+            today
+        );
+        assert_eq!(
+            app.todos.iter().find(|t| t.id == 2).unwrap().created_date,
+            today
+        );
+
+        // 6. Bulk move to Today (`m`)
+        app.todos[0].created_date = tomorrow;
+        app.todos[1].created_date = tomorrow;
+        app.marks.insert(1);
+        app.marks.insert(2);
+        app.handle_key(key_press(KeyCode::Char('m')));
+        assert_eq!(
+            app.todos.iter().find(|t| t.id == 1).unwrap().created_date,
+            today
+        );
+        assert_eq!(
+            app.todos.iter().find(|t| t.id == 2).unwrap().created_date,
+            today
+        );
+        assert!(app.marks.is_empty());
+
+        // Undo restores dates in one step
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(
+            app.todos.iter().find(|t| t.id == 1).unwrap().created_date,
+            tomorrow
+        );
+        assert_eq!(
+            app.todos.iter().find(|t| t.id == 2).unwrap().created_date,
+            tomorrow
+        );
+
+        // 7. Bulk delete (`d`)
+        app.marks.insert(1);
+        app.marks.insert(2);
+        app.handle_key(key_press(KeyCode::Char('d')));
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].id, 3);
+        assert!(app.marks.is_empty());
+
+        // Undo restores deleted tasks in one step
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.todos.len(), 3);
+
+        // 8. View switch clears marks
+        app.marks.insert(3);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert!(app.marks.is_empty());
     }
 }
