@@ -498,3 +498,75 @@ fn test_cli_add_quick_add_syntax_and_errors() {
     );
     assert!(matches!(err_empty, Err(CmdError::Usage(_))));
 }
+
+#[test]
+fn test_cli_subtasks_listing_and_operations() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let config = Config::default();
+    let mut out = Vec::new();
+
+    // 1. Add parent task
+    handle_add(
+        vec!["Parent task".to_string()],
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+
+    // Add subtask directly to storage
+    slate::storage::try_load_modify_save(&data_file, |data| {
+        let id = data.next_id;
+        data.next_id += 1;
+        data.todos.push(slate::model::Todo {
+            id,
+            text: "Child task".to_string(),
+            created_date: today,
+            done: false,
+            parent: Some(1),
+            ..Default::default()
+        });
+        Ok::<(), CmdError>(())
+    })
+    .unwrap();
+
+    // 2. List shows "1" for parent and "1.1" indented for subtask
+    handle_list(
+        None, false, false, None, &data_file, today, &config, &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+    assert!(list_str.contains("1  ○  Parent task") || list_str.contains("1  [ ]  Parent task"));
+    assert!(list_str.contains("1.1") && list_str.contains("Child task"));
+    out.clear();
+
+    // 3. Mark subtask done using handle_done_str with "1.1"
+    slate::commands::handle_done_str(&["1.1".to_string()], None, None, &data_file, today).unwrap();
+
+    let loaded = slate::storage::load_todos(&data_file).unwrap().todos;
+    assert!(!loaded[0].done); // Parent still unfinished
+    assert!(loaded[1].done); // Child is done
+
+    // 4. Mark parent done -> completes both
+    slate::commands::handle_done(vec![1], None, None, &data_file, today).unwrap();
+    let loaded = slate::storage::load_todos(&data_file).unwrap().todos;
+    assert!(loaded[0].done);
+    assert!(loaded[1].done);
+
+    // 5. Undone child -> reopens parent
+    slate::commands::handle_undone_str(&["1.1".to_string()], None, None, &data_file, today)
+        .unwrap();
+    let loaded = slate::storage::load_todos(&data_file).unwrap().todos;
+    assert!(!loaded[0].done); // Parent reopened!
+    assert!(!loaded[1].done);
+
+    // 6. Delete subtask with rm 1.1
+    slate::commands::handle_rm_str(&["1.1".to_string()], None, None, &data_file, today).unwrap();
+    let loaded = slate::storage::load_todos(&data_file).unwrap().todos;
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].id, 1);
+}

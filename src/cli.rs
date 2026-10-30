@@ -53,8 +53,8 @@ pub enum Commands {
         after_help = "Examples:\n  slate done 1\n  slate done 1 2 3\n  slate done --match \"dentist\"\n  slate done --date yesterday 1"
     )]
     Done {
-        #[arg(value_name = "N", help = "1-based task indices")]
-        indices: Vec<usize>,
+        #[arg(value_name = "N", help = "1-based task indices (e.g. 1, 1.1)")]
+        indices: Vec<String>,
 
         #[arg(
             long,
@@ -76,8 +76,8 @@ pub enum Commands {
         after_help = "Examples:\n  slate undone 1\n  slate undone 1 2\n  slate undone --match \"milk\"\n  slate undone --date yesterday 2"
     )]
     Undone {
-        #[arg(value_name = "N", help = "1-based task indices")]
-        indices: Vec<usize>,
+        #[arg(value_name = "N", help = "1-based task indices (e.g. 1, 1.1)")]
+        indices: Vec<String>,
 
         #[arg(
             long,
@@ -99,8 +99,8 @@ pub enum Commands {
         after_help = "Examples:\n  slate rm 1\n  slate rm 1 2 3\n  slate rm --match \"temporary task\""
     )]
     Rm {
-        #[arg(value_name = "N", help = "1-based task indices")]
-        indices: Vec<usize>,
+        #[arg(value_name = "N", help = "1-based task indices (e.g. 1, 1.1)")]
+        indices: Vec<String>,
 
         #[arg(
             long,

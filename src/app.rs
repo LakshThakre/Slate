@@ -647,29 +647,42 @@ impl App {
             .map(|t| t.created_date)
             .filter(|&d| d < today)
             .max()?;
-        let unfinished_ids: Vec<u64> = self
+        let unfinished_parents: Vec<u64> = self
             .todos
             .iter()
-            .filter(|t| t.created_date == prev_date && !t.done)
+            .filter(|t| t.created_date == prev_date && t.parent.is_none() && !t.done)
             .map(|t| t.id)
             .collect();
-        if unfinished_ids.is_empty() {
+        if unfinished_parents.is_empty() {
             None
         } else {
-            Some((prev_date, unfinished_ids))
+            let mut ids_to_carry = Vec::new();
+            for &pid in &unfinished_parents {
+                ids_to_carry.push(pid);
+                for t in self.todos.iter() {
+                    if t.created_date == prev_date && t.parent == Some(pid) {
+                        ids_to_carry.push(t.id);
+                    }
+                }
+            }
+            Some((prev_date, ids_to_carry))
         }
     }
 
     pub fn carry_over(&mut self) {
         if let Some((_, ids)) = self.uncarried_previous_tasks() {
             let today = self.today;
-            let count = ids.len();
+            let parent_count = self
+                .todos
+                .iter()
+                .filter(|t| ids.contains(&t.id) && t.parent.is_none())
+                .count();
             self.mutate(|todos| {
                 crate::store::carry_over_tasks(todos, &ids, today);
             });
             self.set_transient_message(format!(
-                "Carried over {count} unfinished task{} · u to undo",
-                if count == 1 { "" } else { "s" }
+                "Carried over {parent_count} unfinished task{} · u to undo",
+                if parent_count == 1 { "" } else { "s" }
             ));
         }
     }
@@ -680,13 +693,20 @@ impl App {
             return;
         }
         let today = self.today;
-        let selected = self.today_selected_index;
-        if !crate::store::can_reorder_day_task(&self.todos, today, selected, down) {
+        let selected_id = match self
+            .visible_rows_today()
+            .get(self.today_selected_index)
+            .map(|r| r.id)
+        {
+            Some(id) => id,
+            None => return,
+        };
+        if !crate::store::can_reorder_day_task(&self.todos, today, selected_id, down) {
             return;
         }
-        self.today_selected_id = self.visible_rows_today().get(selected).map(|r| r.id);
+        self.today_selected_id = Some(selected_id);
         self.mutate(|todos| {
-            crate::store::reorder_day_task(todos, today, selected, down);
+            crate::store::reorder_day_task(todos, today, selected_id, down);
         });
     }
 
@@ -697,13 +717,20 @@ impl App {
         }
         let dates = self.dates_list();
         if let Some(&selected_date) = dates.get(self.history_date_index) {
-            let selected = self.history_todo_index;
-            if !crate::store::can_reorder_day_task(&self.todos, selected_date, selected, down) {
+            let selected_id = match self
+                .visible_rows_history()
+                .get(self.history_todo_index)
+                .map(|r| r.id)
+            {
+                Some(id) => id,
+                None => return,
+            };
+            if !crate::store::can_reorder_day_task(&self.todos, selected_date, selected_id, down) {
                 return;
             }
-            self.history_todo_id = self.visible_rows_history().get(selected).map(|r| r.id);
+            self.history_todo_id = Some(selected_id);
             self.mutate(|todos| {
-                crate::store::reorder_day_task(todos, selected_date, selected, down);
+                crate::store::reorder_day_task(todos, selected_date, selected_id, down);
             });
         }
     }
@@ -1053,13 +1080,20 @@ impl App {
         }
         let dates = self.upcoming_dates_list();
         if let Some(&selected_date) = dates.get(self.upcoming_date_index) {
-            let selected = self.upcoming_todo_index;
-            if !crate::store::can_reorder_day_task(&self.todos, selected_date, selected, down) {
+            let selected_id = match self
+                .visible_rows_upcoming()
+                .get(self.upcoming_todo_index)
+                .map(|r| r.id)
+            {
+                Some(id) => id,
+                None => return,
+            };
+            if !crate::store::can_reorder_day_task(&self.todos, selected_date, selected_id, down) {
                 return;
             }
-            self.upcoming_todo_id = self.visible_rows_upcoming().get(selected).map(|r| r.id);
+            self.upcoming_todo_id = Some(selected_id);
             self.mutate(|todos| {
-                crate::store::reorder_day_task(todos, selected_date, selected, down);
+                crate::store::reorder_day_task(todos, selected_date, selected_id, down);
             });
         }
     }
@@ -1186,6 +1220,7 @@ impl App {
         self.transient_message = None;
         match self.input_mode {
             InputMode::Adding => self.handle_adding_key(key),
+            InputMode::AddingSubtask(parent_id) => self.handle_adding_subtask_key(parent_id, key),
             InputMode::Editing(id) => self.handle_editing_key(id, key),
             InputMode::Rescheduling(id) => self.handle_rescheduling_key(id, key),
             InputMode::Filtering => self.handle_filtering_key(key),
@@ -1548,6 +1583,143 @@ impl App {
                                 View::History => {
                                     self.history_todo_id = Some(id);
                                 }
+                            }
+                        }
+
+                        self.input_mode = InputMode::Normal;
+                        self.input_buffer.clear();
+                        self.cursor_position = 0;
+                        self.prompt_error = None;
+                    }
+                    Err(e) => {
+                        self.prompt_error = Some(e.to_string());
+                    }
+                }
+            }
+            KeyCode::Left => {
+                self.cursor_position = self.cursor_position.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_len = self.input_buffer.chars().count();
+                if self.cursor_position < char_len {
+                    self.cursor_position += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor_position = 0;
+            }
+            KeyCode::End => {
+                self.cursor_position = self.input_buffer.chars().count();
+            }
+            KeyCode::Backspace => {
+                self.prompt_error = None;
+                if self.cursor_position > 0 {
+                    let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                    chars.remove(self.cursor_position - 1);
+                    self.input_buffer = chars.into_iter().collect();
+                    self.cursor_position -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                if self.cursor_position < chars.len() {
+                    chars.remove(self.cursor_position);
+                    self.input_buffer = chars.into_iter().collect();
+                }
+            }
+            KeyCode::Char(c) => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                chars.insert(self.cursor_position, c);
+                self.input_buffer = chars.into_iter().collect();
+                self.cursor_position += 1;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    pub fn start_adding_subtask(&mut self) {
+        let Some(selected_id) = self.selected_task_id() else {
+            return;
+        };
+        let Some(task) = self.todos.iter().find(|t| t.id == selected_id) else {
+            return;
+        };
+        let parent_id = task.parent.unwrap_or(task.id);
+        self.input_mode = InputMode::AddingSubtask(parent_id);
+        self.input_buffer.clear();
+        self.cursor_position = 0;
+        self.prompt_error = None;
+    }
+
+    fn handle_adding_subtask_key(&mut self, parent_id: u64, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.prompt_error = None;
+            }
+            KeyCode::Enter => {
+                let input = self.input_buffer.clone();
+                let today = self.today;
+                match crate::parser::parse_quick_add(&input, today) {
+                    Ok(parsed) => {
+                        if parsed.date.is_some() || parsed.recurrence.is_some() {
+                            self.prompt_error = Some(
+                                "Subtasks inherit parent date; date/recurrence tokens not allowed"
+                                    .to_string(),
+                            );
+                            return false;
+                        }
+
+                        let parent_date = match self.todos.iter().find(|t| t.id == parent_id) {
+                            Some(p) => p.created_date,
+                            None => {
+                                self.input_mode = InputMode::Normal;
+                                return false;
+                            }
+                        };
+
+                        let id = self.next_id;
+                        self.next_id += 1;
+                        let text = parsed.text;
+                        let priority = parsed.priority;
+                        let tags = parsed.tags;
+
+                        let added_subtask = Todo {
+                            id,
+                            text,
+                            created_date: parent_date,
+                            done: false,
+                            done_at: None,
+                            priority,
+                            tags,
+                            note: None,
+                            parent: Some(parent_id),
+                            recurring_id: None,
+                        };
+
+                        let is_hidden_by_filter = !self.current_filter().matches(&added_subtask);
+
+                        self.mutate(|todos| {
+                            let insert_pos = todos
+                                .iter()
+                                .rposition(|t| t.id == parent_id || t.parent == Some(parent_id))
+                                .map(|p| p + 1)
+                                .unwrap_or(todos.len());
+                            todos.insert(insert_pos, added_subtask);
+                        });
+
+                        if is_hidden_by_filter {
+                            self.set_transient_message("Added (hidden by filter)");
+                        } else {
+                            match self.current_view {
+                                View::Today => self.today_selected_id = Some(id),
+                                View::Upcoming => self.upcoming_todo_id = Some(id),
+                                View::History => self.history_todo_id = Some(id),
                             }
                         }
 
@@ -2044,6 +2216,9 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.prompt_error = None;
+            }
+            crate::keymap::Action::AddSubtask => {
+                self.start_adding_subtask();
             }
             crate::keymap::Action::Reschedule => {
                 let target_id = self.selected_task_id();
@@ -4253,5 +4428,270 @@ mod tests {
         app.note_cursor = 0;
         app.handle_key(key_press(KeyCode::Enter));
         assert_eq!(app.todos[0].note, None);
+    }
+
+    #[test]
+    fn test_subtask_add_prompt_and_token_rejection() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![Todo {
+                id: 1,
+                text: "Parent task".to_string(),
+                created_date: today,
+                ..Default::default()
+            }],
+            today,
+        );
+
+        // Press 'A' (Shift+A) to open add subtask prompt
+        app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::AddingSubtask(1));
+
+        // Subtask rejects date token
+        app.input_buffer = "Subtask 1 @tomorrow".to_string();
+        app.cursor_position = app.input_buffer.len();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::AddingSubtask(1));
+        assert_eq!(
+            app.prompt_error.as_deref(),
+            Some("Subtasks inherit parent date; date/recurrence tokens not allowed")
+        );
+
+        // Subtask rejects recurrence token
+        app.input_buffer = "Subtask 1 @daily".to_string();
+        app.cursor_position = app.input_buffer.len();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::AddingSubtask(1));
+        assert_eq!(
+            app.prompt_error.as_deref(),
+            Some("Subtasks inherit parent date; date/recurrence tokens not allowed")
+        );
+
+        // Valid subtask with priority and tag
+        app.input_buffer = "Subtask 1 ! #work".to_string();
+        app.cursor_position = app.input_buffer.len();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.todos.len(), 2);
+        let sub = &app.todos[1];
+        assert_eq!(sub.text, "Subtask 1");
+        assert_eq!(sub.priority, 1);
+        assert_eq!(sub.tags, vec!["work"]);
+        assert_eq!(sub.parent, Some(1));
+        assert_eq!(sub.created_date, today);
+
+        // When a subtask is selected, pressing 'A' adds under the parent (one level only)
+        app.today_selected_index = 1; // Subtask 1 selected
+        app.handle_key(KeyEvent::new(KeyCode::Char('A'), KeyModifiers::NONE));
+        assert_eq!(app.input_mode, InputMode::AddingSubtask(1));
+        app.input_buffer = "Subtask 2".to_string();
+        app.cursor_position = app.input_buffer.len();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.todos.len(), 3);
+        assert_eq!(app.todos[2].parent, Some(1));
+    }
+
+    #[test]
+    fn test_subtask_completion_invariants() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Parent".to_string(),
+                    created_date: today,
+                    done: false,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Child 1".to_string(),
+                    created_date: today,
+                    done: false,
+                    parent: Some(1),
+                    ..Default::default()
+                },
+                Todo {
+                    id: 3,
+                    text: "Child 2".to_string(),
+                    created_date: today,
+                    done: false,
+                    parent: Some(1),
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        // 1. Marking parent done completes all subtasks
+        app.today_selected_index = 0; // Parent selected
+        app.handle_key(key_press(KeyCode::Char(' ')));
+        assert!(app.todos[0].done);
+        assert!(app.todos[1].done);
+        assert!(app.todos[2].done);
+
+        // Undo reverts all
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert!(!app.todos[0].done);
+        assert!(!app.todos[1].done);
+        assert!(!app.todos[2].done);
+
+        // 2. Completing last subtask does NOT auto-complete parent
+        app.today_selected_index = 1; // Child 1
+        app.handle_key(key_press(KeyCode::Char(' ')));
+        assert!(app.todos[1].done);
+        assert!(!app.todos[0].done);
+
+        app.today_selected_index = 2; // Child 2
+        app.handle_key(key_press(KeyCode::Char(' ')));
+        assert!(app.todos[2].done);
+        assert!(!app.todos[0].done); // Parent still unfinished
+
+        // Mark parent done
+        app.today_selected_index = 0;
+        app.handle_key(key_press(KeyCode::Char(' ')));
+        assert!(app.todos[0].done);
+
+        // 3. Undoing a subtask reopens a done parent
+        app.today_selected_index = 1; // Child 1
+        app.handle_key(key_press(KeyCode::Char(' '))); // Child 1 becomes undone
+        assert!(!app.todos[1].done);
+        assert!(!app.todos[0].done); // Parent reopened!
+    }
+
+    #[test]
+    fn test_subtask_delete_parent_deletes_subtasks() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Parent".to_string(),
+                    created_date: today,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Child 1".to_string(),
+                    created_date: today,
+                    parent: Some(1),
+                    ..Default::default()
+                },
+                Todo {
+                    id: 3,
+                    text: "Standalone".to_string(),
+                    created_date: today,
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        // Delete parent (id 1)
+        app.today_selected_index = 0;
+        app.handle_key(key_press(KeyCode::Char('d')));
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].id, 3);
+
+        // Undo restores parent and its subtasks
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.todos.len(), 3);
+        assert_eq!(app.todos[0].id, 1);
+        assert_eq!(app.todos[1].id, 2);
+        assert_eq!(app.todos[2].id, 3);
+    }
+
+    #[test]
+    fn test_subtask_and_parent_reorder() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Parent A".to_string(),
+                    created_date: today,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Child A1".to_string(),
+                    created_date: today,
+                    parent: Some(1),
+                    ..Default::default()
+                },
+                Todo {
+                    id: 3,
+                    text: "Child A2".to_string(),
+                    created_date: today,
+                    parent: Some(1),
+                    ..Default::default()
+                },
+                Todo {
+                    id: 4,
+                    text: "Parent B".to_string(),
+                    created_date: today,
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        // Reordering subtask moves among siblings only
+        app.today_selected_index = 1; // Child A1
+        app.handle_key(key_press(KeyCode::Char('J'))); // Move down
+        assert_eq!(app.todos[1].id, 3); // Child A2 is now before A1
+        assert_eq!(app.todos[2].id, 2);
+
+        // Child A1 is at bottom of siblings; moving down should be no-op
+        app.handle_key(key_press(KeyCode::Char('J')));
+        assert_eq!(app.todos[1].id, 3);
+        assert_eq!(app.todos[2].id, 2);
+
+        // Reordering parent moves as a block
+        app.today_selected_index = 0; // Parent A (or rows[0])
+        app.today_selected_id = Some(1);
+        app.handle_key(key_press(KeyCode::Char('J'))); // Move block A down
+        let ids: Vec<u64> = app.todos.iter().map(|t| t.id).collect();
+        assert_eq!(ids, vec![4, 1, 3, 2]); // Parent B is now before block A
+    }
+
+    #[test]
+    fn test_subtask_carry_over_and_move_together() {
+        let yesterday = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Old Parent".to_string(),
+                    created_date: yesterday,
+                    done: false,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Old Child".to_string(),
+                    created_date: yesterday,
+                    done: true,
+                    parent: Some(1),
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        // Carry-over triggers on unfinished parent
+        let uncarried = app.uncarried_previous_tasks();
+        assert!(uncarried.is_some());
+        let (prev_date, ids) = uncarried.unwrap();
+        assert_eq!(prev_date, yesterday);
+        assert_eq!(ids, vec![1, 2]); // parent + child
+
+        // Press 'c' to carry over
+        app.handle_key(key_press(KeyCode::Char('c')));
+        assert_eq!(app.todos[0].created_date, today);
+        assert_eq!(app.todos[1].created_date, today);
+        assert!(!app.todos[0].done);
+        assert!(!app.todos[1].done); // Completion status reset
     }
 }

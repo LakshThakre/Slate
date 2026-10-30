@@ -17,10 +17,12 @@ pub struct Symbols {
     pub check_overdue: &'static str,
     pub marker: &'static str,
     pub prompt_default: &'static str,
+    pub prompt_subtask: &'static str,
     pub prompt_edit: &'static str,
     pub prompt_reschedule: &'static str,
     pub prompt_filter: &'static str,
     pub note: &'static str,
+    pub subtask_connector: &'static str,
     pub v_divider: &'static str,
     pub h_rule: &'static str,
     pub bullet: &'static str,
@@ -46,10 +48,12 @@ impl Symbols {
             check_overdue: "! ",
             marker: "› ",
             prompt_default: "› ",
+            prompt_subtask: "› Add subtask ",
             prompt_edit: "› Edit task ",
             prompt_reschedule: "› Reschedule: ",
             prompt_filter: "› filter ",
             note: "≡",
+            subtask_connector: "└ ",
             v_divider: "│",
             h_rule: "─",
             bullet: "•",
@@ -69,10 +73,12 @@ impl Symbols {
             check_overdue: "[!] ",
             marker: "> ",
             prompt_default: "> ",
+            prompt_subtask: "> Add subtask ",
             prompt_edit: "> Edit task ",
             prompt_reschedule: "> Reschedule: ",
             prompt_filter: "> filter ",
             note: "=",
+            subtask_connector: "` ",
             v_divider: "|",
             h_rule: "-",
             bullet: "*",
@@ -376,8 +382,14 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
         .iter()
         .filter(|t| t.created_date == today)
         .collect();
-    let total = today_todos.len();
-    let done = today_todos.iter().filter(|t| t.done).count();
+    // Phase 5: Header progress bar and count use top-level tasks only
+    let today_top: Vec<&Todo> = today_todos
+        .iter()
+        .copied()
+        .filter(|t| t.parent.is_none())
+        .collect();
+    let total = today_top.len();
+    let done = today_top.iter().filter(|t| t.done).count();
 
     let uncarried = app.uncarried_previous_tasks();
     let has_uncarried = uncarried.is_some();
@@ -472,7 +484,10 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(title_spans)), parts[0]);
 
     if let Some((prev_date, ref ids)) = uncarried {
-        let count = ids.len();
+        let count = ids
+            .iter()
+            .filter(|&&id| app.todos.iter().any(|t| t.id == id && t.parent.is_none()))
+            .count();
         let date_label = if prev_date == today.pred_opt().unwrap_or(today) {
             "yesterday".to_string()
         } else {
@@ -536,8 +551,25 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
         .filter_map(|(idx, row)| {
             let todo = app.todos.iter().find(|t| t.id == row.id)?;
             let is_selected = idx == app.today_selected_index;
+            let subtask_progress = if row.depth == 0 {
+                let subs: Vec<&Todo> = app
+                    .todos
+                    .iter()
+                    .filter(|t| t.parent == Some(todo.id))
+                    .collect();
+                if !subs.is_empty() {
+                    let done_subs = subs.iter().filter(|t| t.done).count();
+                    Some((done_subs, subs.len()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
             Some(format_todo_row(
                 todo,
+                row.depth,
+                subtask_progress,
                 is_selected,
                 list_area.width as usize,
                 app.terminal_width,
@@ -563,8 +595,18 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
     for i in 0..visible_count {
         let item_idx = offset + i;
         let row_y = list_area.y + i as u16;
+        let connector_len = if rows[item_idx].depth > 0 {
+            app.symbols.subtask_connector.chars().count() as u16
+        } else {
+            0
+        };
         app.hit_areas.push(HitArea {
-            rect: Rect::new(list_area.x + marker_len, row_y, checkbox_len, 1),
+            rect: Rect::new(
+                list_area.x + marker_len + connector_len,
+                row_y,
+                checkbox_len,
+                1,
+            ),
             target: HitTarget::TodayCheckbox { index: item_idx },
         });
         app.hit_areas.push(HitArea {
@@ -626,8 +668,14 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
                 .iter()
                 .filter(|t| t.created_date == date)
                 .collect();
-            let total = date_todos.len();
-            let done = date_todos.iter().filter(|t| t.done).count();
+            // Phase 5: Progress count and overdue markers use top-level tasks only
+            let date_top: Vec<&Todo> = date_todos
+                .iter()
+                .copied()
+                .filter(|t| t.parent.is_none())
+                .collect();
+            let total = date_top.len();
+            let done = date_top.iter().filter(|t| t.done).count();
             let is_overdue = date < today && done < total;
 
             let marker = if is_selected {
@@ -716,8 +764,14 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
             .iter()
             .filter(|t| t.created_date == date)
             .collect();
-        let total = date_todos.len();
-        let done = date_todos.iter().filter(|t| t.done).count();
+        // Phase 5: Header progress count uses top-level tasks only
+        let date_top: Vec<&Todo> = date_todos
+            .iter()
+            .copied()
+            .filter(|t| t.parent.is_none())
+            .collect();
+        let total = date_top.len();
+        let done = date_top.iter().filter(|t| t.done).count();
 
         let right_rows = Layout::default()
             .direction(Direction::Vertical)
@@ -785,7 +839,8 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
                     let todo = app.todos.iter().find(|t| t.id == row.id)?;
                     let is_selected = idx == app.history_todo_index;
                     let active_marker = is_selected && is_todo_pane_active;
-                    let is_todo_overdue = is_date_overdue && !todo.done;
+                    // Phase 5: Overdue markers use top-level unfinished tasks only
+                    let is_todo_overdue = is_date_overdue && !todo.done && todo.parent.is_none();
                     let time_str = if todo.done {
                         match todo.done_at {
                             Some(dt) => {
@@ -797,8 +852,26 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
                         None
                     };
 
+                    let subtask_progress = if row.depth == 0 {
+                        let subs: Vec<&Todo> = app
+                            .todos
+                            .iter()
+                            .filter(|t| t.parent == Some(todo.id))
+                            .collect();
+                        if !subs.is_empty() {
+                            let done_subs = subs.iter().filter(|t| t.done).count();
+                            Some((done_subs, subs.len()))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     Some(format_todo_row_history(
                         todo,
+                        row.depth,
+                        subtask_progress,
                         is_selected,
                         active_marker,
                         is_todo_overdue,
@@ -827,8 +900,18 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
             for i in 0..visible_todos {
                 let todo_idx = todo_offset + i;
                 let row_y = tasks_list_area.y + i as u16;
+                let connector_len = if rows[todo_idx].depth > 0 {
+                    app.symbols.subtask_connector.chars().count() as u16
+                } else {
+                    0
+                };
                 app.hit_areas.push(HitArea {
-                    rect: Rect::new(tasks_list_area.x + marker_len, row_y, checkbox_len, 1),
+                    rect: Rect::new(
+                        tasks_list_area.x + marker_len + connector_len,
+                        row_y,
+                        checkbox_len,
+                        1,
+                    ),
                     target: HitTarget::HistoryCheckbox { index: todo_idx },
                 });
                 app.hit_areas.push(HitArea {
@@ -904,8 +987,14 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
                 .iter()
                 .filter(|t| t.created_date == date)
                 .collect();
-            let total = date_todos.len();
-            let done = date_todos.iter().filter(|t| t.done).count();
+            // Phase 5: Progress count uses top-level tasks only
+            let date_top: Vec<&Todo> = date_todos
+                .iter()
+                .copied()
+                .filter(|t| t.parent.is_none())
+                .collect();
+            let total = date_top.len();
+            let done = date_top.iter().filter(|t| t.done).count();
 
             let marker = if is_selected {
                 if is_date_pane_active {
@@ -988,8 +1077,14 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
             .iter()
             .filter(|t| t.created_date == date)
             .collect();
-        let total = date_todos.len();
-        let done = date_todos.iter().filter(|t| t.done).count();
+        // Phase 5: Header progress count uses top-level tasks only
+        let date_top: Vec<&Todo> = date_todos
+            .iter()
+            .copied()
+            .filter(|t| t.parent.is_none())
+            .collect();
+        let total = date_top.len();
+        let done = date_top.iter().filter(|t| t.done).count();
 
         let right_rows = Layout::default()
             .direction(Direction::Vertical)
@@ -1066,8 +1161,26 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
                         None
                     };
 
+                    let subtask_progress = if row.depth == 0 {
+                        let subs: Vec<&Todo> = app
+                            .todos
+                            .iter()
+                            .filter(|t| t.parent == Some(todo.id))
+                            .collect();
+                        if !subs.is_empty() {
+                            let done_subs = subs.iter().filter(|t| t.done).count();
+                            Some((done_subs, subs.len()))
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     Some(format_todo_row_history(
                         todo,
+                        row.depth,
+                        subtask_progress,
                         is_selected,
                         active_marker,
                         false,
@@ -1096,8 +1209,18 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
             for i in 0..visible_todos {
                 let todo_idx = todo_offset + i;
                 let row_y = tasks_list_area.y + i as u16;
+                let connector_len = if rows[todo_idx].depth > 0 {
+                    app.symbols.subtask_connector.chars().count() as u16
+                } else {
+                    0
+                };
                 app.hit_areas.push(HitArea {
-                    rect: Rect::new(tasks_list_area.x + marker_len, row_y, checkbox_len, 1),
+                    rect: Rect::new(
+                        tasks_list_area.x + marker_len + connector_len,
+                        row_y,
+                        checkbox_len,
+                        1,
+                    ),
                     target: HitTarget::UpcomingCheckbox { index: todo_idx },
                 });
                 app.hit_areas.push(HitArea {
@@ -1120,6 +1243,7 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     }
     let prompt_label = match app.input_mode {
         crate::model::InputMode::Editing(_) => app.symbols.prompt_edit,
+        crate::model::InputMode::AddingSubtask(_) => app.symbols.prompt_subtask,
         crate::model::InputMode::Rescheduling(_) => app.symbols.prompt_reschedule,
         crate::model::InputMode::Filtering => app.symbols.prompt_filter,
         _ => app.symbols.prompt_default,
@@ -1302,8 +1426,11 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 }
 
+#[allow(clippy::too_many_arguments)]
 fn format_todo_row(
     todo: &Todo,
+    depth: usize,
+    subtask_progress: Option<(usize, usize)>,
     is_selected: bool,
     max_width: usize,
     terminal_width: u16,
@@ -1319,6 +1446,12 @@ fn format_todo_row(
         )
     } else {
         Span::raw(" ".repeat(marker_len))
+    };
+
+    let connector_len = if depth > 0 {
+        symbols.subtask_connector.chars().count()
+    } else {
+        0
     };
 
     let checkbox = if todo.done {
@@ -1348,7 +1481,18 @@ fn format_todo_row(
     let checkbox_len = symbols.check_done.chars().count();
     let has_note = todo.note.as_ref().is_some_and(|n| !n.trim().is_empty());
     let note_len = if has_note { 2 } else { 0 };
-    let avail_total = max_width.saturating_sub(marker_len + checkbox_len + prio_len + note_len + 1);
+
+    let (prog_str, prog_len) = if let Some((done, total)) = subtask_progress {
+        let s = format!(" {done}/{total}");
+        let len = s.chars().count();
+        (s, len)
+    } else {
+        (String::new(), 0)
+    };
+
+    let avail_total = max_width.saturating_sub(
+        marker_len + connector_len + checkbox_len + prio_len + prog_len + note_len + 1,
+    );
 
     let can_show_tags = show_tags && terminal_width >= 60 && !todo.tags.is_empty();
     let (tags_str, tags_len) = if can_show_tags {
@@ -1388,11 +1532,18 @@ fn format_todo_row(
         Span::styled(text_truncated, theme.text_style())
     };
 
-    let mut spans = vec![marker, checkbox];
+    let mut spans = vec![marker];
+    if depth > 0 {
+        spans.push(Span::styled(symbols.subtask_connector, theme.dim_style()));
+    }
+    spans.push(checkbox);
     if prio_len > 0 {
         spans.push(Span::styled(prio_str, prio_style));
     }
     spans.push(text_span);
+    if prog_len > 0 {
+        spans.push(Span::styled(prog_str, theme.dim_style()));
+    }
     if show_rendered_tags {
         spans.push(Span::styled(tags_str, theme.dim_style()));
     }
@@ -1409,6 +1560,8 @@ fn format_todo_row(
 #[allow(clippy::too_many_arguments)]
 fn format_todo_row_history(
     todo: &Todo,
+    depth: usize,
+    subtask_progress: Option<(usize, usize)>,
     is_selected: bool,
     is_active: bool,
     is_overdue: bool,
@@ -1431,6 +1584,12 @@ fn format_todo_row_history(
         }
     } else {
         Span::raw(" ".repeat(marker_len))
+    };
+
+    let connector_len = if depth > 0 {
+        symbols.subtask_connector.chars().count()
+    } else {
+        0
     };
 
     let checkbox = if todo.done {
@@ -1470,8 +1629,17 @@ fn format_todo_row_history(
     let has_note = todo.note.as_ref().is_some_and(|n| !n.trim().is_empty());
     let note_len = if has_note { 2 } else { 0 };
 
-    let avail_total =
-        max_width.saturating_sub(marker_len + checkbox_len + prio_len + suffix_len + note_len + 1);
+    let (prog_str, prog_len) = if let Some((done, total)) = subtask_progress {
+        let s = format!(" {done}/{total}");
+        let len = s.chars().count();
+        (s, len)
+    } else {
+        (String::new(), 0)
+    };
+
+    let avail_total = max_width.saturating_sub(
+        marker_len + connector_len + checkbox_len + prio_len + prog_len + suffix_len + note_len + 1,
+    );
 
     let can_show_tags = show_tags && terminal_width >= 60 && !todo.tags.is_empty();
     let (tags_str, tags_len) = if can_show_tags {
@@ -1516,19 +1684,28 @@ fn format_todo_row_history(
 
     let pad_len = max_width.saturating_sub(
         marker_len
+            + connector_len
             + checkbox_len
             + prio_len
             + text_truncated.chars().count()
+            + prog_len
             + actual_tags_len
             + note_len
             + suffix_len,
     );
 
-    let mut spans = vec![marker, checkbox];
+    let mut spans = vec![marker];
+    if depth > 0 {
+        spans.push(Span::styled(symbols.subtask_connector, theme.dim_style()));
+    }
+    spans.push(checkbox);
     if prio_len > 0 {
         spans.push(Span::styled(prio_str, prio_style));
     }
     spans.push(text_span);
+    if prog_len > 0 {
+        spans.push(Span::styled(prog_str, theme.dim_style()));
+    }
     if show_rendered_tags {
         spans.push(Span::styled(tags_str, theme.dim_style()));
     }
@@ -2012,6 +2189,12 @@ fn build_right_help_lines(
         help_entry(
             &keymap.hint(crate::keymap::Action::Add),
             "add new task",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::AddSubtask),
+            "add subtask",
             12,
             theme,
         ),
@@ -3073,5 +3256,75 @@ mod tests {
             .collect();
 
         assert!(!content_small.contains("Make sure backups prune correctly"));
+    }
+
+    #[test]
+    fn test_render_subtask_connector_and_progress() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Parent task".to_string(),
+                    created_date: today,
+                    done: false,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Subtask 1".to_string(),
+                    created_date: today,
+                    done: true,
+                    parent: Some(1),
+                    ..Default::default()
+                },
+                Todo {
+                    id: 3,
+                    text: "Subtask 2".to_string(),
+                    created_date: today,
+                    done: false,
+                    parent: Some(1),
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        // Render Unicode
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_unicode: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        // Header shows top-level tasks only: "0 of 1 done"
+        assert!(content_unicode.contains("0 of 1 done"));
+        // Parent row shows progress "1/2"
+        assert!(content_unicode.contains("1/2"));
+        // Subtask connector "└"
+        assert!(content_unicode.contains('└'));
+
+        // Switch to ASCII mode
+        let mut ascii_config = crate::config::Config::default();
+        ascii_config.ui.symbols = crate::config::SymbolsMode::Ascii;
+        app.symbols = Symbols::ascii();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_ascii: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content_ascii.contains("0 of 1 done"));
+        assert!(content_ascii.contains("1/2"));
+        assert!(content_ascii.contains('`'));
     }
 }

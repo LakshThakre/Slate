@@ -33,12 +33,14 @@ pub enum Action {
     Filter,
     ToggleDetail,
     EditNote,
+    AddSubtask,
 }
 
 impl Action {
-    pub const ALL: [Action; 28] = [
+    pub const ALL: [Action; 29] = [
         Action::Quit,
         Action::Add,
+        Action::AddSubtask,
         Action::Edit,
         Action::Toggle,
         Action::Delete,
@@ -71,6 +73,7 @@ impl Action {
         match name.to_ascii_lowercase().as_str() {
             "quit" => Some(Action::Quit),
             "add" => Some(Action::Add),
+            "add_subtask" | "subtask" => Some(Action::AddSubtask),
             "edit" => Some(Action::Edit),
             "toggle" => Some(Action::Toggle),
             "delete" => Some(Action::Delete),
@@ -131,6 +134,7 @@ impl Action {
             Action::Filter => "filter",
             Action::ToggleDetail => "toggle_detail",
             Action::EditNote => "edit_note",
+            Action::AddSubtask => "add_subtask",
         }
     }
 }
@@ -398,6 +402,13 @@ impl Keymap {
                     }],
                 ),
                 (
+                    Action::AddSubtask,
+                    vec![KeyChord {
+                        code: KeyCode::Char('a'),
+                        modifiers: KeyModifiers::SHIFT,
+                    }],
+                ),
+                (
                     Action::Edit,
                     vec![KeyChord {
                         code: KeyCode::Char('e'),
@@ -659,6 +670,13 @@ impl Keymap {
                     vec![KeyChord {
                         code: KeyCode::Char('a'),
                         modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::AddSubtask,
+                    vec![KeyChord {
+                        code: KeyCode::Char('a'),
+                        modifiers: KeyModifiers::SHIFT,
                     }],
                 ),
                 (
@@ -1040,6 +1058,7 @@ impl Keymap {
             Action::Filter => "f".to_string(),
             Action::ToggleDetail => "i".to_string(),
             Action::EditNote => "n".to_string(),
+            Action::AddSubtask => "A".to_string(),
         }
     }
 }

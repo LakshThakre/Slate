@@ -109,7 +109,16 @@ pub fn add_task(todos: &mut Vec<Todo>, text: &str, date: NaiveDate) -> Option<u6
 }
 
 /// Sets the completion state of a task by ID.
+/// Invariants:
+/// - Marking a parent done completes all its subtasks.
+/// - Un-doing a subtask reopens a done parent.
+/// - Completing the last subtask does NOT auto-complete the parent.
 pub fn set_task_done(todos: &mut [Todo], id: u64, done: bool, now: DateTime<Local>) -> bool {
+    let parent_id = match todos.iter().find(|t| t.id == id) {
+        Some(t) => t.parent,
+        None => return false,
+    };
+
     if let Some(todo) = todos.iter_mut().find(|t| t.id == id) {
         if done {
             if !todo.done {
@@ -120,29 +129,46 @@ pub fn set_task_done(todos: &mut [Todo], id: u64, done: bool, now: DateTime<Loca
             todo.done = false;
             todo.done_at = None;
         }
-        true
-    } else {
-        false
     }
+
+    if done {
+        // Marking a parent done completes all its subtasks
+        if parent_id.is_none() {
+            for t in todos.iter_mut() {
+                if t.parent == Some(id) {
+                    t.done = true;
+                    t.done_at = Some(now);
+                }
+            }
+        }
+    } else {
+        // Un-doing a subtask reopens a done parent
+        if let Some(pid) = parent_id {
+            for t in todos.iter_mut() {
+                if t.id == pid && t.done {
+                    t.done = false;
+                    t.done_at = None;
+                }
+            }
+        }
+    }
+    true
 }
 
 /// Toggles the completion state of a task by ID. Returns the new `done` state if found.
 pub fn toggle_task(todos: &mut [Todo], id: u64, now: DateTime<Local>) -> Option<bool> {
-    if let Some(todo) = todos.iter_mut().find(|t| t.id == id) {
-        todo.done = !todo.done;
-        todo.done_at = if todo.done { Some(now) } else { None };
-        Some(todo.done)
-    } else {
-        None
-    }
+    let is_done = todos.iter().find(|t| t.id == id)?.done;
+    let new_state = !is_done;
+    set_task_done(todos, id, new_state, now);
+    Some(new_state)
 }
 
-/// Deletes a task by ID. Returns the removed task if it existed.
+/// Deletes a task by ID. Deleting a parent also deletes its subtasks. Returns the removed task if it existed.
 pub fn delete_task(todos: &mut Vec<Todo>, id: u64) -> Option<Todo> {
-    todos
-        .iter()
-        .position(|t| t.id == id)
-        .map(|pos| todos.remove(pos))
+    let pos = todos.iter().position(|t| t.id == id)?;
+    let removed = todos.remove(pos);
+    todos.retain(|t| t.parent != Some(id));
+    Some(removed)
 }
 
 /// Updates the text of a task by ID.
@@ -203,6 +229,8 @@ pub fn carry_over_tasks(todos: &mut Vec<Todo>, task_ids: &[u64], target_date: Na
         if task_ids.contains(&todos[i].id) {
             let mut t = todos.remove(i);
             t.created_date = target_date;
+            t.done = false;
+            t.done_at = None;
             carried.push(t);
             count += 1;
         } else {
@@ -213,55 +241,138 @@ pub fn carry_over_tasks(todos: &mut Vec<Todo>, task_ids: &[u64], target_date: Na
     count
 }
 
-/// Reorders a task within its day list (down = true moves towards higher index, down = false moves towards 0).
-pub fn reorder_day_task(
-    todos: &mut [Todo],
-    date: NaiveDate,
-    selected_index: usize,
-    down: bool,
-) -> bool {
-    let day_indices: Vec<usize> = todos
-        .iter()
-        .enumerate()
-        .filter(|(_, t)| t.created_date == date)
-        .map(|(i, _)| i)
-        .collect();
-
-    if day_indices.len() <= 1 {
+/// Reorders a task within its day list by task ID.
+/// - Top-level task: moves the parent and all its subtasks as a block past adjacent top-level task block.
+/// - Subtask: moves only among its siblings under the same parent.
+pub fn reorder_day_task(todos: &mut Vec<Todo>, date: NaiveDate, task_id: u64, down: bool) -> bool {
+    if !can_reorder_day_task(todos, date, task_id, down) {
         return false;
     }
 
-    if down {
-        if selected_index + 1 < day_indices.len() {
-            let pos_curr = day_indices[selected_index];
-            let pos_next = day_indices[selected_index + 1];
-            todos.swap(pos_curr, pos_next);
-            return true;
+    let task = match todos
+        .iter()
+        .find(|t| t.id == task_id && t.created_date == date)
+    {
+        Some(t) => t.clone(),
+        None => return false,
+    };
+
+    if let Some(parent_id) = task.parent {
+        // Subtask: swap with adjacent sibling
+        let siblings: Vec<u64> = todos
+            .iter()
+            .filter(|t| t.created_date == date && t.parent == Some(parent_id))
+            .map(|t| t.id)
+            .collect();
+        let pos = match siblings.iter().position(|&id| id == task_id) {
+            Some(p) => p,
+            None => return false,
+        };
+        let target_id = if down {
+            siblings[pos + 1]
+        } else {
+            siblings[pos - 1]
+        };
+
+        let pos1 = todos.iter().position(|t| t.id == task_id).unwrap();
+        let pos2 = todos.iter().position(|t| t.id == target_id).unwrap();
+        todos.swap(pos1, pos2);
+        true
+    } else {
+        // Top-level task: move parent and its subtasks as a block
+        let top_level: Vec<u64> = todos
+            .iter()
+            .filter(|t| t.created_date == date && t.parent.is_none())
+            .map(|t| t.id)
+            .collect();
+        let pos = match top_level.iter().position(|&id| id == task_id) {
+            Some(p) => p,
+            None => return false,
+        };
+        let (first_parent_id, second_parent_id) = if down {
+            (task_id, top_level[pos + 1])
+        } else {
+            (top_level[pos - 1], task_id)
+        };
+
+        // Collect all IDs belonging to block 1 (first_parent_id and its subtasks)
+        let block1_ids: Vec<u64> = todos
+            .iter()
+            .filter(|t| t.id == first_parent_id || t.parent == Some(first_parent_id))
+            .map(|t| t.id)
+            .collect();
+
+        // Remove block 1 from todos
+        let mut block1_items = Vec::new();
+        let mut i = 0;
+        while i < todos.len() {
+            if block1_ids.contains(&todos[i].id) {
+                block1_items.push(todos.remove(i));
+            } else {
+                i += 1;
+            }
         }
-    } else if selected_index > 0 {
-        let pos_curr = day_indices[selected_index];
-        let pos_prev = day_indices[selected_index - 1];
-        todos.swap(pos_curr, pos_prev);
-        return true;
+
+        // Find the last element belonging to block 2 (second_parent_id and its subtasks)
+        let target_idx = todos
+            .iter()
+            .rposition(|t| t.id == second_parent_id || t.parent == Some(second_parent_id))
+            .map(|p| p + 1)
+            .unwrap_or(todos.len());
+
+        for (offset, item) in block1_items.into_iter().enumerate() {
+            todos.insert(target_idx + offset, item);
+        }
+        true
     }
-    false
 }
 
-/// Checks whether a task at `selected_index` within `date` can be moved up or down.
-pub fn can_reorder_day_task(
-    todos: &[Todo],
-    date: NaiveDate,
-    selected_index: usize,
-    down: bool,
-) -> bool {
-    let day_count = todos.iter().filter(|t| t.created_date == date).count();
-    if day_count <= 1 {
-        return false;
-    }
-    if down {
-        selected_index + 1 < day_count
+/// Checks whether a task identified by `task_id` can be moved up or down.
+pub fn can_reorder_day_task(todos: &[Todo], date: NaiveDate, task_id: u64, down: bool) -> bool {
+    let task = match todos
+        .iter()
+        .find(|t| t.id == task_id && t.created_date == date)
+    {
+        Some(t) => t,
+        None => return false,
+    };
+
+    if let Some(parent_id) = task.parent {
+        // Subtask: can only reorder among siblings for this date
+        let siblings: Vec<&Todo> = todos
+            .iter()
+            .filter(|t| t.created_date == date && t.parent == Some(parent_id))
+            .collect();
+        if siblings.len() <= 1 {
+            return false;
+        }
+        let pos = match siblings.iter().position(|t| t.id == task_id) {
+            Some(p) => p,
+            None => return false,
+        };
+        if down {
+            pos + 1 < siblings.len()
+        } else {
+            pos > 0
+        }
     } else {
-        selected_index > 0 && selected_index < day_count
+        // Top-level task: moves as a block among top-level tasks for this date
+        let top_level: Vec<&Todo> = todos
+            .iter()
+            .filter(|t| t.created_date == date && t.parent.is_none())
+            .collect();
+        if top_level.len() <= 1 {
+            return false;
+        }
+        let pos = match top_level.iter().position(|t| t.id == task_id) {
+            Some(p) => p,
+            None => return false,
+        };
+        if down {
+            pos + 1 < top_level.len()
+        } else {
+            pos > 0
+        }
     }
 }
 

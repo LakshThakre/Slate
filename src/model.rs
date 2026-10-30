@@ -149,6 +149,7 @@ pub enum HistoryPane {
 pub enum InputMode {
     Normal,
     Adding,
+    AddingSubtask(u64),
     Editing(u64),
     Rescheduling(u64),
     Filtering,

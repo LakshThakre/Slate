@@ -62,12 +62,40 @@ pub fn parse_date(input: &str, today: NaiveDate) -> Result<NaiveDate, CmdError> 
     }
 }
 
-/// Resolves task IDs from 1-based indices or a `--match` query.
+/// Builds hierarchical tasks representation for a day's tasks (parent tasks with 1-based index and subtasks with dot-separated index).
+pub fn build_hierarchical_tasks<'a>(day_tasks: &[&'a Todo]) -> Vec<(String, usize, &'a Todo)> {
+    let mut top_level: Vec<&'a Todo> = Vec::new();
+    let mut subtasks_map: std::collections::HashMap<u64, Vec<&'a Todo>> =
+        std::collections::HashMap::new();
+
+    for &task in day_tasks {
+        if let Some(parent_id) = task.parent {
+            subtasks_map.entry(parent_id).or_default().push(task);
+        } else {
+            top_level.push(task);
+        }
+    }
+
+    let mut result = Vec::new();
+    for (top_idx, parent) in top_level.iter().enumerate() {
+        let parent_num = top_idx + 1;
+        result.push((format!("{parent_num}"), 0, *parent));
+        if let Some(subs) = subtasks_map.get(&parent.id) {
+            for (sub_idx, subtask) in subs.iter().enumerate() {
+                let sub_num = sub_idx + 1;
+                result.push((format!("{parent_num}.{sub_num}"), 1, *subtask));
+            }
+        }
+    }
+    result
+}
+
+/// Resolves task IDs from 1-based string indices (e.g. "1", "1.1") or a `--match` query.
 /// Validates all indices before returning.
-pub fn resolve_target_task_ids(
+pub fn resolve_target_task_ids_str(
     todos: &[Todo],
     date: NaiveDate,
-    indices: &[usize],
+    indices: &[String],
     match_query: Option<&str>,
 ) -> Result<Vec<u64>, CmdError> {
     if indices.is_empty() && match_query.is_none() {
@@ -81,18 +109,30 @@ pub fn resolve_target_task_ids(
         ));
     }
 
+    let day_tasks = crate::store::tasks_for_date(todos, date);
+    let hierarchical = build_hierarchical_tasks(&day_tasks);
+    let top_count = hierarchical.iter().filter(|(_, d, _)| *d == 0).count();
+
     if let Some(query) = match_query {
-        let q = query.trim();
+        let q = query.trim().to_lowercase();
         if q.is_empty() {
             return Err(CmdError::Usage("--match query cannot be empty".to_string()));
         }
-        match crate::store::match_task_by_text(todos, date, q) {
-            Ok(Some(task)) => Ok(vec![task.id]),
-            Ok(None) => Err(CmdError::NotFound(format!("no task matches '{q}'"))),
-            Err(candidates) => {
-                let mut msg = format!("multiple tasks match '{q}':\n");
-                for (idx, text) in candidates {
-                    msg.push_str(&format!("  {idx}  {text}\n"));
+
+        let mut matches = Vec::new();
+        for (idx_str, _, task) in &hierarchical {
+            if task.text.to_lowercase().contains(&q) {
+                matches.push((idx_str.clone(), task.text.clone(), task.id));
+            }
+        }
+
+        match matches.len() {
+            0 => Err(CmdError::NotFound(format!("no task matches '{query}'"))),
+            1 => Ok(vec![matches[0].2]),
+            _ => {
+                let mut msg = format!("multiple tasks match '{query}':\n");
+                for (idx_str, text, _) in matches {
+                    msg.push_str(&format!("  {idx_str}  {text}\n"));
                 }
                 if msg.ends_with('\n') {
                     msg.pop();
@@ -101,30 +141,46 @@ pub fn resolve_target_task_ids(
             }
         }
     } else {
-        let day_tasks = crate::store::tasks_for_date(todos, date);
-        let count = day_tasks.len();
-        for &idx in indices {
-            if idx == 0 {
+        let mut target_ids = Vec::with_capacity(indices.len());
+        for idx_str in indices {
+            if idx_str == "0" || idx_str.starts_with("0.") {
                 return Err(CmdError::NotFound(
                     "task index must be at least 1 (indices are 1-based)".to_string(),
                 ));
             }
-            if idx > count {
+
+            if let Some((_, _, task)) = hierarchical.iter().find(|(s, _, _)| s == idx_str) {
+                if !target_ids.contains(&task.id) {
+                    target_ids.push(task.id);
+                }
+            } else if idx_str.contains('.') {
                 return Err(CmdError::NotFound(format!(
-                    "task index {idx} is out of range (day has {count} task{})",
-                    if count == 1 { "" } else { "s" }
+                    "task index {idx_str} is out of range"
                 )));
-            }
-        }
-        let mut target_ids = Vec::with_capacity(indices.len());
-        for &idx in indices {
-            let task = day_tasks[idx - 1];
-            if !target_ids.contains(&task.id) {
-                target_ids.push(task.id);
+            } else if let Ok(n) = idx_str.parse::<usize>() {
+                return Err(CmdError::NotFound(format!(
+                    "task index {n} is out of range (day has {top_count} task{})",
+                    if top_count == 1 { "" } else { "s" }
+                )));
+            } else {
+                return Err(CmdError::NotFound(format!(
+                    "invalid task index '{idx_str}'"
+                )));
             }
         }
         Ok(target_ids)
     }
+}
+
+/// Resolves task IDs from 1-based usize indices or a `--match` query.
+pub fn resolve_target_task_ids(
+    todos: &[Todo],
+    date: NaiveDate,
+    indices: &[usize],
+    match_query: Option<&str>,
+) -> Result<Vec<u64>, CmdError> {
+    let str_indices: Vec<String> = indices.iter().map(|i| i.to_string()).collect();
+    resolve_target_task_ids_str(todos, date, &str_indices, match_query)
 }
 
 pub fn handle_add_with_reader<R: BufRead>(
@@ -222,8 +278,8 @@ pub fn handle_add(
     )
 }
 
-pub fn handle_done(
-    indices: Vec<usize>,
+pub fn handle_done_str(
+    indices: &[String],
     date_str: Option<String>,
     match_query: Option<String>,
     data_path: &Path,
@@ -237,9 +293,46 @@ pub fn handle_done(
 
     crate::storage::try_load_modify_save(data_path, |data| {
         let target_ids =
-            resolve_target_task_ids(&data.todos, date, &indices, match_query.as_deref())?;
+            resolve_target_task_ids_str(&data.todos, date, indices, match_query.as_deref())?;
         for id in target_ids {
             crate::store::set_task_done(&mut data.todos, id, true, now);
+        }
+        Ok::<(), CmdError>(())
+    })
+    .map_err(map_storage_error)?;
+
+    Ok(())
+}
+
+pub fn handle_done(
+    indices: Vec<usize>,
+    date_str: Option<String>,
+    match_query: Option<String>,
+    data_path: &Path,
+    today: NaiveDate,
+) -> Result<(), CmdError> {
+    let str_indices: Vec<String> = indices.into_iter().map(|i| i.to_string()).collect();
+    handle_done_str(&str_indices, date_str, match_query, data_path, today)
+}
+
+pub fn handle_undone_str(
+    indices: &[String],
+    date_str: Option<String>,
+    match_query: Option<String>,
+    data_path: &Path,
+    today: NaiveDate,
+) -> Result<(), CmdError> {
+    let date = match date_str {
+        Some(s) => parse_date(&s, today)?,
+        None => today,
+    };
+    let now = chrono::Local::now();
+
+    crate::storage::try_load_modify_save(data_path, |data| {
+        let target_ids =
+            resolve_target_task_ids_str(&data.todos, date, indices, match_query.as_deref())?;
+        for id in target_ids {
+            crate::store::set_task_done(&mut data.todos, id, false, now);
         }
         Ok::<(), CmdError>(())
     })
@@ -255,17 +348,27 @@ pub fn handle_undone(
     data_path: &Path,
     today: NaiveDate,
 ) -> Result<(), CmdError> {
+    let str_indices: Vec<String> = indices.into_iter().map(|i| i.to_string()).collect();
+    handle_undone_str(&str_indices, date_str, match_query, data_path, today)
+}
+
+pub fn handle_rm_str(
+    indices: &[String],
+    date_str: Option<String>,
+    match_query: Option<String>,
+    data_path: &Path,
+    today: NaiveDate,
+) -> Result<(), CmdError> {
     let date = match date_str {
         Some(s) => parse_date(&s, today)?,
         None => today,
     };
-    let now = chrono::Local::now();
 
     crate::storage::try_load_modify_save(data_path, |data| {
         let target_ids =
-            resolve_target_task_ids(&data.todos, date, &indices, match_query.as_deref())?;
+            resolve_target_task_ids_str(&data.todos, date, indices, match_query.as_deref())?;
         for id in target_ids {
-            crate::store::set_task_done(&mut data.todos, id, false, now);
+            crate::store::delete_task(&mut data.todos, id);
         }
         Ok::<(), CmdError>(())
     })
@@ -281,25 +384,11 @@ pub fn handle_rm(
     data_path: &Path,
     today: NaiveDate,
 ) -> Result<(), CmdError> {
-    let date = match date_str {
-        Some(s) => parse_date(&s, today)?,
-        None => today,
-    };
-
-    crate::storage::try_load_modify_save(data_path, |data| {
-        let target_ids =
-            resolve_target_task_ids(&data.todos, date, &indices, match_query.as_deref())?;
-        for id in target_ids {
-            crate::store::delete_task(&mut data.todos, id);
-        }
-        Ok::<(), CmdError>(())
-    })
-    .map_err(map_storage_error)?;
-
-    Ok(())
+    let str_indices: Vec<String> = indices.into_iter().map(|i| i.to_string()).collect();
+    handle_rm_str(&str_indices, date_str, match_query, data_path, today)
 }
 
-#[allow(clippy::too_many_arguments)]
+#[allow(clippy::too_many_arguments, clippy::type_complexity)]
 pub fn handle_list(
     date_str: Option<String>,
     all: bool,
@@ -314,7 +403,7 @@ pub fn handle_list(
         crate::storage::load_todos(data_path).map_err(|e| CmdError::Runtime(e.to_string()))?;
     let todos = load_res.todos;
 
-    let days_and_tasks: Vec<(NaiveDate, Vec<(usize, &Todo)>)> = if all {
+    let days_and_tasks: Vec<(NaiveDate, Vec<(String, usize, &Todo)>)> = if all {
         let mut dates: std::collections::BTreeSet<NaiveDate> =
             todos.iter().map(|t| t.created_date).collect();
         dates.insert(today);
@@ -325,8 +414,9 @@ pub fn handle_list(
         let mut total_count = 0;
         for d in dates_list {
             let day_tasks = crate::store::tasks_for_date(&todos, d);
+            let hierarchical = build_hierarchical_tasks(&day_tasks);
             let mut matching = Vec::new();
-            for (idx, task) in day_tasks.iter().enumerate() {
+            for (idx_str, depth, task) in hierarchical {
                 if pending && task.done {
                     continue;
                 }
@@ -335,7 +425,7 @@ pub fn handle_list(
                         break;
                     }
                 }
-                matching.push((idx + 1, *task));
+                matching.push((idx_str, depth, task));
                 total_count += 1;
             }
             if !matching.is_empty() {
@@ -354,8 +444,9 @@ pub fn handle_list(
             None => today,
         };
         let day_tasks = crate::store::tasks_for_date(&todos, date);
+        let hierarchical = build_hierarchical_tasks(&day_tasks);
         let mut matching = Vec::new();
-        for (idx, task) in day_tasks.iter().enumerate() {
+        for (idx_str, depth, task) in hierarchical {
             if pending && task.done {
                 continue;
             }
@@ -364,7 +455,7 @@ pub fn handle_list(
                     break;
                 }
             }
-            matching.push((idx + 1, *task));
+            matching.push((idx_str, depth, task));
         }
         vec![(date, matching)]
     };
@@ -385,13 +476,13 @@ pub fn handle_today(
         crate::storage::load_todos(data_path).map_err(|e| CmdError::Runtime(e.to_string()))?;
     let todos = load_res.todos;
     let day_tasks = crate::store::tasks_for_date(&todos, today);
-    let total = day_tasks.len();
-    let done = day_tasks.iter().filter(|t| t.done).count();
-    let indexed_tasks: Vec<(usize, &Todo)> = day_tasks
+    // Phase 5: Header progress and summary count top-level tasks only
+    let total = day_tasks.iter().filter(|t| t.parent.is_none()).count();
+    let done = day_tasks
         .iter()
-        .enumerate()
-        .map(|(i, t)| (i + 1, *t))
-        .collect();
+        .filter(|t| t.parent.is_none() && t.done)
+        .count();
+    let indexed_tasks = build_hierarchical_tasks(&day_tasks);
 
     crate::output::write_today_human(today, done, total, &indexed_tasks, config, out)
         .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
@@ -413,17 +504,17 @@ pub fn run(
             indices,
             date,
             match_query,
-        } => handle_done(indices, date, match_query, data_path, today),
+        } => handle_done_str(&indices, date, match_query, data_path, today),
         Commands::Undone {
             indices,
             date,
             match_query,
-        } => handle_undone(indices, date, match_query, data_path, today),
+        } => handle_undone_str(&indices, date, match_query, data_path, today),
         Commands::Rm {
             indices,
             date,
             match_query,
-        } => handle_rm(indices, date, match_query, data_path, today),
+        } => handle_rm_str(&indices, date, match_query, data_path, today),
         Commands::List {
             date,
             all,
@@ -507,20 +598,21 @@ mod tests {
             Err(CmdError::NotFound(_))
         ));
 
+        let empty_indices: &[usize] = &[];
         // Exactly one match
         assert_eq!(
-            resolve_target_task_ids(&todos, today, &[], Some("review")).unwrap(),
+            resolve_target_task_ids(&todos, today, empty_indices, Some("review")).unwrap(),
             vec![30]
         );
 
         // No match
         assert!(matches!(
-            resolve_target_task_ids(&todos, today, &[], Some("nonexistent")),
+            resolve_target_task_ids(&todos, today, empty_indices, Some("nonexistent")),
             Err(CmdError::NotFound(_))
         ));
 
         // Ambiguous match lists candidates
-        match resolve_target_task_ids(&todos, today, &[], Some("milk")) {
+        match resolve_target_task_ids(&todos, today, empty_indices, Some("milk")) {
             Err(CmdError::NotFound(msg)) => {
                 assert!(msg.contains("multiple tasks match 'milk':"));
                 assert!(msg.contains("1  Buy fresh milk"));
@@ -537,7 +629,7 @@ mod tests {
 
         // Neither is usage error
         assert!(matches!(
-            resolve_target_task_ids(&todos, today, &[], None),
+            resolve_target_task_ids(&todos, today, empty_indices, None),
             Err(CmdError::Usage(_))
         ));
     }

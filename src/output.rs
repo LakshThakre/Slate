@@ -116,8 +116,9 @@ pub fn should_use_unicode(config: &Config) -> bool {
     config.ui.symbols != crate::config::SymbolsMode::Ascii
 }
 
+#[allow(clippy::type_complexity)]
 pub fn write_list_human(
-    days_and_tasks: &[(NaiveDate, Vec<(usize, &Todo)>)],
+    days_and_tasks: &[(NaiveDate, Vec<(String, usize, &Todo)>)],
     is_all: bool,
     config: &Config,
     out: &mut dyn Write,
@@ -130,6 +131,8 @@ pub fn write_list_human(
     } else {
         ("[ ]", "[x]")
     };
+
+    let sub_connector = if use_unicode { "└ " } else { "` " };
 
     for (day_idx, (date, tasks)) in days_and_tasks.iter().enumerate() {
         if is_all {
@@ -144,7 +147,7 @@ pub fn write_list_human(
             }
         }
 
-        for (idx, task) in tasks {
+        for (idx, depth, task) in tasks {
             let symbol = if task.done { check_done } else { check_todo };
             let time_suffix = if task.done {
                 match task.done_at {
@@ -160,7 +163,29 @@ pub fn write_list_human(
                 String::new()
             };
 
-            if use_color {
+            if *depth > 0 {
+                if use_color {
+                    if task.done {
+                        writeln!(
+                            out,
+                            "    {:>4}  \x1b[2m{}\x1b[0m\x1b[32m{}\x1b[0m  \x1b[2m{}{}\x1b[0m",
+                            idx, sub_connector, symbol, task.text, time_suffix
+                        )?;
+                    } else {
+                        writeln!(
+                            out,
+                            "    {:>4}  \x1b[2m{}\x1b[0m\x1b[36m{}\x1b[0m  {}",
+                            idx, sub_connector, symbol, task.text
+                        )?;
+                    }
+                } else {
+                    writeln!(
+                        out,
+                        "    {:>4}  {}{}  {}{}",
+                        idx, sub_connector, symbol, task.text, time_suffix
+                    )?;
+                }
+            } else if use_color {
                 if task.done {
                     writeln!(
                         out,
@@ -190,7 +215,7 @@ pub fn write_today_human(
     date: NaiveDate,
     done: usize,
     total: usize,
-    tasks: &[(usize, &Todo)],
+    tasks: &[(String, usize, &Todo)],
     config: &Config,
     out: &mut dyn Write,
 ) -> io::Result<()> {
