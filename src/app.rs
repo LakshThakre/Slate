@@ -26,6 +26,13 @@ pub struct App {
     pub history_date_index: usize,
     pub history_todo_index: usize,
     pub history_todo_id: Option<u64>,
+    pub selected_history_date: Option<NaiveDate>,
+    pub upcoming_date_index: usize,
+    pub upcoming_todo_index: usize,
+    pub upcoming_todo_id: Option<u64>,
+    pub selected_upcoming_date: Option<NaiveDate>,
+    pub upcoming_pane: HistoryPane,
+    pub prompt_error: Option<String>,
     pub sort_mode: crate::model::SortMode,
     pub filter: crate::model::Filter,
     pub status_message: Option<String>,
@@ -41,7 +48,6 @@ pub struct App {
     pub last_backup_time: Option<std::time::SystemTime>,
     pub terminal_width: u16,
     pub terminal_height: u16,
-    pub selected_history_date: Option<NaiveDate>,
     pub config: crate::config::Config,
     pub theme: crate::theme::Theme,
     pub symbols: crate::ui::Symbols,
@@ -140,6 +146,13 @@ impl App {
             history_date_index: 0,
             history_todo_index: 0,
             history_todo_id: None,
+            selected_history_date: None,
+            upcoming_date_index: 0,
+            upcoming_todo_index: 0,
+            upcoming_todo_id: None,
+            selected_upcoming_date: None,
+            upcoming_pane: HistoryPane::Dates,
+            prompt_error: None,
             sort_mode: crate::model::SortMode::Manual,
             filter: crate::model::Filter::default(),
             status_message: None,
@@ -155,7 +168,6 @@ impl App {
             last_backup_time: None,
             terminal_width: 80,
             terminal_height: 24,
-            selected_history_date: None,
             config,
             theme,
             symbols,
@@ -197,6 +209,13 @@ impl App {
             history_date_index: 0,
             history_todo_index: 0,
             history_todo_id: None,
+            selected_history_date: None,
+            upcoming_date_index: 0,
+            upcoming_todo_index: 0,
+            upcoming_todo_id: None,
+            selected_upcoming_date: None,
+            upcoming_pane: HistoryPane::Dates,
+            prompt_error: None,
             sort_mode: crate::model::SortMode::Manual,
             filter: crate::model::Filter::default(),
             status_message: None,
@@ -212,7 +231,6 @@ impl App {
             last_backup_time: None,
             terminal_width: 80,
             terminal_height: 24,
-            selected_history_date: None,
             config: crate::config::Config::default(),
             theme: crate::theme::Theme::default(),
             symbols: crate::ui::Symbols::unicode(),
@@ -290,6 +308,28 @@ impl App {
         }
     }
 
+    pub fn upcoming_dates_list(&self) -> Vec<NaiveDate> {
+        let today = self.today;
+        let mut dates: Vec<NaiveDate> = self
+            .todos
+            .iter()
+            .filter(|t| t.created_date > today)
+            .map(|t| t.created_date)
+            .collect();
+        dates.sort_unstable();
+        dates.dedup();
+        dates
+    }
+
+    pub fn visible_rows_upcoming(&self) -> Vec<crate::model::Row> {
+        let dates = self.upcoming_dates_list();
+        if let Some(&date) = dates.get(self.upcoming_date_index) {
+            crate::store::visible_rows(&self.todos, date, &self.filter, self.sort_mode)
+        } else {
+            Vec::new()
+        }
+    }
+
     pub fn re_resolve_selections(&mut self) {
         let rows_today = self.visible_rows_today();
         if rows_today.is_empty() {
@@ -343,6 +383,39 @@ impl App {
                 self.history_todo_id = rows_hist.get(self.history_todo_index).map(|r| r.id);
             }
         }
+
+        let up_dates = self.upcoming_dates_list();
+        if up_dates.is_empty() {
+            self.upcoming_date_index = 0;
+            self.selected_upcoming_date = None;
+            self.upcoming_todo_index = 0;
+            self.upcoming_todo_id = None;
+        } else {
+            if self.upcoming_date_index >= up_dates.len() {
+                self.upcoming_date_index = up_dates.len() - 1;
+            }
+            self.selected_upcoming_date = up_dates.get(self.upcoming_date_index).copied();
+
+            let rows_up = self.visible_rows_upcoming();
+            if rows_up.is_empty() {
+                self.upcoming_todo_index = 0;
+                self.upcoming_todo_id = None;
+            } else if let Some(id) = self.upcoming_todo_id {
+                if let Some(pos) = rows_up.iter().position(|r| r.id == id) {
+                    self.upcoming_todo_index = pos;
+                } else {
+                    if self.upcoming_todo_index >= rows_up.len() {
+                        self.upcoming_todo_index = rows_up.len() - 1;
+                    }
+                    self.upcoming_todo_id = rows_up.get(self.upcoming_todo_index).map(|r| r.id);
+                }
+            } else {
+                if self.upcoming_todo_index >= rows_up.len() {
+                    self.upcoming_todo_index = rows_up.len() - 1;
+                }
+                self.upcoming_todo_id = rows_up.get(self.upcoming_todo_index).map(|r| r.id);
+            }
+        }
     }
 
     pub fn clamp_selections(&mut self) {
@@ -378,6 +451,30 @@ impl App {
                     self.history_todo_index = rows_hist.len() - 1;
                 }
                 self.history_todo_id = rows_hist.get(self.history_todo_index).map(|r| r.id);
+            }
+        }
+
+        let up_dates = self.upcoming_dates_list();
+        if up_dates.is_empty() {
+            self.upcoming_date_index = 0;
+            self.selected_upcoming_date = None;
+            self.upcoming_todo_index = 0;
+            self.upcoming_todo_id = None;
+        } else {
+            if self.upcoming_date_index >= up_dates.len() {
+                self.upcoming_date_index = up_dates.len() - 1;
+            }
+            self.selected_upcoming_date = up_dates.get(self.upcoming_date_index).copied();
+
+            let rows_up = self.visible_rows_upcoming();
+            if rows_up.is_empty() {
+                self.upcoming_todo_index = 0;
+                self.upcoming_todo_id = None;
+            } else {
+                if self.upcoming_todo_index >= rows_up.len() {
+                    self.upcoming_todo_index = rows_up.len() - 1;
+                }
+                self.upcoming_todo_id = rows_up.get(self.upcoming_todo_index).map(|r| r.id);
             }
         }
     }
@@ -473,8 +570,9 @@ impl App {
         if let Some(row) = rows.get(self.today_selected_index) {
             if let Some(todo) = self.todos.iter().find(|t| t.id == row.id) {
                 self.input_mode = InputMode::Editing(todo.id);
-                self.input_buffer = todo.text.clone();
+                self.input_buffer = crate::parser::re_serialize_tokens(todo, self.today);
                 self.cursor_position = self.input_buffer.chars().count();
+                self.prompt_error = None;
             }
         }
     }
@@ -484,8 +582,21 @@ impl App {
         if let Some(row) = rows.get(self.history_todo_index) {
             if let Some(todo) = self.todos.iter().find(|t| t.id == row.id) {
                 self.input_mode = InputMode::Editing(todo.id);
-                self.input_buffer = todo.text.clone();
+                self.input_buffer = crate::parser::re_serialize_tokens(todo, self.today);
                 self.cursor_position = self.input_buffer.chars().count();
+                self.prompt_error = None;
+            }
+        }
+    }
+
+    pub fn start_editing_upcoming(&mut self) {
+        let rows = self.visible_rows_upcoming();
+        if let Some(row) = rows.get(self.upcoming_todo_index) {
+            if let Some(todo) = self.todos.iter().find(|t| t.id == row.id) {
+                self.input_mode = InputMode::Editing(todo.id);
+                self.input_buffer = crate::parser::re_serialize_tokens(todo, self.today);
+                self.cursor_position = self.input_buffer.chars().count();
+                self.prompt_error = None;
             }
         }
     }
@@ -587,12 +698,43 @@ impl App {
         }
     }
 
+    pub fn clear_completed_upcoming(&mut self) {
+        let dates = self.upcoming_dates_list();
+        if let Some(&selected_date) = dates.get(self.upcoming_date_index) {
+            let completed_count = self
+                .todos
+                .iter()
+                .filter(|t| t.created_date == selected_date && t.done)
+                .count();
+            if completed_count == 0 {
+                self.set_transient_message("No completed tasks");
+                return;
+            }
+            self.mutate(|todos| {
+                crate::store::clear_completed(todos, selected_date);
+            });
+            self.set_transient_message(format!("Cleared {completed_count} completed · u to undo"));
+        }
+    }
+
     pub fn jump_top(&mut self) {
         match self.current_view {
             View::Today => {
                 self.today_selected_index = 0;
                 self.today_selected_id = self.visible_rows_today().first().map(|r| r.id);
             }
+            View::Upcoming => match self.upcoming_pane {
+                HistoryPane::Dates => {
+                    self.upcoming_date_index = 0;
+                    self.upcoming_todo_index = 0;
+                    self.upcoming_todo_id = self.visible_rows_upcoming().first().map(|r| r.id);
+                    self.clamp_selections();
+                }
+                HistoryPane::Todos => {
+                    self.upcoming_todo_index = 0;
+                    self.upcoming_todo_id = self.visible_rows_upcoming().first().map(|r| r.id);
+                }
+            },
             View::History => match self.history_pane {
                 HistoryPane::Dates => {
                     self.history_date_index = 0;
@@ -615,6 +757,19 @@ impl App {
                 self.today_selected_index = rows.len().saturating_sub(1);
                 self.today_selected_id = rows.get(self.today_selected_index).map(|r| r.id);
             }
+            View::Upcoming => match self.upcoming_pane {
+                HistoryPane::Dates => {
+                    let dates = self.upcoming_dates_list();
+                    self.upcoming_date_index = dates.len().saturating_sub(1);
+                    self.upcoming_todo_index = 0;
+                    self.clamp_selections();
+                }
+                HistoryPane::Todos => {
+                    let rows = self.visible_rows_upcoming();
+                    self.upcoming_todo_index = rows.len().saturating_sub(1);
+                    self.upcoming_todo_id = rows.get(self.upcoming_todo_index).map(|r| r.id);
+                }
+            },
             View::History => match self.history_pane {
                 HistoryPane::Dates => {
                     let dates = self.dates_list();
@@ -644,6 +799,29 @@ impl App {
                 }
                 self.today_selected_id = rows.get(self.today_selected_index).map(|r| r.id);
             }
+            View::Upcoming => match self.upcoming_pane {
+                HistoryPane::Dates => {
+                    let dates = self.upcoming_dates_list();
+                    let count = dates.len();
+                    if count > 0 {
+                        self.upcoming_date_index = (self.upcoming_date_index + step).min(count - 1);
+                    } else {
+                        self.upcoming_date_index = 0;
+                    }
+                    self.upcoming_todo_index = 0;
+                    self.clamp_selections();
+                }
+                HistoryPane::Todos => {
+                    let rows = self.visible_rows_upcoming();
+                    let count = rows.len();
+                    if count > 0 {
+                        self.upcoming_todo_index = (self.upcoming_todo_index + step).min(count - 1);
+                    } else {
+                        self.upcoming_todo_index = 0;
+                    }
+                    self.upcoming_todo_id = rows.get(self.upcoming_todo_index).map(|r| r.id);
+                }
+            },
             View::History => match self.history_pane {
                 HistoryPane::Dates => {
                     let dates = self.dates_list();
@@ -680,6 +858,20 @@ impl App {
                     .get(self.today_selected_index)
                     .map(|r| r.id);
             }
+            View::Upcoming => match self.upcoming_pane {
+                HistoryPane::Dates => {
+                    self.upcoming_date_index = self.upcoming_date_index.saturating_sub(step);
+                    self.upcoming_todo_index = 0;
+                    self.clamp_selections();
+                }
+                HistoryPane::Todos => {
+                    self.upcoming_todo_index = self.upcoming_todo_index.saturating_sub(step);
+                    self.upcoming_todo_id = self
+                        .visible_rows_upcoming()
+                        .get(self.upcoming_todo_index)
+                        .map(|r| r.id);
+                }
+            },
             View::History => match self.history_pane {
                 HistoryPane::Dates => {
                     self.history_date_index = self.history_date_index.saturating_sub(step);
@@ -775,28 +967,116 @@ impl App {
     }
 
     pub fn move_history_todo_to_today(&mut self) {
-        if self.current_view != View::History || self.history_pane != HistoryPane::Todos {
-            return;
-        }
+        self.move_selected_todo_to_today();
+    }
 
-        let dates = self.dates_list();
-        let Some(&selected_date) = dates.get(self.history_date_index) else {
-            return;
-        };
-
-        let today = self.today;
-        if selected_date == today {
-            self.set_transient_message("Already in Today");
-            return;
-        }
-
-        let rows = self.visible_rows_history();
-        if let Some(row) = rows.get(self.history_todo_index) {
-            let todo_id = row.id;
+    pub fn toggle_upcoming_todo(&mut self) {
+        let rows = self.visible_rows_upcoming();
+        if let Some(row) = rows.get(self.upcoming_todo_index) {
+            let target_id = row.id;
+            let now = Local::now();
             self.mutate(|todos| {
-                crate::store::move_task_to_date(todos, todo_id, today);
+                crate::store::toggle_task(todos, target_id, now);
             });
-            self.set_transient_message("Moved to Today");
+        }
+    }
+
+    pub fn delete_upcoming_todo(&mut self) {
+        let rows = self.visible_rows_upcoming();
+        if let Some(row) = rows.get(self.upcoming_todo_index) {
+            let target_id = row.id;
+            let mut deleted_text = None;
+            self.mutate(|todos| {
+                if let Some(t) = crate::store::delete_task(todos, target_id) {
+                    deleted_text = Some(t.text);
+                }
+            });
+            if let Some(text) = deleted_text {
+                self.set_transient_message(format!(
+                    "Deleted \"{}\" · u to undo",
+                    truncate_str(&text, 24)
+                ));
+            }
+        }
+    }
+
+    pub fn reorder_upcoming(&mut self, down: bool) {
+        let dates = self.upcoming_dates_list();
+        if let Some(&selected_date) = dates.get(self.upcoming_date_index) {
+            let selected = self.upcoming_todo_index;
+            if !crate::store::can_reorder_day_task(&self.todos, selected_date, selected, down) {
+                return;
+            }
+            self.upcoming_todo_id = self.visible_rows_upcoming().get(selected).map(|r| r.id);
+            self.mutate(|todos| {
+                crate::store::reorder_day_task(todos, selected_date, selected, down);
+            });
+        }
+    }
+
+    pub fn reschedule_task(&mut self, id: u64, target_date: NaiveDate) {
+        if target_date < self.today {
+            self.set_transient_message("Cannot reschedule to a past date");
+            return;
+        }
+        self.mutate(|todos| {
+            crate::store::move_task_to_date(todos, id, target_date);
+        });
+        self.set_transient_message(format!(
+            "Scheduled for {}",
+            target_date.format(&self.config.short_date_format)
+        ));
+    }
+
+    pub fn move_selected_todo_to_today(&mut self) {
+        match self.current_view {
+            View::Today => {
+                self.set_transient_message("Already in Today");
+            }
+            View::History => {
+                if self.history_pane != HistoryPane::Todos {
+                    return;
+                }
+                let dates = self.dates_list();
+                let Some(&selected_date) = dates.get(self.history_date_index) else {
+                    return;
+                };
+                if selected_date == self.today {
+                    self.set_transient_message("Already in Today");
+                    return;
+                }
+                let rows = self.visible_rows_history();
+                if let Some(row) = rows.get(self.history_todo_index) {
+                    let todo_id = row.id;
+                    let today = self.today;
+                    self.mutate(|todos| {
+                        crate::store::move_task_to_date(todos, todo_id, today);
+                    });
+                    self.set_transient_message("Moved to Today");
+                }
+            }
+            View::Upcoming => {
+                if self.upcoming_pane != HistoryPane::Todos {
+                    return;
+                }
+                let dates = self.upcoming_dates_list();
+                let Some(&selected_date) = dates.get(self.upcoming_date_index) else {
+                    return;
+                };
+                if selected_date == self.today {
+                    self.set_transient_message("Already in Today");
+                    return;
+                }
+                let rows = self.visible_rows_upcoming();
+                if let Some(row) = rows.get(self.upcoming_todo_index) {
+                    let todo_id = row.id;
+                    let today = self.today;
+                    self.mutate(|todos| {
+                        crate::store::move_task_to_date(todos, todo_id, today);
+                    });
+                    self.set_transient_message("Moved to Today");
+                }
+            }
         }
     }
 
@@ -816,6 +1096,7 @@ impl App {
         match self.input_mode {
             InputMode::Adding => self.handle_adding_key(key),
             InputMode::Editing(id) => self.handle_editing_key(id, key),
+            InputMode::Rescheduling(id) => self.handle_rescheduling_key(id, key),
             InputMode::Normal => self.handle_normal_key(key),
         }
     }
@@ -851,6 +1132,12 @@ impl App {
                                 self.toggle_history_todo();
                                 return true;
                             }
+                            crate::ui::HitTarget::UpcomingCheckbox { index } => {
+                                self.upcoming_pane = HistoryPane::Todos;
+                                self.upcoming_todo_index = index;
+                                self.toggle_upcoming_todo();
+                                return true;
+                            }
                             _ => {}
                         }
                     }
@@ -865,6 +1152,13 @@ impl App {
                                 self.clamp_selections();
                                 return true;
                             }
+                            crate::ui::HitTarget::TabUpcoming => {
+                                if self.config.ui.show_upcoming {
+                                    self.current_view = View::Upcoming;
+                                    self.clamp_selections();
+                                    return true;
+                                }
+                            }
                             crate::ui::HitTarget::TabHistory => {
                                 if self.config.ui.show_history {
                                     self.current_view = View::History;
@@ -876,6 +1170,20 @@ impl App {
                                 self.today_selected_index = index;
                                 self.today_selected_id =
                                     self.visible_rows_today().get(index).map(|r| r.id);
+                                return true;
+                            }
+                            crate::ui::HitTarget::UpcomingDate { index } => {
+                                self.upcoming_pane = HistoryPane::Dates;
+                                self.upcoming_date_index = index;
+                                self.upcoming_todo_index = 0;
+                                self.clamp_selections();
+                                return true;
+                            }
+                            crate::ui::HitTarget::UpcomingTask { index } => {
+                                self.upcoming_pane = HistoryPane::Todos;
+                                self.upcoming_todo_index = index;
+                                self.upcoming_todo_id =
+                                    self.visible_rows_upcoming().get(index).map(|r| r.id);
                                 return true;
                             }
                             crate::ui::HitTarget::HistoryDate { index } => {
@@ -912,6 +1220,42 @@ impl App {
                                 .get(self.today_selected_index)
                                 .map(|r| r.id);
                             return true;
+                        }
+                    }
+                    View::Upcoming => {
+                        let in_date_area = self.hit_areas.iter().any(|a| {
+                            a.target == crate::ui::HitTarget::DateArea && a.contains(col, row)
+                        });
+                        let in_todo_area = self.hit_areas.iter().any(|a| {
+                            a.target == crate::ui::HitTarget::TodoArea && a.contains(col, row)
+                        });
+
+                        let scroll_dates = if in_date_area {
+                            true
+                        } else if in_todo_area {
+                            false
+                        } else {
+                            self.upcoming_pane == HistoryPane::Dates
+                        };
+
+                        if scroll_dates {
+                            let dates = self.upcoming_dates_list();
+                            if !dates.is_empty() && self.upcoming_date_index + 1 < dates.len() {
+                                self.upcoming_date_index += 1;
+                                self.upcoming_todo_index = 0;
+                                self.clamp_selections();
+                                return true;
+                            }
+                        } else {
+                            let count = self.visible_rows_upcoming().len();
+                            if count > 0 && self.upcoming_todo_index + 1 < count {
+                                self.upcoming_todo_index += 1;
+                                self.upcoming_todo_id = self
+                                    .visible_rows_upcoming()
+                                    .get(self.upcoming_todo_index)
+                                    .map(|r| r.id);
+                                return true;
+                            }
                         }
                     }
                     View::History => {
@@ -967,6 +1311,38 @@ impl App {
                             return true;
                         }
                     }
+                    View::Upcoming => {
+                        let in_date_area = self.hit_areas.iter().any(|a| {
+                            a.target == crate::ui::HitTarget::DateArea && a.contains(col, row)
+                        });
+                        let in_todo_area = self.hit_areas.iter().any(|a| {
+                            a.target == crate::ui::HitTarget::TodoArea && a.contains(col, row)
+                        });
+
+                        let scroll_dates = if in_date_area {
+                            true
+                        } else if in_todo_area {
+                            false
+                        } else {
+                            self.upcoming_pane == HistoryPane::Dates
+                        };
+
+                        if scroll_dates {
+                            if self.upcoming_date_index > 0 {
+                                self.upcoming_date_index -= 1;
+                                self.upcoming_todo_index = 0;
+                                self.clamp_selections();
+                                return true;
+                            }
+                        } else if self.upcoming_todo_index > 0 {
+                            self.upcoming_todo_index -= 1;
+                            self.upcoming_todo_id = self
+                                .visible_rows_upcoming()
+                                .get(self.upcoming_todo_index)
+                                .map(|r| r.id);
+                            return true;
+                        }
+                    }
                     View::History => {
                         let in_date_area = self.hit_areas.iter().any(|a| {
                             a.target == crate::ui::HitTarget::DateArea && a.contains(col, row)
@@ -1012,80 +1388,75 @@ impl App {
                 self.input_mode = InputMode::Normal;
                 self.input_buffer.clear();
                 self.cursor_position = 0;
+                self.prompt_error = None;
             }
             KeyCode::Enter => {
-                let text = self.input_buffer.clone();
-                self.input_mode = InputMode::Normal;
-                self.input_buffer.clear();
-                self.cursor_position = 0;
-                self.add_todo(&text);
-            }
-            KeyCode::Left => {
-                self.cursor_position = self.cursor_position.saturating_sub(1);
-            }
-            KeyCode::Right => {
-                let char_len = self.input_buffer.chars().count();
-                if self.cursor_position < char_len {
-                    self.cursor_position += 1;
-                }
-            }
-            KeyCode::Home => {
-                self.cursor_position = 0;
-            }
-            KeyCode::End => {
-                self.cursor_position = self.input_buffer.chars().count();
-            }
-            KeyCode::Backspace => {
-                if self.cursor_position > 0 {
-                    let mut chars: Vec<char> = self.input_buffer.chars().collect();
-                    chars.remove(self.cursor_position - 1);
-                    self.input_buffer = chars.into_iter().collect();
-                    self.cursor_position -= 1;
-                }
-            }
-            KeyCode::Delete => {
-                let mut chars: Vec<char> = self.input_buffer.chars().collect();
-                if self.cursor_position < chars.len() {
-                    chars.remove(self.cursor_position);
-                    self.input_buffer = chars.into_iter().collect();
-                }
-            }
-            KeyCode::Char(c) => {
-                let mut chars: Vec<char> = self.input_buffer.chars().collect();
-                chars.insert(self.cursor_position, c);
-                self.input_buffer = chars.into_iter().collect();
-                self.cursor_position += 1;
-            }
-            _ => {}
-        }
-        false
-    }
+                let input = self.input_buffer.clone();
+                let today = self.today;
+                match crate::parser::parse_quick_add(&input, today) {
+                    Ok(parsed) => {
+                        let cur_view = self.current_view;
+                        let target_date = parsed.date.unwrap_or_else(|| match cur_view {
+                            View::Today => today,
+                            View::History => self.selected_history_date.unwrap_or(today),
+                            View::Upcoming => self
+                                .selected_upcoming_date
+                                .unwrap_or_else(|| today.succ_opt().unwrap_or(today)),
+                        });
 
-    fn handle_editing_key(&mut self, target_id: u64, key: KeyEvent) -> bool {
-        match key.code {
-            KeyCode::Esc => {
-                self.input_mode = InputMode::Normal;
-                self.input_buffer.clear();
-                self.cursor_position = 0;
-            }
-            KeyCode::Enter => {
-                let clean_text = self.input_buffer.trim().to_string();
-                self.input_mode = InputMode::Normal;
-                self.input_buffer.clear();
-                self.cursor_position = 0;
-                if !clean_text.is_empty() {
-                    let old_text = self
-                        .todos
-                        .iter()
-                        .find(|t| t.id == target_id)
-                        .map(|t| t.text.clone());
-                    if let Some(old) = old_text {
-                        if old != clean_text {
-                            self.mutate(|todos| {
-                                crate::store::edit_task(todos, target_id, &clean_text);
+                        let id = self.next_id;
+                        self.next_id += 1;
+                        let text = parsed.text;
+                        let priority = parsed.priority;
+                        let tags = parsed.tags;
+
+                        self.mutate(|todos| {
+                            todos.push(Todo {
+                                id,
+                                text,
+                                created_date: target_date,
+                                done: false,
+                                done_at: None,
+                                priority,
+                                tags,
+                                note: None,
+                                parent: None,
+                                recurring_id: None,
                             });
-                            self.set_transient_message("Edited task · u to undo");
+                        });
+
+                        match cur_view {
+                            View::Today => {
+                                self.today_selected_id = Some(id);
+                                if target_date != today {
+                                    self.set_transient_message(format!(
+                                        "Scheduled for {}",
+                                        target_date.format(&self.config.short_date_format)
+                                    ));
+                                }
+                            }
+                            View::Upcoming => {
+                                self.upcoming_todo_id = Some(id);
+                                let cur_up_date = self.selected_upcoming_date.unwrap_or(today);
+                                if target_date != cur_up_date {
+                                    self.set_transient_message(format!(
+                                        "Scheduled for {}",
+                                        target_date.format(&self.config.short_date_format)
+                                    ));
+                                }
+                            }
+                            View::History => {
+                                self.history_todo_id = Some(id);
+                            }
                         }
+
+                        self.input_mode = InputMode::Normal;
+                        self.input_buffer.clear();
+                        self.cursor_position = 0;
+                        self.prompt_error = None;
+                    }
+                    Err(e) => {
+                        self.prompt_error = Some(e.to_string());
                     }
                 }
             }
@@ -1105,6 +1476,7 @@ impl App {
                 self.cursor_position = self.input_buffer.chars().count();
             }
             KeyCode::Backspace => {
+                self.prompt_error = None;
                 if self.cursor_position > 0 {
                     let mut chars: Vec<char> = self.input_buffer.chars().collect();
                     chars.remove(self.cursor_position - 1);
@@ -1113,6 +1485,7 @@ impl App {
                 }
             }
             KeyCode::Delete => {
+                self.prompt_error = None;
                 let mut chars: Vec<char> = self.input_buffer.chars().collect();
                 if self.cursor_position < chars.len() {
                     chars.remove(self.cursor_position);
@@ -1120,6 +1493,153 @@ impl App {
                 }
             }
             KeyCode::Char(c) => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                chars.insert(self.cursor_position, c);
+                self.input_buffer = chars.into_iter().collect();
+                self.cursor_position += 1;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_editing_key(&mut self, target_id: u64, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.prompt_error = None;
+            }
+            KeyCode::Enter => {
+                let input = self.input_buffer.clone();
+                let today = self.today;
+                match crate::parser::parse_quick_add(&input, today) {
+                    Ok(parsed) => {
+                        self.mutate(|todos| {
+                            if let Some(todo) = todos.iter_mut().find(|t| t.id == target_id) {
+                                todo.text = parsed.text;
+                                todo.priority = parsed.priority;
+                                todo.tags = parsed.tags;
+                                if let Some(d) = parsed.date {
+                                    todo.created_date = d;
+                                }
+                            }
+                        });
+                        self.set_transient_message("Edited task · u to undo");
+                        self.input_mode = InputMode::Normal;
+                        self.input_buffer.clear();
+                        self.cursor_position = 0;
+                        self.prompt_error = None;
+                    }
+                    Err(e) => {
+                        self.prompt_error = Some(e.to_string());
+                    }
+                }
+            }
+            KeyCode::Left => {
+                self.cursor_position = self.cursor_position.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_len = self.input_buffer.chars().count();
+                if self.cursor_position < char_len {
+                    self.cursor_position += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor_position = 0;
+            }
+            KeyCode::End => {
+                self.cursor_position = self.input_buffer.chars().count();
+            }
+            KeyCode::Backspace => {
+                self.prompt_error = None;
+                if self.cursor_position > 0 {
+                    let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                    chars.remove(self.cursor_position - 1);
+                    self.input_buffer = chars.into_iter().collect();
+                    self.cursor_position -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                if self.cursor_position < chars.len() {
+                    chars.remove(self.cursor_position);
+                    self.input_buffer = chars.into_iter().collect();
+                }
+            }
+            KeyCode::Char(c) => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                chars.insert(self.cursor_position, c);
+                self.input_buffer = chars.into_iter().collect();
+                self.cursor_position += 1;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_rescheduling_key(&mut self, target_id: u64, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.prompt_error = None;
+            }
+            KeyCode::Enter => {
+                let input = self.input_buffer.trim().to_string();
+                let today = self.today;
+                match crate::parser::parse_date_expression(&input, today) {
+                    Ok(target_date) => {
+                        self.reschedule_task(target_id, target_date);
+                        self.input_mode = InputMode::Normal;
+                        self.input_buffer.clear();
+                        self.cursor_position = 0;
+                        self.prompt_error = None;
+                    }
+                    Err(e) => {
+                        self.prompt_error = Some(e);
+                    }
+                }
+            }
+            KeyCode::Left => {
+                self.cursor_position = self.cursor_position.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_len = self.input_buffer.chars().count();
+                if self.cursor_position < char_len {
+                    self.cursor_position += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor_position = 0;
+            }
+            KeyCode::End => {
+                self.cursor_position = self.input_buffer.chars().count();
+            }
+            KeyCode::Backspace => {
+                self.prompt_error = None;
+                if self.cursor_position > 0 {
+                    let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                    chars.remove(self.cursor_position - 1);
+                    self.input_buffer = chars.into_iter().collect();
+                    self.cursor_position -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                if self.cursor_position < chars.len() {
+                    chars.remove(self.cursor_position);
+                    self.input_buffer = chars.into_iter().collect();
+                }
+            }
+            KeyCode::Char(c) => {
+                self.prompt_error = None;
                 let mut chars: Vec<char> = self.input_buffer.chars().collect();
                 chars.insert(self.cursor_position, c);
                 self.input_buffer = chars.into_iter().collect();
@@ -1151,19 +1671,69 @@ impl App {
                 self.show_help = true;
             }
             crate::keymap::Action::SwitchView => {
-                if self.config.ui.show_history {
-                    self.current_view = match self.current_view {
-                        View::Today => View::History,
-                        View::History => View::Today,
-                    };
-                    self.clamp_selections();
-                }
+                let show_up = self.config.ui.show_upcoming;
+                let show_hist = self.config.ui.show_history;
+                self.current_view = match self.current_view {
+                    View::Today => {
+                        if show_up {
+                            View::Upcoming
+                        } else if show_hist {
+                            View::History
+                        } else {
+                            View::Today
+                        }
+                    }
+                    View::Upcoming => {
+                        if show_hist {
+                            View::History
+                        } else {
+                            View::Today
+                        }
+                    }
+                    View::History => View::Today,
+                };
+                self.clamp_selections();
             }
             crate::keymap::Action::Add => {
-                self.current_view = View::Today;
+                if self.current_view == View::History {
+                    self.current_view = View::Today;
+                }
                 self.input_mode = InputMode::Adding;
                 self.input_buffer.clear();
                 self.cursor_position = 0;
+                self.prompt_error = None;
+            }
+            crate::keymap::Action::Reschedule => {
+                let target_id = match self.current_view {
+                    View::Today => self
+                        .visible_rows_today()
+                        .get(self.today_selected_index)
+                        .map(|r| r.id),
+                    View::Upcoming => {
+                        if self.upcoming_pane == HistoryPane::Todos {
+                            self.visible_rows_upcoming()
+                                .get(self.upcoming_todo_index)
+                                .map(|r| r.id)
+                        } else {
+                            None
+                        }
+                    }
+                    View::History => {
+                        if self.history_pane == HistoryPane::Todos {
+                            self.visible_rows_history()
+                                .get(self.history_todo_index)
+                                .map(|r| r.id)
+                        } else {
+                            None
+                        }
+                    }
+                };
+                if let Some(id) = target_id {
+                    self.input_mode = InputMode::Rescheduling(id);
+                    self.input_buffer.clear();
+                    self.cursor_position = 0;
+                    self.prompt_error = None;
+                }
             }
             crate::keymap::Action::Undo => {
                 self.undo();
@@ -1185,6 +1755,7 @@ impl App {
             }
             _ => match self.current_view {
                 View::Today => self.handle_today_action(action),
+                View::Upcoming => self.handle_upcoming_action(action),
                 View::History => self.handle_history_action(action),
             },
         }
@@ -1237,6 +1808,84 @@ impl App {
                 self.delete_today_todo();
             }
             _ => {}
+        }
+    }
+
+    fn handle_upcoming_action(&mut self, action: crate::keymap::Action) {
+        match self.upcoming_pane {
+            HistoryPane::Dates => {
+                let dates = self.upcoming_dates_list();
+                match action {
+                    crate::keymap::Action::MoveSelectionDown => {
+                        if !dates.is_empty() && self.upcoming_date_index + 1 < dates.len() {
+                            self.upcoming_date_index += 1;
+                            self.upcoming_todo_index = 0;
+                            self.clamp_selections();
+                        }
+                    }
+                    crate::keymap::Action::MoveSelectionUp => {
+                        if self.upcoming_date_index > 0 {
+                            self.upcoming_date_index -= 1;
+                            self.upcoming_todo_index = 0;
+                            self.clamp_selections();
+                        }
+                    }
+                    crate::keymap::Action::FocusTasks | crate::keymap::Action::Toggle => {
+                        self.upcoming_pane = HistoryPane::Todos;
+                    }
+                    crate::keymap::Action::ClearCompleted => {
+                        self.clear_completed_upcoming();
+                    }
+                    _ => {}
+                }
+            }
+            HistoryPane::Todos => {
+                let count = self.visible_rows_upcoming().len();
+
+                match action {
+                    crate::keymap::Action::FocusDates => {
+                        self.upcoming_pane = HistoryPane::Dates;
+                    }
+                    crate::keymap::Action::ReorderDown => {
+                        self.reorder_upcoming(true);
+                    }
+                    crate::keymap::Action::ReorderUp => {
+                        self.reorder_upcoming(false);
+                    }
+                    crate::keymap::Action::MoveSelectionDown => {
+                        if count > 0 && self.upcoming_todo_index + 1 < count {
+                            self.upcoming_todo_index += 1;
+                            self.upcoming_todo_id = self
+                                .visible_rows_upcoming()
+                                .get(self.upcoming_todo_index)
+                                .map(|r| r.id);
+                        }
+                    }
+                    crate::keymap::Action::MoveSelectionUp => {
+                        self.upcoming_todo_index = self.upcoming_todo_index.saturating_sub(1);
+                        self.upcoming_todo_id = self
+                            .visible_rows_upcoming()
+                            .get(self.upcoming_todo_index)
+                            .map(|r| r.id);
+                    }
+                    crate::keymap::Action::Toggle => {
+                        self.toggle_upcoming_todo();
+                    }
+                    crate::keymap::Action::Edit => {
+                        self.start_editing_upcoming();
+                    }
+                    crate::keymap::Action::ClearCompleted => {
+                        self.clear_completed_upcoming();
+                    }
+                    crate::keymap::Action::MoveToToday => {
+                        self.move_selected_todo_to_today();
+                    }
+                    crate::keymap::Action::Delete => {
+                        self.delete_upcoming_todo();
+                    }
+                    _ => {}
+                }
+            }
         }
     }
 
@@ -1404,9 +2053,15 @@ mod tests {
         app.input_buffer = "   ".to_string();
         app.handle_key(key_press(KeyCode::Enter));
 
-        assert_eq!(app.input_mode, InputMode::Normal);
+        // Prompt stays open with dim error message, text unchanged
+        assert_eq!(app.input_mode, InputMode::Editing(10));
+        assert!(app.prompt_error.is_some());
         assert_eq!(app.todos[0].text, "Original text");
         assert_eq!(app.todos.len(), 1);
+
+        // Cancel with Esc
+        app.handle_key(key_press(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
     }
 
     #[test]
@@ -2188,8 +2843,10 @@ mod tests {
         let dates = app.dates_list();
         assert_eq!(dates, vec![today, yesterday, older]);
 
-        // View switching with Tab
+        // View switching with Tab: Today -> Upcoming -> History -> Today
         assert_eq!(app.current_view, View::Today);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Upcoming);
         app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::History);
         app.handle_key(key_press(KeyCode::Tab));
@@ -2433,6 +3090,7 @@ mod tests {
         let day = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
         let mut app = App::new_for_test_with_date(Vec::new(), day);
         app.config.ui.show_history = false;
+        app.config.ui.show_upcoming = false;
 
         assert_eq!(app.current_view, View::Today);
         app.handle_key(key_press(KeyCode::Tab));
@@ -2812,5 +3470,160 @@ mod tests {
             modifiers: KeyModifiers::NONE,
         };
         assert!(!app.handle_mouse(drag));
+    }
+
+    #[test]
+    fn test_upcoming_view_tab_cycling_and_skipping() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(Vec::new(), today);
+
+        // Default: Today -> Upcoming -> History -> Today
+        assert_eq!(app.current_view, View::Today);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Upcoming);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::History);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Today);
+
+        // With show_upcoming = false: Today -> History -> Today
+        app.config.ui.show_upcoming = false;
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::History);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Today);
+
+        // With show_history = false: Today -> Upcoming -> Today
+        app.config.ui.show_upcoming = true;
+        app.config.ui.show_history = false;
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Upcoming);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Today);
+    }
+
+    #[test]
+    fn test_quick_add_in_today_scheduled_for_future_shows_transient() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(Vec::new(), today);
+
+        // Open add prompt
+        app.handle_key(key_press(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Adding);
+
+        // Type task with future date token
+        app.input_buffer = "Doctor appointment @tomorrow ! #health".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].text, "Doctor appointment");
+        assert_eq!(app.todos[0].priority, 1);
+        assert_eq!(app.todos[0].tags, vec!["health"]);
+        assert_eq!(
+            app.todos[0].created_date,
+            NaiveDate::from_ymd_opt(2026, 10, 31).unwrap()
+        );
+
+        // Transient message shown: Scheduled for Sat 31 Oct
+        assert!(app
+            .transient_message
+            .as_ref()
+            .unwrap()
+            .contains("Scheduled for"));
+
+        // Today visible rows should NOT contain the future task
+        assert!(app.visible_rows_today().is_empty());
+
+        // Upcoming visible rows should contain it
+        let upcoming_dates = app.upcoming_dates_list();
+        assert_eq!(
+            upcoming_dates,
+            vec![NaiveDate::from_ymd_opt(2026, 10, 31).unwrap()]
+        );
+        let up_rows = app.visible_rows_upcoming();
+        assert_eq!(up_rows.len(), 1);
+        assert_eq!(up_rows[0].id, app.todos[0].id);
+    }
+
+    #[test]
+    fn test_add_in_upcoming_defaults_to_selected_upcoming_date() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let tomorrow = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![Todo {
+                id: 1,
+                text: "Existing future task".to_string(),
+                created_date: tomorrow,
+                ..Default::default()
+            }],
+            today,
+        );
+
+        // Switch to Upcoming
+        app.current_view = View::Upcoming;
+        app.clamp_selections();
+        assert_eq!(app.selected_upcoming_date, Some(tomorrow));
+
+        // Press 'a' in Upcoming
+        app.handle_key(key_press(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Adding);
+        assert_eq!(app.current_view, View::Upcoming);
+
+        // Type task without date token
+        app.input_buffer = "Another tomorrow task".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+
+        assert_eq!(app.input_mode, InputMode::Normal);
+        let up_rows = app.visible_rows_upcoming();
+        assert_eq!(up_rows.len(), 2);
+        assert_eq!(app.todos[1].created_date, tomorrow);
+    }
+
+    #[test]
+    fn test_reschedule_with_t_key() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![Todo {
+                id: 1,
+                text: "Buy groceries".to_string(),
+                created_date: today,
+                ..Default::default()
+            }],
+            today,
+        );
+
+        // Press 't' on selected task in Today
+        app.handle_key(key_press(KeyCode::Char('t')));
+        assert_eq!(app.input_mode, InputMode::Rescheduling(1));
+
+        // 1. Invalid date expression keeps prompt open
+        app.input_buffer = "invalid_date".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Rescheduling(1));
+        assert!(app.prompt_error.is_some());
+
+        // 2. Past date keeps prompt open
+        app.input_buffer = "2026-10-20".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Rescheduling(1));
+        assert!(app.prompt_error.is_some());
+
+        // 3. Valid date expression: tomorrow
+        app.input_buffer = "tomorrow".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.todos[0].created_date,
+            NaiveDate::from_ymd_opt(2026, 10, 31).unwrap()
+        );
+        assert!(app
+            .transient_message
+            .as_ref()
+            .unwrap()
+            .contains("Scheduled for"));
+
+        // Task moved to upcoming, today is now empty
+        assert!(app.visible_rows_today().is_empty());
     }
 }

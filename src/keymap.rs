@@ -27,10 +27,11 @@ pub enum Action {
     SwitchView,
     FocusTasks,
     FocusDates,
+    Reschedule,
 }
 
 impl Action {
-    pub const ALL: [Action; 22] = [
+    pub const ALL: [Action; 23] = [
         Action::Quit,
         Action::Add,
         Action::Edit,
@@ -53,6 +54,7 @@ impl Action {
         Action::SwitchView,
         Action::FocusTasks,
         Action::FocusDates,
+        Action::Reschedule,
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -79,6 +81,7 @@ impl Action {
             "switch_view" => Some(Action::SwitchView),
             "focus_tasks" => Some(Action::FocusTasks),
             "focus_dates" => Some(Action::FocusDates),
+            "reschedule" => Some(Action::Reschedule),
             _ => None,
         }
     }
@@ -107,6 +110,7 @@ impl Action {
             Action::SwitchView => "switch_view",
             Action::FocusTasks => "focus_tasks",
             Action::FocusDates => "focus_dates",
+            Action::Reschedule => "reschedule",
         }
     }
 }
@@ -579,6 +583,13 @@ impl Keymap {
                         },
                     ],
                 ),
+                (
+                    Action::Reschedule,
+                    vec![KeyChord {
+                        code: KeyCode::Char('t'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
             KeyMode::Arrows => vec![
                 (
@@ -750,6 +761,13 @@ impl Keymap {
                     Action::FocusDates,
                     vec![KeyChord {
                         code: KeyCode::Left,
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::Reschedule,
+                    vec![KeyChord {
+                        code: KeyCode::Char('t'),
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
@@ -926,6 +944,7 @@ impl Keymap {
             Action::SwitchView => "tab".to_string(),
             Action::FocusTasks => "enter/l".to_string(),
             Action::FocusDates => "h".to_string(),
+            Action::Reschedule => "t".to_string(),
         }
     }
 }

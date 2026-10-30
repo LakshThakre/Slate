@@ -99,14 +99,17 @@ impl Filter {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum View {
+    #[default]
     Today,
+    Upcoming,
     History,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum HistoryPane {
+    #[default]
     Dates,
     Todos,
 }
@@ -116,4 +119,5 @@ pub enum InputMode {
     Normal,
     Adding,
     Editing(u64),
+    Rescheduling(u64),
 }

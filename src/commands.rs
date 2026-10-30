@@ -164,19 +164,38 @@ pub fn handle_add_with_reader<R: BufRead>(
         vec![trimmed]
     };
 
+    let mut parsed_tasks = Vec::new();
+    for raw in &tasks_to_add {
+        let parsed = crate::parser::parse_quick_add(raw, today)
+            .map_err(|e| CmdError::Usage(e.to_string()))?;
+        let task_date = parsed.date.unwrap_or(date);
+        parsed_tasks.push((parsed, task_date));
+    }
+
     crate::storage::try_load_modify_save(data_path, |data| {
-        for t in &tasks_to_add {
+        for (parsed, target_date) in &parsed_tasks {
             let id = data.next_id;
             data.next_id += 1;
-            crate::store::add_task_with_id(&mut data.todos, id, t, date);
+            data.todos.push(Todo {
+                id,
+                text: parsed.text.clone(),
+                created_date: *target_date,
+                done: false,
+                done_at: None,
+                priority: parsed.priority,
+                tags: parsed.tags.clone(),
+                note: None,
+                parent: None,
+                recurring_id: None,
+            });
         }
         Ok::<(), CmdError>(())
     })
     .map_err(map_storage_error)?;
 
     if !quiet {
-        for t in &tasks_to_add {
-            writeln!(out, "Added: {t}")
+        for (parsed, _) in &parsed_tasks {
+            writeln!(out, "Added: {}", parsed.text)
                 .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
         }
     }
@@ -677,5 +696,36 @@ mod tests {
         assert!(all_out.contains("Task 1"));
         assert!(all_out.contains("Task 2"));
         out.clear();
+    }
+
+    #[test]
+    fn test_add_with_quick_add_tokens() {
+        let file = NamedTempFile::new().unwrap();
+        let path = file.path();
+        let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+        let mut out = Vec::new();
+
+        handle_add_with_reader(
+            vec!["Buy fresh bread @tomorrow ! #groceries".to_string()],
+            None,
+            false,
+            path,
+            today,
+            &mut out,
+            std::io::empty(),
+        )
+        .unwrap();
+
+        assert_eq!(String::from_utf8_lossy(&out), "Added: Buy fresh bread\n");
+
+        let loaded = crate::storage::load_todos(path).unwrap().todos;
+        assert_eq!(loaded.len(), 1);
+        assert_eq!(loaded[0].text, "Buy fresh bread");
+        assert_eq!(
+            loaded[0].created_date,
+            NaiveDate::from_ymd_opt(2026, 10, 30).unwrap()
+        );
+        assert_eq!(loaded[0].priority, 1);
+        assert_eq!(loaded[0].tags, vec!["groceries"]);
     }
 }

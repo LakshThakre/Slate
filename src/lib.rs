@@ -5,6 +5,7 @@ pub mod config;
 pub mod keymap;
 pub mod model;
 pub mod output;
+pub mod parser;
 pub mod storage;
 pub mod store;
 pub mod theme;

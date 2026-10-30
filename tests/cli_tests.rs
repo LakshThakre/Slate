@@ -445,3 +445,56 @@ fn test_handler_concurrency_100_parallel_adds() {
     let loaded = slate::storage::load_todos(&data_file).unwrap();
     assert_eq!(loaded.todos.len(), 100);
 }
+
+#[test]
+fn test_cli_add_quick_add_syntax_and_errors() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let mut out = Vec::new();
+
+    // 1. Success with tokens
+    handle_add(
+        vec!["Submit tax return @tomorrow !! #finance #taxes".to_string()],
+        None,
+        false,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out), "Added: Submit tax return\n");
+    out.clear();
+
+    let loaded = slate::storage::load_todos(&data_file).unwrap().todos;
+    assert_eq!(loaded.len(), 1);
+    assert_eq!(loaded[0].text, "Submit tax return");
+    assert_eq!(loaded[0].priority, 2);
+    assert_eq!(loaded[0].tags, vec!["finance", "taxes"]);
+    assert_eq!(
+        loaded[0].created_date,
+        NaiveDate::from_ymd_opt(2026, 10, 30).unwrap()
+    );
+
+    // 2. Error: Past date -> exit code 2 (CmdError::Usage)
+    let err_past = handle_add(
+        vec!["Old task @2026-10-20".to_string()],
+        None,
+        false,
+        &data_file,
+        today,
+        &mut out,
+    );
+    assert!(matches!(err_past, Err(CmdError::Usage(_))));
+
+    // 3. Error: Empty text after stripping tokens -> exit code 2 (CmdError::Usage)
+    let err_empty = handle_add(
+        vec!["@tomorrow !! #tag".to_string()],
+        None,
+        false,
+        &data_file,
+        today,
+        &mut out,
+    );
+    assert!(matches!(err_empty, Err(CmdError::Usage(_))));
+}

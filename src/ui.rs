@@ -18,6 +18,7 @@ pub struct Symbols {
     pub marker: &'static str,
     pub prompt_default: &'static str,
     pub prompt_edit: &'static str,
+    pub prompt_reschedule: &'static str,
     pub v_divider: &'static str,
     pub h_rule: &'static str,
     pub bullet: &'static str,
@@ -44,6 +45,7 @@ impl Symbols {
             marker: "› ",
             prompt_default: "› ",
             prompt_edit: "› Edit task ",
+            prompt_reschedule: "› Reschedule: ",
             v_divider: "│",
             h_rule: "─",
             bullet: "•",
@@ -64,6 +66,7 @@ impl Symbols {
             marker: "> ",
             prompt_default: "> ",
             prompt_edit: "> Edit task ",
+            prompt_reschedule: "> Reschedule: ",
             v_divider: "|",
             h_rule: "-",
             bullet: "*",
@@ -103,12 +106,16 @@ impl Symbols {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HitTarget {
     TabToday,
+    TabUpcoming,
     TabHistory,
     TodayTask { index: usize },
     TodayCheckbox { index: usize },
     HistoryDate { index: usize },
     HistoryTask { index: usize },
     HistoryCheckbox { index: usize },
+    UpcomingDate { index: usize },
+    UpcomingTask { index: usize },
+    UpcomingCheckbox { index: usize },
     DateArea,
     TodoArea,
 }
@@ -228,18 +235,16 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         header_divider_area,
     );
 
-    // 2. Draw Main View (Today or History)
+    // 2. Draw Main View (Today, Upcoming, or History)
     app.visible_list_height = (main_area.height.saturating_sub(2) as usize).max(1);
     match app.current_view {
         View::Today => draw_today(app, frame, main_area),
+        View::Upcoming => draw_upcoming(app, frame, main_area),
         View::History => draw_history(app, frame, main_area),
     }
 
-    // 3. Draw Bottom Area (Inline prompt when adding or editing, otherwise subtle key hints)
-    if matches!(
-        app.input_mode,
-        crate::model::InputMode::Adding | crate::model::InputMode::Editing(_)
-    ) {
+    // 3. Draw Bottom Area (Inline prompt when adding, editing, or rescheduling, otherwise subtle key hints)
+    if app.input_mode != crate::model::InputMode::Normal {
         frame.render_widget(
             Paragraph::new(
                 app.symbols
@@ -265,6 +270,16 @@ fn draw_header(app: &mut App, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+
+    let mut header_spans = vec![
+        Span::styled(
+            "Slate",
+            app.theme.accent_style().add_modifier(Modifier::BOLD),
+        ),
+        Span::raw("    "),
+    ];
+    let mut cur_x = area.x + 9;
+
     let today_tab = if app.current_view == View::Today {
         Span::styled(
             "Today",
@@ -275,37 +290,50 @@ fn draw_header(app: &mut App, frame: &mut Frame, area: Rect) {
     } else {
         Span::styled("Today", app.theme.dim_style())
     };
-
-    let history_tab = if app.current_view == View::History {
-        Span::styled(
-            "History",
-            app.theme
-                .accent_style()
-                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
-        )
-    } else {
-        Span::styled("History", app.theme.dim_style())
-    };
-
-    let mut header_spans = vec![
-        Span::styled(
-            "Slate",
-            app.theme.accent_style().add_modifier(Modifier::BOLD),
-        ),
-        Span::raw("    "),
-        today_tab,
-    ];
-
+    header_spans.push(today_tab);
     app.hit_areas.push(HitArea {
-        rect: Rect::new(area.x + 9, area.y, 5, 1),
+        rect: Rect::new(cur_x, area.y, 5, 1),
         target: HitTarget::TabToday,
     });
+    cur_x += 5;
+
+    if app.config.ui.show_upcoming {
+        header_spans.push(Span::raw("   "));
+        cur_x += 3;
+        let upcoming_tab = if app.current_view == View::Upcoming {
+            Span::styled(
+                "Upcoming",
+                app.theme
+                    .accent_style()
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            )
+        } else {
+            Span::styled("Upcoming", app.theme.dim_style())
+        };
+        header_spans.push(upcoming_tab);
+        app.hit_areas.push(HitArea {
+            rect: Rect::new(cur_x, area.y, 8, 1),
+            target: HitTarget::TabUpcoming,
+        });
+        cur_x += 8;
+    }
 
     if app.config.ui.show_history {
         header_spans.push(Span::raw("   "));
+        cur_x += 3;
+        let history_tab = if app.current_view == View::History {
+            Span::styled(
+                "History",
+                app.theme
+                    .accent_style()
+                    .add_modifier(Modifier::BOLD | Modifier::UNDERLINED),
+            )
+        } else {
+            Span::styled("History", app.theme.dim_style())
+        };
         header_spans.push(history_tab);
         app.hit_areas.push(HitArea {
-            rect: Rect::new(area.x + 17, area.y, 7, 1),
+            rect: Rect::new(cur_x, area.y, 7, 1),
             target: HitTarget::TabHistory,
         });
     }
@@ -403,6 +431,19 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
                 app.theme.warn_style(),
             ));
         }
+    }
+
+    let upcoming_count = app
+        .todos
+        .iter()
+        .filter(|t| t.created_date > today && t.parent.is_none() && !t.done)
+        .count();
+    if upcoming_count > 0 {
+        title_spans.push(Span::raw("    "));
+        title_spans.push(Span::styled(
+            format!("+{upcoming_count} upcoming"),
+            app.theme.dim_style(),
+        ));
     }
 
     frame.render_widget(Paragraph::new(Line::from(title_spans)), parts[0]);
@@ -730,6 +771,249 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
     }
 }
 
+/// Upcoming view: Future Dates column + thin vertical rule + Todo list for selected date
+fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+    let dates = app.upcoming_dates_list();
+    let today = app.today;
+
+    let date_col_width = if area.width < 70 { 18 } else { 24 }.min(area.width.saturating_sub(15));
+
+    let cols = Layout::default()
+        .direction(Direction::Horizontal)
+        .constraints([
+            Constraint::Length(date_col_width),
+            Constraint::Length(1), // Vertical divider
+            Constraint::Length(2), // Padding
+            Constraint::Min(0),    // Right todo pane
+        ])
+        .split(area);
+
+    let date_area = cols[0];
+    let divider_area = cols[1];
+    let todo_area = cols[3];
+
+    app.hit_areas.push(HitArea {
+        rect: date_area,
+        target: HitTarget::DateArea,
+    });
+    app.hit_areas.push(HitArea {
+        rect: todo_area,
+        target: HitTarget::TodoArea,
+    });
+
+    let is_date_pane_active = app.upcoming_pane == HistoryPane::Dates;
+    let is_todo_pane_active = app.upcoming_pane == HistoryPane::Todos;
+
+    if dates.is_empty() {
+        frame.render_widget(
+            Paragraph::new(Span::styled("No upcoming tasks", app.theme.dim_style())),
+            date_area,
+        );
+        let divider_line = format!("{}\n", app.symbols.v_divider).repeat(area.height as usize);
+        frame.render_widget(
+            Paragraph::new(divider_line).style(app.theme.divider_style()),
+            divider_area,
+        );
+        return;
+    }
+
+    // 1. Draw Left Date Column
+    let date_items: Vec<ListItem> = dates
+        .iter()
+        .enumerate()
+        .map(|(idx, &date)| {
+            let is_selected = idx == app.upcoming_date_index;
+            let date_todos: Vec<&Todo> = app
+                .todos
+                .iter()
+                .filter(|t| t.created_date == date)
+                .collect();
+            let total = date_todos.len();
+            let done = date_todos.iter().filter(|t| t.done).count();
+
+            let marker = if is_selected {
+                if is_date_pane_active {
+                    Span::styled(
+                        app.symbols.marker,
+                        app.theme.accent_style().add_modifier(Modifier::BOLD),
+                    )
+                } else {
+                    Span::styled(app.symbols.marker, app.theme.dim_style())
+                }
+            } else {
+                Span::raw(" ".repeat(app.symbols.marker.chars().count()))
+            };
+
+            let friendly_date = format_friendly_date(date, today, &app.config.short_date_format);
+            let count_str = format!("{done}/{total}");
+
+            let marker_width = app.symbols.marker.chars().count();
+            let text_space =
+                (date_area.width as usize).saturating_sub(marker_width + count_str.len());
+            let date_truncated = truncate_text(
+                &friendly_date,
+                text_space.saturating_sub(1),
+                app.symbols.ellipsis,
+            );
+            let pad_spaces = text_space.saturating_sub(date_truncated.chars().count());
+
+            let date_style = if is_selected && is_date_pane_active {
+                app.theme.text_style().add_modifier(Modifier::BOLD)
+            } else {
+                app.theme.text_style()
+            };
+
+            let count_style = app.theme.dim_style();
+
+            let line = Line::from(vec![
+                marker,
+                Span::styled(date_truncated, date_style),
+                Span::raw(" ".repeat(pad_spaces)),
+                Span::styled(count_str, count_style),
+            ]);
+
+            ListItem::new(line)
+        })
+        .collect();
+
+    let date_list = List::new(date_items);
+    let mut date_state = ListState::default();
+    if !dates.is_empty() {
+        date_state.select(Some(app.upcoming_date_index));
+    }
+    frame.render_stateful_widget(date_list, date_area, &mut date_state);
+
+    let date_offset = date_state.offset();
+    let visible_dates = dates
+        .len()
+        .saturating_sub(date_offset)
+        .min(date_area.height as usize);
+    for i in 0..visible_dates {
+        let date_idx = date_offset + i;
+        let row_y = date_area.y + i as u16;
+        app.hit_areas.push(HitArea {
+            rect: Rect::new(date_area.x, row_y, date_area.width, 1),
+            target: HitTarget::UpcomingDate { index: date_idx },
+        });
+    }
+
+    // 2. Draw Thin Vertical Divider
+    let divider_line = format!("{}\n", app.symbols.v_divider).repeat(area.height as usize);
+    frame.render_widget(
+        Paragraph::new(divider_line).style(app.theme.divider_style()),
+        divider_area,
+    );
+
+    // 3. Draw Right Todo Pane
+    let selected_date = dates.get(app.upcoming_date_index).copied();
+    if let Some(date) = selected_date {
+        let date_todos: Vec<&Todo> = app
+            .todos
+            .iter()
+            .filter(|t| t.created_date == date)
+            .collect();
+        let total = date_todos.len();
+        let done = date_todos.iter().filter(|t| t.done).count();
+
+        let right_rows = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Heading row
+                Constraint::Length(1), // Blank line spacing
+                Constraint::Min(0),    // Todos list
+            ])
+            .split(todo_area);
+
+        let full_date_str = date.format(&app.config.date_format).to_string();
+        let mut heading_spans = vec![Span::styled(
+            full_date_str,
+            app.theme.text_style().add_modifier(Modifier::BOLD),
+        )];
+        if app.config.progress.show_count {
+            heading_spans.push(Span::styled(
+                format!("   {}   ", app.symbols.bullet),
+                app.theme.dim_style(),
+            ));
+            heading_spans.push(Span::styled(
+                format!("{done} of {total} done"),
+                app.theme.dim_style(),
+            ));
+        }
+        let heading_line = Line::from(heading_spans);
+        frame.render_widget(Paragraph::new(heading_line), right_rows[0]);
+
+        if date_todos.is_empty() {
+            frame.render_widget(
+                Paragraph::new(Span::styled(
+                    "No todos scheduled for this date.",
+                    app.theme.dim_style(),
+                )),
+                right_rows[2],
+            );
+        } else {
+            let rows = app.visible_rows_upcoming();
+            let items: Vec<ListItem> = rows
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, row)| {
+                    let todo = app.todos.iter().find(|t| t.id == row.id)?;
+                    let is_selected = idx == app.upcoming_todo_index;
+                    let active_marker = is_selected && is_todo_pane_active;
+                    let time_str = if todo.done {
+                        match todo.done_at {
+                            Some(dt) => {
+                                Some(format!("done {}", format_time(&dt, app.config.time_format)))
+                            }
+                            None => Some("done".to_string()),
+                        }
+                    } else {
+                        None
+                    };
+
+                    Some(format_todo_row_history(
+                        todo,
+                        is_selected,
+                        active_marker,
+                        false,
+                        right_rows[2].width as usize,
+                        time_str.as_deref(),
+                        &app.theme,
+                        &app.symbols,
+                    ))
+                })
+                .collect();
+
+            let list = List::new(items);
+            let mut todo_state = ListState::default();
+            todo_state.select(Some(app.upcoming_todo_index));
+            frame.render_stateful_widget(list, right_rows[2], &mut todo_state);
+
+            let todo_offset = todo_state.offset();
+            let visible_todos = rows
+                .len()
+                .saturating_sub(todo_offset)
+                .min(right_rows[2].height as usize);
+            let marker_len = app.symbols.marker.chars().count() as u16;
+            let checkbox_len = app.symbols.check_done.chars().count() as u16;
+            for i in 0..visible_todos {
+                let todo_idx = todo_offset + i;
+                let row_y = right_rows[2].y + i as u16;
+                app.hit_areas.push(HitArea {
+                    rect: Rect::new(right_rows[2].x + marker_len, row_y, checkbox_len, 1),
+                    target: HitTarget::UpcomingCheckbox { index: todo_idx },
+                });
+                app.hit_areas.push(HitArea {
+                    rect: Rect::new(right_rows[2].x, row_y, right_rows[2].width, 1),
+                    target: HitTarget::UpcomingTask { index: todo_idx },
+                });
+            }
+        }
+    }
+}
+
 /// Single line modern prompt at the bottom: "› Text typed...       enter save · esc cancel"
 fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -737,6 +1021,7 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     }
     let prompt_label = match app.input_mode {
         crate::model::InputMode::Editing(_) => app.symbols.prompt_edit,
+        crate::model::InputMode::Rescheduling(_) => app.symbols.prompt_reschedule,
         _ => app.symbols.prompt_default,
     };
 
@@ -745,8 +1030,16 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
         app.theme.accent_style().add_modifier(Modifier::BOLD),
     );
 
-    let hints = format!("enter save  {}  esc cancel", app.symbols.dot);
-    let hints_len = hints.chars().count();
+    let (right_text, right_style) = if let Some(ref err) = app.prompt_error {
+        (err.clone(), app.theme.dim_style())
+    } else {
+        (
+            format!("enter save  {}  esc cancel", app.symbols.dot),
+            app.theme.dim_style(),
+        )
+    };
+
+    let hints_len = right_text.chars().count();
     let prompt_len = prompt_label.chars().count();
 
     // Calculate available text width between prompt symbol and right hints
@@ -770,6 +1063,7 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     if app.input_buffer.is_empty() {
         let placeholder = match app.input_mode {
             crate::model::InputMode::Editing(_) => "",
+            crate::model::InputMode::Rescheduling(_) => "tomorrow, fri, +3d, YYYY-MM-DD",
             _ => "What needs doing today?",
         };
         spans.push(Span::styled(placeholder, app.theme.dim_style()));
@@ -783,7 +1077,7 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
         spans.push(Span::raw(" ".repeat(pad)));
     }
 
-    spans.push(Span::styled(hints, app.theme.dim_style()));
+    spans.push(Span::styled(right_text, right_style));
 
     frame.render_widget(Paragraph::new(Line::from(spans)), area);
 
@@ -838,13 +1132,38 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
                 (app.keymap.hint(crate::keymap::Action::Add), "add"),
                 (done_hint, "done"),
             ];
-            if app.config.ui.show_history {
+            list.push((
+                app.keymap.hint(crate::keymap::Action::Reschedule),
+                "reschedule",
+            ));
+            if app.config.ui.show_upcoming {
+                list.push((tab_hint, "upcoming"));
+            } else if app.config.ui.show_history {
                 list.push((tab_hint, "history"));
             }
             list.push((help_hint, "help"));
             list.push((quit_hint, "quit"));
             list
         }
+        View::Upcoming => match app.upcoming_pane {
+            HistoryPane::Dates => vec![
+                (app.keymap.hint(crate::keymap::Action::FocusTasks), "tasks"),
+                (tab_hint, "history"),
+                (help_hint, "help"),
+                (quit_hint, "quit"),
+            ],
+            HistoryPane::Todos => vec![
+                (app.keymap.hint(crate::keymap::Action::FocusDates), "dates"),
+                (done_hint, "done"),
+                (
+                    app.keymap.hint(crate::keymap::Action::Reschedule),
+                    "reschedule",
+                ),
+                (tab_hint, "history"),
+                (help_hint, "help"),
+                (quit_hint, "quit"),
+            ],
+        },
         View::History => match app.history_pane {
             HistoryPane::Dates => vec![
                 (app.keymap.hint(crate::keymap::Action::FocusTasks), "tasks"),
@@ -855,6 +1174,10 @@ fn draw_footer(app: &App, frame: &mut Frame, area: Rect) {
             HistoryPane::Todos => vec![
                 (app.keymap.hint(crate::keymap::Action::FocusDates), "dates"),
                 (done_hint, "done"),
+                (
+                    app.keymap.hint(crate::keymap::Action::Reschedule),
+                    "reschedule",
+                ),
                 (tab_hint, "today"),
                 (help_hint, "help"),
                 (quit_hint, "quit"),
@@ -982,12 +1305,14 @@ fn format_todo_row_history(
     ListItem::new(Line::from(spans))
 }
 
-/// Formats dates friendly: "Today", "Yesterday", or "Mon 19 Oct"
+/// Formats dates friendly: "Today", "Yesterday", "Tomorrow", or "Mon 19 Oct"
 fn format_friendly_date(date: NaiveDate, today: NaiveDate, short_date_format: &str) -> String {
     if date == today {
         "Today".to_string()
     } else if today.pred_opt() == Some(date) {
         "Yesterday".to_string()
+    } else if today.succ_opt() == Some(date) {
+        "Tomorrow".to_string()
     } else {
         date.format(short_date_format).to_string()
     }

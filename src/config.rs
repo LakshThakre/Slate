@@ -106,6 +106,9 @@ pub struct UiConfig {
     #[serde(default = "default_true")]
     pub show_history: bool,
 
+    #[serde(default = "default_true")]
+    pub show_upcoming: bool,
+
     #[serde(default)]
     pub mouse: bool,
 }
@@ -119,6 +122,7 @@ impl Default for UiConfig {
         Self {
             symbols: SymbolsMode::Unicode,
             show_history: true,
+            show_upcoming: true,
             mouse: false,
         }
     }
@@ -411,7 +415,7 @@ impl Config {
         // 7. [ui]
         if let Some(ui_val) = table.get("ui") {
             if let Some(ui_table) = ui_val.as_table() {
-                let allowed_ui_keys = ["symbols", "show_history", "mouse"];
+                let allowed_ui_keys = ["symbols", "show_history", "show_upcoming", "mouse"];
                 for k in ui_table.keys() {
                     if !allowed_ui_keys.contains(&k.as_str()) {
                         warnings.push(format!("Unknown ui config key: '{k}'"));
@@ -439,6 +443,15 @@ impl Config {
                         config.ui.show_history = b;
                     } else {
                         warnings.push("ui.show_history must be a boolean · using true".to_string());
+                    }
+                }
+
+                if let Some(su_val) = ui_table.get("show_upcoming") {
+                    if let Some(b) = su_val.as_bool() {
+                        config.ui.show_upcoming = b;
+                    } else {
+                        warnings
+                            .push("ui.show_upcoming must be a boolean · using true".to_string());
                     }
                 }
 

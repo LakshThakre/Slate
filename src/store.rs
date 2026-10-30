@@ -166,18 +166,32 @@ pub fn clear_completed(todos: &mut Vec<Todo>, date: NaiveDate) -> usize {
     before - todos.len()
 }
 
-/// Moves a task to a target date, resetting its completion status.
-pub fn move_task_to_date(todos: &mut Vec<Todo>, id: u64, target_date: NaiveDate) -> bool {
-    if let Some(pos) = todos.iter().position(|t| t.id == id) {
-        let mut todo = todos.remove(pos);
-        todo.created_date = target_date;
-        todo.done = false;
-        todo.done_at = None;
-        todos.push(todo);
-        true
+/// Moves a task and its subtasks to a target date, resetting completion status.
+pub fn move_task_to_date(todos: &mut [Todo], id: u64, target_date: NaiveDate) -> bool {
+    let root_id = if let Some(t) = todos.iter().find(|t| t.id == id) {
+        t.parent.unwrap_or(id)
     } else {
-        false
+        return false;
+    };
+
+    let ids_to_move: Vec<u64> = todos
+        .iter()
+        .filter(|t| t.id == root_id || t.parent == Some(root_id))
+        .map(|t| t.id)
+        .collect();
+
+    if ids_to_move.is_empty() {
+        return false;
     }
+
+    for todo in todos.iter_mut() {
+        if ids_to_move.contains(&todo.id) {
+            todo.created_date = target_date;
+            todo.done = false;
+            todo.done_at = None;
+        }
+    }
+    true
 }
 
 /// Carries over specified task IDs to a new date, preserving their text and resetting completion.
