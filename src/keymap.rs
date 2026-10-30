@@ -34,10 +34,11 @@ pub enum Action {
     ToggleDetail,
     EditNote,
     AddSubtask,
+    ToggleFocus,
 }
 
 impl Action {
-    pub const ALL: [Action; 29] = [
+    pub const ALL: [Action; 30] = [
         Action::Quit,
         Action::Add,
         Action::AddSubtask,
@@ -67,6 +68,7 @@ impl Action {
         Action::Filter,
         Action::ToggleDetail,
         Action::EditNote,
+        Action::ToggleFocus,
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -100,6 +102,7 @@ impl Action {
             "filter" => Some(Action::Filter),
             "toggle_detail" | "detail" => Some(Action::ToggleDetail),
             "edit_note" | "note" => Some(Action::EditNote),
+            "toggle_focus" | "focus" | "pin" => Some(Action::ToggleFocus),
             _ => None,
         }
     }
@@ -135,6 +138,7 @@ impl Action {
             Action::ToggleDetail => "toggle_detail",
             Action::EditNote => "edit_note",
             Action::AddSubtask => "add_subtask",
+            Action::ToggleFocus => "toggle_focus",
         }
     }
 }
@@ -656,6 +660,13 @@ impl Keymap {
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
+                (
+                    Action::ToggleFocus,
+                    vec![KeyChord {
+                        code: KeyCode::Char('p'),
+                        modifiers: KeyModifiers::SHIFT,
+                    }],
+                ),
             ],
             KeyMode::Arrows => vec![
                 (
@@ -879,6 +890,13 @@ impl Keymap {
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
+                (
+                    Action::ToggleFocus,
+                    vec![KeyChord {
+                        code: KeyCode::Char('p'),
+                        modifiers: KeyModifiers::SHIFT,
+                    }],
+                ),
             ],
         }
     }
@@ -1059,6 +1077,7 @@ impl Keymap {
             Action::ToggleDetail => "i".to_string(),
             Action::EditNote => "n".to_string(),
             Action::AddSubtask => "A".to_string(),
+            Action::ToggleFocus => "P".to_string(),
         }
     }
 }

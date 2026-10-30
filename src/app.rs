@@ -8,6 +8,12 @@ use crate::storage::load_todos;
 
 use std::path::PathBuf;
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Snapshot {
+    pub todos: Vec<Todo>,
+    pub focus: Option<u64>,
+}
+
 pub struct App {
     pub data_path: PathBuf,
     pub today: NaiveDate,
@@ -42,8 +48,8 @@ pub struct App {
     pub note_buffer: String,
     pub note_cursor: usize,
     pub status_message: Option<String>,
-    pub undo_stack: Vec<Vec<Todo>>,
-    pub redo_stack: Vec<Vec<Todo>>,
+    pub undo_stack: Vec<Snapshot>,
+    pub redo_stack: Vec<Snapshot>,
     pub transient_message: Option<String>,
     pub visible_list_height: usize,
     pub show_help: bool,
@@ -563,23 +569,35 @@ impl App {
     where
         F: FnOnce(&mut Vec<Todo>),
     {
-        self.undo_stack.push(self.todos.clone());
+        self.undo_stack.push(Snapshot {
+            todos: self.todos.clone(),
+            focus: self.focus,
+        });
         if self.undo_stack.len() > 50 {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
         f(&mut self.todos);
+        if let Some(fid) = self.focus {
+            if !self.todos.iter().any(|t| t.id == fid && !t.done) {
+                self.focus = None;
+            }
+        }
         self.save();
         self.re_resolve_selections();
     }
 
     pub fn undo(&mut self) {
         if let Some(prev) = self.undo_stack.pop() {
-            self.redo_stack.push(self.todos.clone());
+            self.redo_stack.push(Snapshot {
+                todos: self.todos.clone(),
+                focus: self.focus,
+            });
             if self.redo_stack.len() > 50 {
                 self.redo_stack.remove(0);
             }
-            self.todos = prev;
+            self.todos = prev.todos;
+            self.focus = prev.focus;
             self.save();
             self.re_resolve_selections();
             self.set_transient_message("Undone");
@@ -590,11 +608,15 @@ impl App {
 
     pub fn redo(&mut self) {
         if let Some(next) = self.redo_stack.pop() {
-            self.undo_stack.push(self.todos.clone());
+            self.undo_stack.push(Snapshot {
+                todos: self.todos.clone(),
+                focus: self.focus,
+            });
             if self.undo_stack.len() > 50 {
                 self.undo_stack.remove(0);
             }
-            self.todos = next;
+            self.todos = next.todos;
+            self.focus = next.focus;
             self.save();
             self.re_resolve_selections();
             self.set_transient_message("Redone");
@@ -1137,6 +1159,36 @@ impl App {
                 }
             });
         }
+    }
+
+    pub fn toggle_focus(&mut self) {
+        let Some(target_id) = self.selected_task_id() else {
+            return;
+        };
+
+        if let Some(todo) = self.todos.iter().find(|t| t.id == target_id) {
+            if todo.done {
+                return;
+            }
+        }
+
+        self.undo_stack.push(Snapshot {
+            todos: self.todos.clone(),
+            focus: self.focus,
+        });
+        if self.undo_stack.len() > 50 {
+            self.undo_stack.remove(0);
+        }
+        self.redo_stack.clear();
+
+        if self.focus == Some(target_id) {
+            self.focus = None;
+        } else {
+            self.focus = Some(target_id);
+        }
+
+        self.save();
+        self.re_resolve_selections();
     }
 
     pub fn reschedule_task(&mut self, id: u64, target_date: NaiveDate) {
@@ -2259,6 +2311,9 @@ impl App {
                     self.note_buffer = existing_note;
                     self.input_mode = InputMode::EditingNote(id);
                 }
+            }
+            crate::keymap::Action::ToggleFocus => {
+                self.toggle_focus();
             }
             crate::keymap::Action::Undo => {
                 self.undo();
@@ -4693,5 +4748,110 @@ mod tests {
         assert_eq!(app.todos[1].created_date, today);
         assert!(!app.todos[0].done);
         assert!(!app.todos[1].done); // Completion status reset
+    }
+
+    #[test]
+    fn test_focus_pin_toggle_replace_clear_and_undo() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Task 1".to_string(),
+                    created_date: today,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Task 2".to_string(),
+                    created_date: today,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 3,
+                    text: "Subtask of 1".to_string(),
+                    created_date: today,
+                    parent: Some(1),
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        assert_eq!(app.focus, None);
+
+        // 1. Focus Task 1
+        app.today_selected_index = 0; // Task 1
+        app.today_selected_id = Some(1);
+        app.handle_key(key_press(KeyCode::Char('P')));
+        assert_eq!(app.focus, Some(1));
+
+        // 2. Pinning another task replaces previous
+        // rows: [1, 3, 2] -> index 2 is Task 2
+        app.today_selected_index = 2;
+        app.today_selected_id = Some(2);
+        app.handle_key(key_press(KeyCode::Char('P')));
+        assert_eq!(app.focus, Some(2));
+
+        // 3. Pinning same task toggles it off
+        app.handle_key(key_press(KeyCode::Char('P')));
+        assert_eq!(app.focus, None);
+
+        // 4. Undo restores focus to Some(2)
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.focus, Some(2));
+
+        // Undo again restores focus to Some(1)
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.focus, Some(1));
+
+        // 5. Completing the focus task clears it
+        app.today_selected_index = 0; // Task 1
+        app.today_selected_id = Some(1);
+        app.handle_key(key_press(KeyCode::Char(' '))); // toggle done
+        assert!(app.todos[0].done);
+        assert_eq!(app.focus, None);
+
+        // Undo restores completion and focus
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert!(!app.todos[0].done);
+        assert_eq!(app.focus, Some(1));
+
+        // 6. Deleting the focus task clears it
+        app.today_selected_index = 0; // Task 1
+        app.today_selected_id = Some(1);
+        app.handle_key(key_press(KeyCode::Char('d'))); // delete
+        assert_eq!(app.focus, None);
+
+        // Undo restores deletion and focus
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.focus, Some(1));
+
+        // 7. Focus subtask
+        app.today_selected_index = 1; // Subtask 3
+        app.today_selected_id = Some(3);
+        app.handle_key(key_press(KeyCode::Char('P')));
+        assert_eq!(app.focus, Some(3));
+
+        // Completing parent marks subtask done -> clears focus
+        app.today_selected_index = 0; // Parent 1
+        app.today_selected_id = Some(1);
+        app.handle_key(key_press(KeyCode::Char(' ')));
+        assert!(app.todos.iter().find(|t| t.id == 3).unwrap().done);
+        assert_eq!(app.focus, None);
+
+        // Undo restores parent and subtask undone, and focus
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.focus, Some(3));
+
+        // Deleting parent deletes subtasks -> clears focus
+        app.today_selected_index = 0;
+        app.today_selected_id = Some(1);
+        app.handle_key(key_press(KeyCode::Char('d')));
+        assert_eq!(app.focus, None);
+
+        // Undo restores parent, subtask, and focus
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.focus, Some(3));
     }
 }

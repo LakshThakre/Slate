@@ -474,6 +474,11 @@ where
         focus: load_res.focus,
     };
     let r = f(&mut data).map_err(Into::into)?;
+    if let Some(fid) = data.focus {
+        if !data.todos.iter().any(|t| t.id == fid && !t.done) {
+            data.focus = None;
+        }
+    }
     let save_res = save_storage_data_unlocked(
         path,
         &data,

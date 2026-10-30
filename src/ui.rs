@@ -23,6 +23,8 @@ pub struct Symbols {
     pub prompt_filter: &'static str,
     pub note: &'static str,
     pub subtask_connector: &'static str,
+    pub focus_marker: &'static str,
+    pub focus_prefix: &'static str,
     pub v_divider: &'static str,
     pub h_rule: &'static str,
     pub bullet: &'static str,
@@ -54,6 +56,8 @@ impl Symbols {
             prompt_filter: "› filter ",
             note: "≡",
             subtask_connector: "└ ",
+            focus_marker: "▸ ",
+            focus_prefix: "▸ Focus: ",
             v_divider: "│",
             h_rule: "─",
             bullet: "•",
@@ -79,6 +83,8 @@ impl Symbols {
             prompt_filter: "> filter ",
             note: "=",
             subtask_connector: "` ",
+            focus_marker: "> ",
+            focus_prefix: "> Focus: ",
             v_divider: "|",
             h_rule: "-",
             bullet: "*",
@@ -394,26 +400,25 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
     let uncarried = app.uncarried_previous_tasks();
     let has_uncarried = uncarried.is_some();
 
-    let parts = if has_uncarried {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // Title row
-                Constraint::Length(1), // Carry over hint line
-                Constraint::Length(1), // Blank line
-                Constraint::Min(0),    // Todos list
-            ])
-            .split(area)
-    } else {
-        Layout::default()
-            .direction(Direction::Vertical)
-            .constraints([
-                Constraint::Length(1), // Title row
-                Constraint::Length(1), // Blank line
-                Constraint::Min(0),    // Todos list
-            ])
-            .split(area)
-    };
+    let focus_task = app
+        .focus
+        .and_then(|fid| app.todos.iter().find(|t| t.id == fid && !t.done));
+    let has_focus = focus_task.is_some();
+
+    let mut constraints = vec![Constraint::Length(1)]; // Title row
+    if has_uncarried {
+        constraints.push(Constraint::Length(1)); // Carry over hint line
+    }
+    if has_focus {
+        constraints.push(Constraint::Length(1)); // Focus line
+    }
+    constraints.push(Constraint::Length(1)); // Blank line
+    constraints.push(Constraint::Min(0)); // Todos list
+
+    let parts = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints(constraints)
+        .split(area);
 
     // Friendly title row: "Friday, 23 October   3 of 5 done  ████░░░░░░"
     let date_str = today.format(&app.config.date_format).to_string();
@@ -482,6 +487,7 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
     }
 
     frame.render_widget(Paragraph::new(Line::from(title_spans)), parts[0]);
+    let mut cur_part = 1;
 
     if let Some((prev_date, ref ids)) = uncarried {
         let count = ids
@@ -507,10 +513,26 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
             ),
             Span::styled(" to carry over", app.theme.dim_style()),
         ]);
-        frame.render_widget(Paragraph::new(hint_line), parts[1]);
+        frame.render_widget(Paragraph::new(hint_line), parts[cur_part]);
+        cur_part += 1;
     }
 
-    let raw_list_area = if has_uncarried { parts[3] } else { parts[2] };
+    if let Some(focus) = focus_task {
+        let focus_area = parts[cur_part];
+        cur_part += 1;
+        let prefix = app.symbols.focus_prefix;
+        let prefix_len = prefix.chars().count();
+        let max_text_width = (focus_area.width as usize).saturating_sub(prefix_len);
+        let text_truncated = truncate_text(&focus.text, max_text_width, app.symbols.ellipsis);
+        let focus_line = Line::from(vec![Span::styled(
+            format!("{prefix}{text_truncated}"),
+            app.theme.dim_style(),
+        )]);
+        frame.render_widget(Paragraph::new(focus_line), focus_area);
+    }
+
+    cur_part += 1; // Skip blank line
+    let raw_list_area = parts[cur_part];
 
     let show_detail = (app.show_detail_pane
         || matches!(app.input_mode, crate::model::InputMode::EditingNote(_)))
@@ -566,11 +588,13 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
             } else {
                 None
             };
+            let is_pinned = app.focus == Some(todo.id);
             Some(format_todo_row(
                 todo,
                 row.depth,
                 subtask_progress,
                 is_selected,
+                is_pinned,
                 list_area.width as usize,
                 app.terminal_width,
                 app.config.tasks.show_tags,
@@ -868,6 +892,7 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
                         None
                     };
 
+                    let is_pinned = app.focus == Some(todo.id);
                     Some(format_todo_row_history(
                         todo,
                         row.depth,
@@ -875,6 +900,7 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
                         is_selected,
                         active_marker,
                         is_todo_overdue,
+                        is_pinned,
                         tasks_list_area.width as usize,
                         app.terminal_width,
                         app.config.tasks.show_tags,
@@ -1177,6 +1203,7 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
                         None
                     };
 
+                    let is_pinned = app.focus == Some(todo.id);
                     Some(format_todo_row_history(
                         todo,
                         row.depth,
@@ -1184,6 +1211,7 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
                         is_selected,
                         active_marker,
                         false,
+                        is_pinned,
                         tasks_list_area.width as usize,
                         app.terminal_width,
                         app.config.tasks.show_tags,
@@ -1432,6 +1460,7 @@ fn format_todo_row(
     depth: usize,
     subtask_progress: Option<(usize, usize)>,
     is_selected: bool,
+    is_pinned: bool,
     max_width: usize,
     terminal_width: u16,
     show_tags: bool,
@@ -1478,6 +1507,12 @@ fn format_todo_row(
         _ => ("", 0, Style::default()),
     };
 
+    let pin_len = if is_pinned {
+        symbols.focus_marker.chars().count()
+    } else {
+        0
+    };
+
     let checkbox_len = symbols.check_done.chars().count();
     let has_note = todo.note.as_ref().is_some_and(|n| !n.trim().is_empty());
     let note_len = if has_note { 2 } else { 0 };
@@ -1491,7 +1526,7 @@ fn format_todo_row(
     };
 
     let avail_total = max_width.saturating_sub(
-        marker_len + connector_len + checkbox_len + prio_len + prog_len + note_len + 1,
+        marker_len + connector_len + checkbox_len + pin_len + prio_len + prog_len + note_len + 1,
     );
 
     let can_show_tags = show_tags && terminal_width >= 60 && !todo.tags.is_empty();
@@ -1537,6 +1572,9 @@ fn format_todo_row(
         spans.push(Span::styled(symbols.subtask_connector, theme.dim_style()));
     }
     spans.push(checkbox);
+    if is_pinned {
+        spans.push(Span::styled(symbols.focus_marker, theme.dim_style()));
+    }
     if prio_len > 0 {
         spans.push(Span::styled(prio_str, prio_style));
     }
@@ -1565,6 +1603,7 @@ fn format_todo_row_history(
     is_selected: bool,
     is_active: bool,
     is_overdue: bool,
+    is_pinned: bool,
     max_width: usize,
     terminal_width: u16,
     show_tags: bool,
@@ -1618,6 +1657,12 @@ fn format_todo_row_history(
         _ => ("", 0, Style::default()),
     };
 
+    let pin_len = if is_pinned {
+        symbols.focus_marker.chars().count()
+    } else {
+        0
+    };
+
     let checkbox_len = symbols.check_done.chars().count();
     let suffix_str = time_str.unwrap_or("").to_string();
     let suffix_len = if suffix_str.is_empty() {
@@ -1638,7 +1683,15 @@ fn format_todo_row_history(
     };
 
     let avail_total = max_width.saturating_sub(
-        marker_len + connector_len + checkbox_len + prio_len + prog_len + suffix_len + note_len + 1,
+        marker_len
+            + connector_len
+            + checkbox_len
+            + pin_len
+            + prio_len
+            + prog_len
+            + suffix_len
+            + note_len
+            + 1,
     );
 
     let can_show_tags = show_tags && terminal_width >= 60 && !todo.tags.is_empty();
@@ -1686,6 +1739,7 @@ fn format_todo_row_history(
         marker_len
             + connector_len
             + checkbox_len
+            + pin_len
             + prio_len
             + text_truncated.chars().count()
             + prog_len
@@ -1699,6 +1753,9 @@ fn format_todo_row_history(
         spans.push(Span::styled(symbols.subtask_connector, theme.dim_style()));
     }
     spans.push(checkbox);
+    if is_pinned {
+        spans.push(Span::styled(symbols.focus_marker, theme.dim_style()));
+    }
     if prio_len > 0 {
         spans.push(Span::styled(prio_str, prio_style));
     }
@@ -2243,6 +2300,12 @@ fn build_right_help_lines(
         help_entry(
             &keymap.hint(crate::keymap::Action::EditNote),
             "edit task note",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::ToggleFocus),
+            "toggle focus task",
             12,
             theme,
         ),
@@ -3326,5 +3389,77 @@ mod tests {
         assert!(content_ascii.contains("0 of 1 done"));
         assert!(content_ascii.contains("1/2"));
         assert!(content_ascii.contains('`'));
+    }
+
+    #[test]
+    fn test_render_focus_task_header_and_row_marker() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let tomorrow = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Today task".to_string(),
+                    created_date: today,
+                    done: false,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Tomorrow focus task".to_string(),
+                    created_date: tomorrow,
+                    done: false,
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        // 1. Focus a future task -> Today view shows it above the list
+        app.focus = Some(2);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content.contains("▸ Focus: Tomorrow focus task"));
+        // Today task (id 1) is not pinned -> row doesn't have focus marker
+        // (content only has '▸' in the Focus header line)
+        assert_eq!(content.matches('▸').count(), 1);
+
+        // 2. Focus Today task -> row shows marker as well
+        app.focus = Some(1);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_today_focus: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content_today_focus.contains("▸ Focus: Today task"));
+        // Both header line and row have '▸'
+        assert_eq!(content_today_focus.matches('▸').count(), 2);
+
+        // 3. ASCII mode
+        app.symbols = Symbols::ascii();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_ascii: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content_ascii.contains("> Focus: Today task"));
     }
 }
