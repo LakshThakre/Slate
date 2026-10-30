@@ -1,6 +1,6 @@
 use std::collections::BTreeSet;
 
-use chrono::{Local, NaiveDate};
+use chrono::{Datelike, Local, NaiveDate};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::model::{HistoryPane, InputMode, Todo, View};
@@ -11,6 +11,7 @@ use std::path::PathBuf;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Snapshot {
     pub todos: Vec<Todo>,
+    pub recurring: Vec<crate::model::Recurring>,
     pub focus: Option<u64>,
 }
 
@@ -195,6 +196,16 @@ impl App {
 
         if !all_warnings.is_empty() {
             app.set_transient_message(all_warnings.join(" · "));
+        }
+
+        let added = crate::store::materialize_recurring(
+            &mut app.todos,
+            &mut app.recurring,
+            &mut app.next_id,
+            app.today,
+        );
+        if added > 0 && app.auto_save {
+            app.save();
         }
 
         app.clamp_selections();
@@ -544,6 +555,15 @@ impl App {
             }
 
             self.clamp_selections();
+            let added = crate::store::materialize_recurring(
+                &mut self.todos,
+                &mut self.recurring,
+                &mut self.next_id,
+                self.today,
+            );
+            if added > 0 && self.auto_save {
+                self.save();
+            }
             self.set_transient_message(format!("New day · {}", current_today.format("%A, %-d %B")));
             true
         } else {
@@ -565,18 +585,23 @@ impl App {
         self.transient_message = Some(msg.into());
     }
 
-    pub fn mutate<F>(&mut self, f: F)
-    where
-        F: FnOnce(&mut Vec<Todo>),
-    {
+    pub fn snapshot(&mut self) {
         self.undo_stack.push(Snapshot {
             todos: self.todos.clone(),
+            recurring: self.recurring.clone(),
             focus: self.focus,
         });
         if self.undo_stack.len() > 50 {
             self.undo_stack.remove(0);
         }
         self.redo_stack.clear();
+    }
+
+    pub fn mutate<F>(&mut self, f: F)
+    where
+        F: FnOnce(&mut Vec<Todo>),
+    {
+        self.snapshot();
         f(&mut self.todos);
         if let Some(fid) = self.focus {
             if !self.todos.iter().any(|t| t.id == fid && !t.done) {
@@ -591,12 +616,14 @@ impl App {
         if let Some(prev) = self.undo_stack.pop() {
             self.redo_stack.push(Snapshot {
                 todos: self.todos.clone(),
+                recurring: self.recurring.clone(),
                 focus: self.focus,
             });
             if self.redo_stack.len() > 50 {
                 self.redo_stack.remove(0);
             }
             self.todos = prev.todos;
+            self.recurring = prev.recurring;
             self.focus = prev.focus;
             self.save();
             self.re_resolve_selections();
@@ -610,12 +637,14 @@ impl App {
         if let Some(next) = self.redo_stack.pop() {
             self.undo_stack.push(Snapshot {
                 todos: self.todos.clone(),
+                recurring: self.recurring.clone(),
                 focus: self.focus,
             });
             if self.undo_stack.len() > 50 {
                 self.undo_stack.remove(0);
             }
             self.todos = next.todos;
+            self.recurring = next.recurring;
             self.focus = next.focus;
             self.save();
             self.re_resolve_selections();
@@ -1016,6 +1045,12 @@ impl App {
         let rows = self.visible_rows_today();
         if let Some(row) = rows.get(self.today_selected_index) {
             let target_id = row.id;
+            if let Some(todo) = self.todos.iter().find(|t| t.id == target_id) {
+                if todo.recurring_id.is_some() {
+                    self.input_mode = InputMode::ConfirmDeleteRecurring(target_id);
+                    return;
+                }
+            }
             let mut deleted_text = None;
             self.mutate(|todos| {
                 if let Some(t) = crate::store::delete_task(todos, target_id) {
@@ -1046,6 +1081,12 @@ impl App {
         let rows = self.visible_rows_history();
         if let Some(row) = rows.get(self.history_todo_index) {
             let target_id = row.id;
+            if let Some(todo) = self.todos.iter().find(|t| t.id == target_id) {
+                if todo.recurring_id.is_some() {
+                    self.input_mode = InputMode::ConfirmDeleteRecurring(target_id);
+                    return;
+                }
+            }
             let mut deleted_text = None;
             self.mutate(|todos| {
                 if let Some(t) = crate::store::delete_task(todos, target_id) {
@@ -1080,6 +1121,12 @@ impl App {
         let rows = self.visible_rows_upcoming();
         if let Some(row) = rows.get(self.upcoming_todo_index) {
             let target_id = row.id;
+            if let Some(todo) = self.todos.iter().find(|t| t.id == target_id) {
+                if todo.recurring_id.is_some() {
+                    self.input_mode = InputMode::ConfirmDeleteRecurring(target_id);
+                    return;
+                }
+            }
             let mut deleted_text = None;
             self.mutate(|todos| {
                 if let Some(t) = crate::store::delete_task(todos, target_id) {
@@ -1093,6 +1140,64 @@ impl App {
                 ));
             }
         }
+    }
+
+    pub fn delete_recurring_instance(&mut self, target_id: u64) {
+        let mut deleted_text = None;
+        self.mutate(|todos| {
+            if let Some(t) = crate::store::delete_task(todos, target_id) {
+                deleted_text = Some(t.text);
+            }
+        });
+        if let Some(text) = deleted_text {
+            self.set_transient_message(format!(
+                "Deleted \"{}\" · u to undo",
+                truncate_str(&text, 24)
+            ));
+        }
+    }
+
+    pub fn delete_recurring_all(&mut self, target_id: u64) {
+        let Some(todo) = self.todos.iter().find(|t| t.id == target_id).cloned() else {
+            return;
+        };
+        let tpl_id = todo.recurring_id;
+
+        self.snapshot();
+
+        crate::store::delete_task(&mut self.todos, target_id);
+
+        if let Some(tid) = tpl_id {
+            self.recurring.retain(|r| r.id != tid);
+
+            let future_instance_ids: Vec<u64> = self
+                .todos
+                .iter()
+                .filter(|t| t.recurring_id == Some(tid) && t.created_date > todo.created_date)
+                .map(|t| t.id)
+                .collect();
+
+            for fid in future_instance_ids {
+                crate::store::delete_task(&mut self.todos, fid);
+            }
+
+            for t in &mut self.todos {
+                if t.recurring_id == Some(tid) {
+                    t.recurring_id = None;
+                }
+            }
+        }
+
+        if self.focus == Some(target_id) {
+            self.focus = None;
+        }
+
+        self.save();
+        self.re_resolve_selections();
+        self.set_transient_message(format!(
+            "Deleted recurring \"{}\" and template · u to undo",
+            truncate_str(&todo.text, 24)
+        ));
     }
 
     pub fn reorder_upcoming(&mut self, down: bool) {
@@ -1172,14 +1277,7 @@ impl App {
             }
         }
 
-        self.undo_stack.push(Snapshot {
-            todos: self.todos.clone(),
-            focus: self.focus,
-        });
-        if self.undo_stack.len() > 50 {
-            self.undo_stack.remove(0);
-        }
-        self.redo_stack.clear();
+        self.snapshot();
 
         if self.focus == Some(target_id) {
             self.focus = None;
@@ -1189,6 +1287,100 @@ impl App {
 
         self.save();
         self.re_resolve_selections();
+    }
+
+    pub fn set_recurrence_off(&mut self, target_id: u64) {
+        let Some(todo) = self.todos.iter().find(|t| t.id == target_id).cloned() else {
+            return;
+        };
+        let Some(tpl_id) = todo.recurring_id else {
+            self.set_transient_message("Task is not recurring");
+            return;
+        };
+
+        self.snapshot();
+
+        self.recurring.retain(|r| r.id != tpl_id);
+        for t in &mut self.todos {
+            if t.recurring_id == Some(tpl_id) {
+                t.recurring_id = None;
+            }
+        }
+
+        self.save();
+        self.re_resolve_selections();
+        self.set_transient_message("Recurrence off");
+    }
+
+    pub fn set_recurrence_rule(&mut self, target_id: u64, rule: crate::model::RecurrenceRule) {
+        let Some(todo) = self.todos.iter().find(|t| t.id == target_id).cloned() else {
+            return;
+        };
+        if todo.parent.is_some() {
+            self.set_transient_message("Subtasks cannot be recurring");
+            return;
+        }
+
+        self.snapshot();
+
+        let rule_name = match rule {
+            crate::model::RecurrenceRule::Daily => "daily",
+            crate::model::RecurrenceRule::Weekdays => "weekdays",
+            crate::model::RecurrenceRule::Weekly => "weekly",
+        };
+
+        if let Some(tpl_id) = todo.recurring_id {
+            if let Some(tpl) = self.recurring.iter_mut().find(|r| r.id == tpl_id) {
+                tpl.rule = rule;
+                if rule == crate::model::RecurrenceRule::Weekly {
+                    tpl.anchor = todo.created_date;
+                }
+            }
+        } else {
+            let tpl_id = self.next_id;
+            self.next_id += 1;
+            let anchor = match rule {
+                crate::model::RecurrenceRule::Weekdays => {
+                    let wd = todo.created_date.weekday();
+                    if wd == chrono::Weekday::Sat {
+                        todo.created_date
+                            .succ_opt()
+                            .and_then(|d| d.succ_opt())
+                            .unwrap_or(todo.created_date)
+                    } else if wd == chrono::Weekday::Sun {
+                        todo.created_date.succ_opt().unwrap_or(todo.created_date)
+                    } else {
+                        todo.created_date
+                    }
+                }
+                _ => todo.created_date,
+            };
+
+            self.recurring.push(crate::model::Recurring {
+                id: tpl_id,
+                text: todo.text.clone(),
+                tags: todo.tags.clone(),
+                priority: todo.priority,
+                rule,
+                anchor,
+                last_materialized: Some(todo.created_date),
+            });
+
+            if let Some(t) = self.todos.iter_mut().find(|t| t.id == target_id) {
+                t.recurring_id = Some(tpl_id);
+            }
+        }
+
+        crate::store::materialize_recurring(
+            &mut self.todos,
+            &mut self.recurring,
+            &mut self.next_id,
+            self.today,
+        );
+
+        self.save();
+        self.re_resolve_selections();
+        self.set_transient_message(format!("Recurrence set to {rule_name}"));
     }
 
     pub fn reschedule_task(&mut self, id: u64, target_date: NaiveDate) {
@@ -1277,6 +1469,10 @@ impl App {
             InputMode::Rescheduling(id) => self.handle_rescheduling_key(id, key),
             InputMode::Filtering => self.handle_filtering_key(key),
             InputMode::EditingNote(id) => self.handle_note_key(id, key),
+            InputMode::SettingRecurrence(id) => self.handle_recurrence_key(id, key),
+            InputMode::ConfirmDeleteRecurring(id) => {
+                self.handle_confirm_delete_recurring_key(id, key)
+            }
             InputMode::Normal => self.handle_normal_key(key),
         }
     }
@@ -1590,24 +1786,70 @@ impl App {
                         let priority = parsed.priority;
                         let tags = parsed.tags;
 
+                        let (recurring_id, actual_date) = if let Some(rule) = parsed.recurrence {
+                            self.snapshot();
+                            let tpl_id = self.next_id;
+                            self.next_id += 1;
+                            let anchor = match rule {
+                                crate::model::RecurrenceRule::Weekdays => {
+                                    let wd = target_date.weekday();
+                                    if wd == chrono::Weekday::Sat {
+                                        target_date
+                                            .succ_opt()
+                                            .and_then(|d| d.succ_opt())
+                                            .unwrap_or(target_date)
+                                    } else if wd == chrono::Weekday::Sun {
+                                        target_date.succ_opt().unwrap_or(target_date)
+                                    } else {
+                                        target_date
+                                    }
+                                }
+                                _ => target_date,
+                            };
+                            self.recurring.push(crate::model::Recurring {
+                                id: tpl_id,
+                                text: text.clone(),
+                                tags: tags.clone(),
+                                priority,
+                                rule,
+                                anchor,
+                                last_materialized: Some(anchor),
+                            });
+                            (Some(tpl_id), anchor)
+                        } else {
+                            (None, target_date)
+                        };
+
                         let added_task = Todo {
                             id,
                             text,
-                            created_date: target_date,
+                            created_date: actual_date,
                             done: false,
                             done_at: None,
                             priority,
                             tags,
                             note: None,
                             parent: None,
-                            recurring_id: None,
+                            recurring_id,
                         };
 
                         let is_hidden_by_filter = !self.current_filter().matches(&added_task);
 
-                        self.mutate(|todos| {
-                            todos.push(added_task);
-                        });
+                        if recurring_id.is_some() {
+                            self.todos.push(added_task);
+                            crate::store::materialize_recurring(
+                                &mut self.todos,
+                                &mut self.recurring,
+                                &mut self.next_id,
+                                self.today,
+                            );
+                            self.save();
+                            self.re_resolve_selections();
+                        } else {
+                            self.mutate(|todos| {
+                                todos.push(added_task);
+                            });
+                        }
 
                         if is_hidden_by_filter {
                             self.set_transient_message("Added (hidden by filter)");
@@ -1615,20 +1857,20 @@ impl App {
                             match cur_view {
                                 View::Today => {
                                     self.today_selected_id = Some(id);
-                                    if target_date != today {
+                                    if actual_date != today {
                                         self.set_transient_message(format!(
                                             "Scheduled for {}",
-                                            target_date.format(&self.config.short_date_format)
+                                            actual_date.format(&self.config.short_date_format)
                                         ));
                                     }
                                 }
                                 View::Upcoming => {
                                     self.upcoming_todo_id = Some(id);
                                     let cur_up_date = self.selected_upcoming_date.unwrap_or(today);
-                                    if target_date != cur_up_date {
+                                    if actual_date != cur_up_date {
                                         self.set_transient_message(format!(
                                             "Scheduled for {}",
-                                            target_date.format(&self.config.short_date_format)
+                                            actual_date.format(&self.config.short_date_format)
                                         ));
                                     }
                                 }
@@ -1975,6 +2217,101 @@ impl App {
         false
     }
 
+    fn handle_recurrence_key(&mut self, target_id: u64, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.prompt_error = None;
+            }
+            KeyCode::Enter => {
+                let input = self.input_buffer.trim().to_lowercase();
+                if input == "off" {
+                    self.set_recurrence_off(target_id);
+                    self.input_mode = InputMode::Normal;
+                    self.input_buffer.clear();
+                    self.cursor_position = 0;
+                    self.prompt_error = None;
+                } else if input == "daily" || input == "weekdays" || input == "weekly" {
+                    let rule = match input.as_str() {
+                        "daily" => crate::model::RecurrenceRule::Daily,
+                        "weekdays" => crate::model::RecurrenceRule::Weekdays,
+                        "weekly" => crate::model::RecurrenceRule::Weekly,
+                        _ => unreachable!(),
+                    };
+                    self.set_recurrence_rule(target_id, rule);
+                    self.input_mode = InputMode::Normal;
+                    self.input_buffer.clear();
+                    self.cursor_position = 0;
+                    self.prompt_error = None;
+                } else {
+                    self.prompt_error =
+                        Some("Expected 'daily', 'weekdays', 'weekly', or 'off'".to_string());
+                }
+            }
+            KeyCode::Left => {
+                self.cursor_position = self.cursor_position.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_len = self.input_buffer.chars().count();
+                if self.cursor_position < char_len {
+                    self.cursor_position += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor_position = 0;
+            }
+            KeyCode::End => {
+                self.cursor_position = self.input_buffer.chars().count();
+            }
+            KeyCode::Backspace => {
+                self.prompt_error = None;
+                if self.cursor_position > 0 {
+                    let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                    chars.remove(self.cursor_position - 1);
+                    self.input_buffer = chars.into_iter().collect();
+                    self.cursor_position -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                if self.cursor_position < chars.len() {
+                    chars.remove(self.cursor_position);
+                    self.input_buffer = chars.into_iter().collect();
+                }
+            }
+            KeyCode::Char(c) => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                chars.insert(self.cursor_position, c);
+                self.input_buffer = chars.into_iter().collect();
+                self.cursor_position += 1;
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn handle_confirm_delete_recurring_key(&mut self, target_id: u64, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+            }
+            KeyCode::Char('t') | KeyCode::Char('T') => {
+                self.input_mode = InputMode::Normal;
+                self.delete_recurring_instance(target_id);
+            }
+            KeyCode::Char('a') | KeyCode::Char('A') => {
+                self.input_mode = InputMode::Normal;
+                self.delete_recurring_all(target_id);
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn handle_filtering_key(&mut self, key: KeyEvent) -> bool {
         match key.code {
             KeyCode::Esc => {
@@ -2314,6 +2651,20 @@ impl App {
             }
             crate::keymap::Action::ToggleFocus => {
                 self.toggle_focus();
+            }
+            crate::keymap::Action::Recurrence => {
+                if let Some(id) = self.selected_task_id() {
+                    if let Some(todo) = self.todos.iter().find(|t| t.id == id) {
+                        if todo.parent.is_some() {
+                            self.set_transient_message("Subtasks cannot be recurring");
+                        } else {
+                            self.input_mode = InputMode::SettingRecurrence(id);
+                            self.input_buffer.clear();
+                            self.cursor_position = 0;
+                            self.prompt_error = None;
+                        }
+                    }
+                }
             }
             crate::keymap::Action::Undo => {
                 self.undo();
@@ -4853,5 +5204,169 @@ mod tests {
         // Undo restores parent, subtask, and focus
         app.handle_key(key_press(KeyCode::Char('u')));
         assert_eq!(app.focus, Some(3));
+    }
+
+    #[test]
+    fn test_recurring_tasks_full_lifecycle() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let mut app = App::new_for_test_with_date(Vec::new(), today);
+
+        // 1. Quick-add @daily
+        app.handle_key(key_press(KeyCode::Char('a')));
+        for c in "Daily habit @daily".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.recurring.len(), 1);
+        let tpl_id = app.recurring[0].id;
+        assert_eq!(app.todos[0].recurring_id, Some(tpl_id));
+        assert_eq!(app.recurring[0].rule, crate::model::RecurrenceRule::Daily);
+
+        // Undo removes both task and template
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.todos.len(), 0);
+        assert_eq!(app.recurring.len(), 0);
+
+        // Redo restores both
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.recurring.len(), 1);
+
+        // 2. Add plain task and turn it into recurring via `r`
+        app.handle_key(key_press(KeyCode::Char('a')));
+        for c in "Weekly report".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.todos.len(), 2);
+
+        // Select task 2 (Weekly report)
+        app.today_selected_index = 1;
+        app.today_selected_id = Some(app.todos[1].id);
+        app.handle_key(key_press(KeyCode::Char('r')));
+        assert!(matches!(app.input_mode, InputMode::SettingRecurrence(_)));
+
+        // Type "weekly"
+        for c in "weekly".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.recurring.len(), 2);
+        let weekly_tpl = app
+            .recurring
+            .iter()
+            .find(|r| r.rule == crate::model::RecurrenceRule::Weekly)
+            .unwrap();
+        assert_eq!(app.todos[1].recurring_id, Some(weekly_tpl.id));
+
+        // 3. Subtask cannot be recurring
+        app.handle_key(key_press(KeyCode::Char('A')));
+        for c in "Child".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        let subtask_id = app.todos.iter().find(|t| t.text == "Child").unwrap().id;
+
+        let rows = app.visible_rows_today();
+        let sub_idx = rows.iter().position(|r| r.id == subtask_id).unwrap();
+        app.today_selected_index = sub_idx;
+        app.today_selected_id = Some(subtask_id);
+        app.handle_key(key_press(KeyCode::Char('r')));
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Subtasks cannot be recurring")
+        );
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        // 4. Edit instance affects only instance, not template
+        app.today_selected_index = 0;
+        app.today_selected_id = Some(app.todos[0].id);
+        app.handle_key(key_press(KeyCode::Char('e')));
+        app.input_buffer = "Modified habit instance".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.todos[0].text, "Modified habit instance");
+        assert_eq!(app.recurring[0].text, "Daily habit");
+
+        // 5. Deleting an instance prompts ConfirmDeleteRecurring
+        app.handle_key(key_press(KeyCode::Char('d')));
+        assert!(matches!(
+            app.input_mode,
+            InputMode::ConfirmDeleteRecurring(_)
+        ));
+
+        // Pressing Esc cancels
+        app.handle_key(key_press(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.todos.len(), 3);
+        assert_eq!(app.recurring.len(), 2);
+
+        // Press 'd' again, choose 't' (this instance)
+        app.handle_key(key_press(KeyCode::Char('d')));
+        app.handle_key(key_press(KeyCode::Char('t')));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(!app
+            .todos
+            .iter()
+            .any(|t| t.text == "Modified habit instance"));
+        assert!(app.recurring.iter().any(|r| r.id == tpl_id));
+
+        // Undo restores instance
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert!(app
+            .todos
+            .iter()
+            .any(|t| t.text == "Modified habit instance"));
+
+        let mod_id = app
+            .todos
+            .iter()
+            .find(|t| t.text == "Modified habit instance")
+            .unwrap()
+            .id;
+        let rows = app.visible_rows_today();
+        let mod_idx = rows.iter().position(|r| r.id == mod_id).unwrap();
+        app.today_selected_index = mod_idx;
+        app.today_selected_id = Some(mod_id);
+
+        // Press 'd' again, choose 'a' (all)
+        app.handle_key(key_press(KeyCode::Char('d')));
+        app.handle_key(key_press(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(!app
+            .todos
+            .iter()
+            .any(|t| t.text == "Modified habit instance"));
+        assert!(!app.recurring.iter().any(|r| r.id == tpl_id));
+
+        // Undo restores template and task
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert!(app
+            .todos
+            .iter()
+            .any(|t| t.text == "Modified habit instance"));
+        assert!(app.recurring.iter().any(|r| r.id == tpl_id));
+
+        let rows = app.visible_rows_today();
+        let mod_idx = rows.iter().position(|r| r.id == mod_id).unwrap();
+        app.today_selected_index = mod_idx;
+        app.today_selected_id = Some(mod_id);
+
+        // 6. Test 'off' on instance
+        app.handle_key(key_press(KeyCode::Char('r')));
+        for c in "off".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.transient_message.as_deref(), Some("Recurrence off"));
+        assert!(!app.recurring.iter().any(|r| r.id == tpl_id));
+        let restored_todo = app
+            .todos
+            .iter()
+            .find(|t| t.text == "Modified habit instance")
+            .unwrap();
+        assert_eq!(restored_todo.recurring_id, None);
     }
 }

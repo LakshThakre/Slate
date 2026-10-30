@@ -154,4 +154,6 @@ pub enum InputMode {
     Rescheduling(u64),
     Filtering,
     EditingNote(u64),
+    SettingRecurrence(u64),
+    ConfirmDeleteRecurring(u64),
 }

@@ -1,7 +1,7 @@
 use std::io::{BufRead, Write};
 use std::path::Path;
 
-use chrono::NaiveDate;
+use chrono::{Datelike, NaiveDate};
 
 use crate::cli::Commands;
 use crate::model::Todo;
@@ -232,19 +232,58 @@ pub fn handle_add_with_reader<R: BufRead>(
         for (parsed, target_date) in &parsed_tasks {
             let id = data.next_id;
             data.next_id += 1;
+            let (recurring_id, actual_date) = if let Some(rule) = parsed.recurrence {
+                let tpl_id = data.next_id;
+                data.next_id += 1;
+                let anchor = match rule {
+                    crate::model::RecurrenceRule::Weekdays => {
+                        let wd = target_date.weekday();
+                        if wd == chrono::Weekday::Sat {
+                            target_date
+                                .succ_opt()
+                                .and_then(|d| d.succ_opt())
+                                .unwrap_or(*target_date)
+                        } else if wd == chrono::Weekday::Sun {
+                            target_date.succ_opt().unwrap_or(*target_date)
+                        } else {
+                            *target_date
+                        }
+                    }
+                    _ => *target_date,
+                };
+                data.recurring.push(crate::model::Recurring {
+                    id: tpl_id,
+                    text: parsed.text.clone(),
+                    tags: parsed.tags.clone(),
+                    priority: parsed.priority,
+                    rule,
+                    anchor,
+                    last_materialized: Some(anchor),
+                });
+                (Some(tpl_id), anchor)
+            } else {
+                (None, *target_date)
+            };
+
             data.todos.push(Todo {
                 id,
                 text: parsed.text.clone(),
-                created_date: *target_date,
+                created_date: actual_date,
                 done: false,
                 done_at: None,
                 priority: parsed.priority,
                 tags: parsed.tags.clone(),
                 note: None,
                 parent: None,
-                recurring_id: None,
+                recurring_id,
             });
         }
+        crate::store::materialize_recurring(
+            &mut data.todos,
+            &mut data.recurring,
+            &mut data.next_id,
+            today,
+        );
         Ok::<(), CmdError>(())
     })
     .map_err(map_storage_error)?;
@@ -292,6 +331,12 @@ pub fn handle_done_str(
     let now = chrono::Local::now();
 
     crate::storage::try_load_modify_save(data_path, |data| {
+        crate::store::materialize_recurring(
+            &mut data.todos,
+            &mut data.recurring,
+            &mut data.next_id,
+            today,
+        );
         let target_ids =
             resolve_target_task_ids_str(&data.todos, date, indices, match_query.as_deref())?;
         for id in target_ids {
@@ -329,6 +374,12 @@ pub fn handle_undone_str(
     let now = chrono::Local::now();
 
     crate::storage::try_load_modify_save(data_path, |data| {
+        crate::store::materialize_recurring(
+            &mut data.todos,
+            &mut data.recurring,
+            &mut data.next_id,
+            today,
+        );
         let target_ids =
             resolve_target_task_ids_str(&data.todos, date, indices, match_query.as_deref())?;
         for id in target_ids {
@@ -365,6 +416,12 @@ pub fn handle_rm_str(
     };
 
     crate::storage::try_load_modify_save(data_path, |data| {
+        crate::store::materialize_recurring(
+            &mut data.todos,
+            &mut data.recurring,
+            &mut data.next_id,
+            today,
+        );
         let target_ids =
             resolve_target_task_ids_str(&data.todos, date, indices, match_query.as_deref())?;
         for id in target_ids {
@@ -399,6 +456,18 @@ pub fn handle_list(
     config: &crate::config::Config,
     out: &mut dyn Write,
 ) -> Result<(), CmdError> {
+    if data_path.exists() {
+        let _ = crate::storage::try_load_modify_save(data_path, |data| {
+            crate::store::materialize_recurring(
+                &mut data.todos,
+                &mut data.recurring,
+                &mut data.next_id,
+                today,
+            );
+            Ok::<(), std::convert::Infallible>(())
+        });
+    }
+
     let load_res =
         crate::storage::load_todos(data_path).map_err(|e| CmdError::Runtime(e.to_string()))?;
     let todos = load_res.todos;
@@ -472,6 +541,18 @@ pub fn handle_today(
     config: &crate::config::Config,
     out: &mut dyn Write,
 ) -> Result<(), CmdError> {
+    if data_path.exists() {
+        let _ = crate::storage::try_load_modify_save(data_path, |data| {
+            crate::store::materialize_recurring(
+                &mut data.todos,
+                &mut data.recurring,
+                &mut data.next_id,
+                today,
+            );
+            Ok::<(), std::convert::Infallible>(())
+        });
+    }
+
     let load_res =
         crate::storage::load_todos(data_path).map_err(|e| CmdError::Runtime(e.to_string()))?;
     let todos = load_res.todos;

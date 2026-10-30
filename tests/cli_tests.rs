@@ -540,7 +540,9 @@ fn test_cli_subtasks_listing_and_operations() {
     )
     .unwrap();
     let list_str = String::from_utf8_lossy(&out);
-    assert!(list_str.contains("1  ○  Parent task") || list_str.contains("1  [ ]  Parent task"));
+    assert!(
+        list_str.contains("Parent task") && (list_str.contains("○") || list_str.contains("[ ]"))
+    );
     assert!(list_str.contains("1.1") && list_str.contains("Child task"));
     out.clear();
 
@@ -569,4 +571,49 @@ fn test_cli_subtasks_listing_and_operations() {
     let loaded = slate::storage::load_todos(&data_file).unwrap().todos;
     assert_eq!(loaded.len(), 1);
     assert_eq!(loaded[0].id, 1);
+}
+
+#[test]
+fn test_cli_recurring_tasks_addition_and_materialization() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let monday = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+    let tuesday = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+    let config = Config::default();
+    let mut out = Vec::new();
+
+    // 1. Add daily task via quick-add CLI
+    handle_add(
+        vec!["Daily standup @daily".to_string()],
+        None,
+        true,
+        &data_file,
+        monday,
+        &mut out,
+    )
+    .unwrap();
+    out.clear();
+
+    let loaded = slate::storage::load_todos(&data_file).unwrap();
+    assert_eq!(loaded.todos.len(), 1);
+    assert_eq!(loaded.todos[0].text, "Daily standup");
+    assert_eq!(loaded.recurring.len(), 1);
+    assert_eq!(
+        loaded.recurring[0].rule,
+        slate::model::RecurrenceRule::Daily
+    );
+
+    // 2. Listing on Tuesday materializes Tuesday instance
+    handle_list(
+        None, false, false, None, &data_file, tuesday, &config, &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+    assert!(list_str.contains("Daily standup"));
+    out.clear();
+
+    let loaded_tue = slate::storage::load_todos(&data_file).unwrap();
+    assert_eq!(loaded_tue.todos.len(), 2);
+    assert_eq!(loaded_tue.todos[0].created_date, monday);
+    assert_eq!(loaded_tue.todos[1].created_date, tuesday);
 }

@@ -35,10 +35,11 @@ pub enum Action {
     EditNote,
     AddSubtask,
     ToggleFocus,
+    Recurrence,
 }
 
 impl Action {
-    pub const ALL: [Action; 30] = [
+    pub const ALL: [Action; 31] = [
         Action::Quit,
         Action::Add,
         Action::AddSubtask,
@@ -69,6 +70,7 @@ impl Action {
         Action::ToggleDetail,
         Action::EditNote,
         Action::ToggleFocus,
+        Action::Recurrence,
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -103,6 +105,7 @@ impl Action {
             "toggle_detail" | "detail" => Some(Action::ToggleDetail),
             "edit_note" | "note" => Some(Action::EditNote),
             "toggle_focus" | "focus" | "pin" => Some(Action::ToggleFocus),
+            "recurrence" | "recur" => Some(Action::Recurrence),
             _ => None,
         }
     }
@@ -139,6 +142,7 @@ impl Action {
             Action::EditNote => "edit_note",
             Action::AddSubtask => "add_subtask",
             Action::ToggleFocus => "toggle_focus",
+            Action::Recurrence => "recurrence",
         }
     }
 }
@@ -667,6 +671,13 @@ impl Keymap {
                         modifiers: KeyModifiers::SHIFT,
                     }],
                 ),
+                (
+                    Action::Recurrence,
+                    vec![KeyChord {
+                        code: KeyCode::Char('r'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
             KeyMode::Arrows => vec![
                 (
@@ -897,6 +908,13 @@ impl Keymap {
                         modifiers: KeyModifiers::SHIFT,
                     }],
                 ),
+                (
+                    Action::Recurrence,
+                    vec![KeyChord {
+                        code: KeyCode::Char('r'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
         }
     }
@@ -1078,6 +1096,7 @@ impl Keymap {
             Action::EditNote => "n".to_string(),
             Action::AddSubtask => "A".to_string(),
             Action::ToggleFocus => "P".to_string(),
+            Action::Recurrence => "r".to_string(),
         }
     }
 }

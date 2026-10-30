@@ -21,7 +21,9 @@ pub struct Symbols {
     pub prompt_edit: &'static str,
     pub prompt_reschedule: &'static str,
     pub prompt_filter: &'static str,
+    pub prompt_recurrence: &'static str,
     pub note: &'static str,
+    pub repeat: &'static str,
     pub subtask_connector: &'static str,
     pub focus_marker: &'static str,
     pub focus_prefix: &'static str,
@@ -54,7 +56,9 @@ impl Symbols {
             prompt_edit: "› Edit task ",
             prompt_reschedule: "› Reschedule: ",
             prompt_filter: "› filter ",
+            prompt_recurrence: "› recurrence: ",
             note: "≡",
+            repeat: "↻ ",
             subtask_connector: "└ ",
             focus_marker: "▸ ",
             focus_prefix: "▸ Focus: ",
@@ -81,7 +85,9 @@ impl Symbols {
             prompt_edit: "> Edit task ",
             prompt_reschedule: "> Reschedule: ",
             prompt_filter: "> filter ",
+            prompt_recurrence: "> recurrence: ",
             note: "=",
+            repeat: "~ ",
             subtask_connector: "` ",
             focus_marker: "> ",
             focus_prefix: "> Focus: ",
@@ -1269,11 +1275,31 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
         return;
     }
+
+    if let crate::model::InputMode::ConfirmDeleteRecurring(_) = app.input_mode {
+        let prompt_text = "Delete (t)his instance or (a)ll (template + future)?";
+        let right_text = "esc cancel";
+        let prompt_len = prompt_text.chars().count();
+        let right_len = right_text.chars().count();
+        let pad = (area.width as usize).saturating_sub(prompt_len + right_len);
+        let spans = vec![
+            Span::styled(
+                prompt_text,
+                app.theme.warn_style().add_modifier(Modifier::BOLD),
+            ),
+            Span::raw(" ".repeat(pad)),
+            Span::styled(right_text, app.theme.dim_style()),
+        ];
+        frame.render_widget(Paragraph::new(Line::from(spans)), area);
+        return;
+    }
+
     let prompt_label = match app.input_mode {
         crate::model::InputMode::Editing(_) => app.symbols.prompt_edit,
         crate::model::InputMode::AddingSubtask(_) => app.symbols.prompt_subtask,
         crate::model::InputMode::Rescheduling(_) => app.symbols.prompt_reschedule,
         crate::model::InputMode::Filtering => app.symbols.prompt_filter,
+        crate::model::InputMode::SettingRecurrence(_) => app.symbols.prompt_recurrence,
         _ => app.symbols.prompt_default,
     };
 
@@ -1317,6 +1343,7 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
             crate::model::InputMode::Editing(_) => "",
             crate::model::InputMode::Rescheduling(_) => "tomorrow, fri, +3d, YYYY-MM-DD",
             crate::model::InputMode::Filtering => "#tag, ! (empty clears)",
+            crate::model::InputMode::SettingRecurrence(_) => "daily, weekdays, weekly, off",
             _ => "What needs doing today?",
         };
         spans.push(Span::styled(placeholder, app.theme.dim_style()));
@@ -1513,6 +1540,13 @@ fn format_todo_row(
         0
     };
 
+    let is_recurring = todo.recurring_id.is_some();
+    let repeat_len = if is_recurring {
+        symbols.repeat.chars().count()
+    } else {
+        0
+    };
+
     let checkbox_len = symbols.check_done.chars().count();
     let has_note = todo.note.as_ref().is_some_and(|n| !n.trim().is_empty());
     let note_len = if has_note { 2 } else { 0 };
@@ -1526,7 +1560,15 @@ fn format_todo_row(
     };
 
     let avail_total = max_width.saturating_sub(
-        marker_len + connector_len + checkbox_len + pin_len + prio_len + prog_len + note_len + 1,
+        marker_len
+            + connector_len
+            + checkbox_len
+            + pin_len
+            + repeat_len
+            + prio_len
+            + prog_len
+            + note_len
+            + 1,
     );
 
     let can_show_tags = show_tags && terminal_width >= 60 && !todo.tags.is_empty();
@@ -1574,6 +1616,9 @@ fn format_todo_row(
     spans.push(checkbox);
     if is_pinned {
         spans.push(Span::styled(symbols.focus_marker, theme.dim_style()));
+    }
+    if is_recurring {
+        spans.push(Span::styled(symbols.repeat, theme.dim_style()));
     }
     if prio_len > 0 {
         spans.push(Span::styled(prio_str, prio_style));
@@ -1663,6 +1708,13 @@ fn format_todo_row_history(
         0
     };
 
+    let is_recurring = todo.recurring_id.is_some();
+    let repeat_len = if is_recurring {
+        symbols.repeat.chars().count()
+    } else {
+        0
+    };
+
     let checkbox_len = symbols.check_done.chars().count();
     let suffix_str = time_str.unwrap_or("").to_string();
     let suffix_len = if suffix_str.is_empty() {
@@ -1687,6 +1739,7 @@ fn format_todo_row_history(
             + connector_len
             + checkbox_len
             + pin_len
+            + repeat_len
             + prio_len
             + prog_len
             + suffix_len
@@ -1740,6 +1793,7 @@ fn format_todo_row_history(
             + connector_len
             + checkbox_len
             + pin_len
+            + repeat_len
             + prio_len
             + text_truncated.chars().count()
             + prog_len
@@ -1755,6 +1809,9 @@ fn format_todo_row_history(
     spans.push(checkbox);
     if is_pinned {
         spans.push(Span::styled(symbols.focus_marker, theme.dim_style()));
+    }
+    if is_recurring {
+        spans.push(Span::styled(symbols.repeat, theme.dim_style()));
     }
     if prio_len > 0 {
         spans.push(Span::styled(prio_str, prio_style));
@@ -2306,6 +2363,12 @@ fn build_right_help_lines(
         help_entry(
             &keymap.hint(crate::keymap::Action::ToggleFocus),
             "toggle focus task",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::Recurrence),
+            "set recurrence",
             12,
             theme,
         ),
@@ -3461,5 +3524,68 @@ mod tests {
             .collect();
 
         assert!(content_ascii.contains("> Focus: Today task"));
+    }
+
+    #[test]
+    fn test_render_recurring_glyph_and_delete_prompt() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let mut app = App::new_for_test_with_date(Vec::new(), today);
+
+        app.todos.push(Todo {
+            id: 1,
+            text: "Daily standup".to_string(),
+            created_date: today,
+            done: false,
+            recurring_id: Some(100),
+            ..Default::default()
+        });
+        app.recurring.push(crate::model::Recurring {
+            id: 100,
+            text: "Daily standup".to_string(),
+            tags: vec![],
+            priority: 0,
+            rule: crate::model::RecurrenceRule::Daily,
+            anchor: today,
+            last_materialized: Some(today),
+        });
+
+        // 1. Unicode mode renders '↻'
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content.contains('↻'));
+
+        // 2. ASCII mode renders '~'
+        app.symbols = Symbols::ascii();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_ascii: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content_ascii.contains('~'));
+
+        // 3. ConfirmDeleteRecurring prompt
+        app.input_mode = InputMode::ConfirmDeleteRecurring(1);
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_prompt: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content_prompt.contains("Delete (t)his instance or (a)ll (template + future)?"));
+        assert!(content_prompt.contains("esc cancel"));
     }
 }

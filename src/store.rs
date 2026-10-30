@@ -1,6 +1,6 @@
-use chrono::{DateTime, Local, NaiveDate};
+use chrono::{DateTime, Datelike, Local, NaiveDate};
 
-use crate::model::{Filter, Row, SortMode, Todo};
+use crate::model::{Filter, RecurrenceRule, Recurring, Row, SortMode, Todo};
 
 /// Returns all tasks created on `date`, preserving their order in `todos`.
 pub fn tasks_for_date(todos: &[Todo], date: NaiveDate) -> Vec<&Todo> {
@@ -414,6 +414,82 @@ pub fn match_task_by_text<'a>(
     }
 }
 
+/// Materializes instances for any template whose next occurrence is on or before `today`,
+/// up to `today` (never ahead into the future). Missed days each get an instance on their date.
+/// If an instance already exists on a target date (e.g. from a previous run), it is not duplicated.
+/// `last_materialized` is updated on the template.
+/// Returns the number of newly materialized instances.
+pub fn materialize_recurring(
+    todos: &mut Vec<Todo>,
+    recurring: &mut [Recurring],
+    next_id: &mut u64,
+    today: NaiveDate,
+) -> usize {
+    let mut added = 0;
+
+    for tpl in recurring.iter_mut() {
+        if tpl.anchor > today {
+            continue;
+        }
+
+        let mut cur = match tpl.last_materialized {
+            Some(last_mat) => match last_mat.succ_opt() {
+                Some(next_day) => next_day,
+                None => continue,
+            },
+            None => tpl.anchor,
+        };
+
+        if cur > today {
+            continue;
+        }
+
+        while cur <= today {
+            let is_match = match tpl.rule {
+                RecurrenceRule::Daily => true,
+                RecurrenceRule::Weekdays => {
+                    let wd = cur.weekday();
+                    wd != chrono::Weekday::Sat && wd != chrono::Weekday::Sun
+                }
+                RecurrenceRule::Weekly => cur.weekday() == tpl.anchor.weekday(),
+            };
+
+            if is_match {
+                let exists = todos
+                    .iter()
+                    .any(|t| t.recurring_id == Some(tpl.id) && t.created_date == cur);
+                if !exists {
+                    todos.push(Todo {
+                        id: *next_id,
+                        text: tpl.text.clone(),
+                        created_date: cur,
+                        done: false,
+                        done_at: None,
+                        priority: tpl.priority,
+                        tags: tpl.tags.clone(),
+                        note: None,
+                        parent: None,
+                        recurring_id: Some(tpl.id),
+                    });
+                    *next_id += 1;
+                    added += 1;
+                }
+            }
+
+            match cur.succ_opt() {
+                Some(next_day) => cur = next_day,
+                None => break,
+            }
+        }
+
+        if tpl.last_materialized.is_none_or(|lm| lm < today) {
+            tpl.last_materialized = Some(today);
+        }
+    }
+
+    added
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -575,5 +651,74 @@ mod tests {
                 Row { id: 2, depth: 1 },
             ]
         );
+    }
+
+    #[test]
+    fn test_materialize_recurring_rules_and_no_duplication() {
+        let monday = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        let friday = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let next_monday = NaiveDate::from_ymd_opt(2026, 11, 2).unwrap();
+
+        let mut todos = Vec::new();
+        let mut recurring = vec![
+            Recurring {
+                id: 10,
+                text: "Daily sync".to_string(),
+                tags: vec!["work".to_string()],
+                priority: 1,
+                rule: RecurrenceRule::Daily,
+                anchor: monday,
+                last_materialized: Some(monday),
+            },
+            Recurring {
+                id: 20,
+                text: "Weekday check".to_string(),
+                tags: vec![],
+                priority: 0,
+                rule: RecurrenceRule::Weekdays,
+                anchor: friday,
+                last_materialized: Some(friday),
+            },
+            Recurring {
+                id: 30,
+                text: "Weekly planning".to_string(),
+                tags: vec![],
+                priority: 2,
+                rule: RecurrenceRule::Weekly,
+                anchor: monday,
+                last_materialized: Some(monday),
+            },
+        ];
+
+        let mut next_id = 1;
+        let added = materialize_recurring(&mut todos, &mut recurring, &mut next_id, friday);
+        assert_eq!(added, 4);
+        assert_eq!(todos.len(), 4);
+        for t in &todos {
+            assert_eq!(t.recurring_id, Some(10));
+        }
+
+        let added_again = materialize_recurring(&mut todos, &mut recurring, &mut next_id, friday);
+        assert_eq!(added_again, 0);
+        assert_eq!(todos.len(), 4);
+
+        let added_nov =
+            materialize_recurring(&mut todos, &mut recurring, &mut next_id, next_monday);
+        assert_eq!(added_nov, 5);
+        assert_eq!(todos.len(), 9);
+
+        let weekday_dates: Vec<NaiveDate> = todos
+            .iter()
+            .filter(|t| t.recurring_id == Some(20))
+            .map(|t| t.created_date)
+            .collect();
+        assert_eq!(weekday_dates, vec![next_monday]);
+
+        let weekly_dates: Vec<NaiveDate> = todos
+            .iter()
+            .filter(|t| t.recurring_id == Some(30))
+            .map(|t| t.created_date)
+            .collect();
+        assert_eq!(weekly_dates, vec![next_monday]);
     }
 }
