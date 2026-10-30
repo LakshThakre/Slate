@@ -178,6 +178,24 @@ pub struct KeysConfig {
     pub overrides: HashMap<String, toml::Value>,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct TasksConfig {
+    #[serde(default)]
+    pub sort: crate::model::SortMode,
+
+    #[serde(default = "default_true")]
+    pub show_tags: bool,
+}
+
+impl Default for TasksConfig {
+    fn default() -> Self {
+        Self {
+            sort: crate::model::SortMode::Manual,
+            show_tags: true,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
 pub struct Config {
     #[serde(default = "default_theme")]
@@ -206,6 +224,9 @@ pub struct Config {
 
     #[serde(default)]
     pub keys: KeysConfig,
+
+    #[serde(default)]
+    pub tasks: TasksConfig,
 }
 
 impl Default for Config {
@@ -220,6 +241,7 @@ impl Default for Config {
             ui: UiConfig::default(),
             progress: ProgressConfig::default(),
             keys: KeysConfig::default(),
+            tasks: TasksConfig::default(),
         }
     }
 }
@@ -307,6 +329,7 @@ impl Config {
             "ui",
             "progress",
             "keys",
+            "tasks",
         ];
 
         for k in table.keys() {
@@ -554,6 +577,44 @@ impl Config {
                 }
             } else {
                 warnings.push("[keys] must be a table".to_string());
+            }
+        }
+
+        // 10. [tasks]
+        if let Some(tasks_val) = table.get("tasks") {
+            if let Some(tasks_table) = tasks_val.as_table() {
+                let allowed_tasks_keys = ["sort", "show_tags"];
+                for k in tasks_table.keys() {
+                    if !allowed_tasks_keys.contains(&k.as_str()) {
+                        warnings.push(format!("Unknown tasks config key: '{k}'"));
+                    }
+                }
+
+                if let Some(sort_val) = tasks_table.get("sort") {
+                    if let Some(s) = sort_val.as_str() {
+                        match s.to_ascii_lowercase().as_str() {
+                            "manual" => config.tasks.sort = crate::model::SortMode::Manual,
+                            "priority" => config.tasks.sort = crate::model::SortMode::Priority,
+                            _ => {
+                                warnings.push(format!(
+                                    "Invalid tasks.sort '{s}': expected manual or priority · using manual"
+                                ));
+                            }
+                        }
+                    } else {
+                        warnings.push("tasks.sort must be a string".to_string());
+                    }
+                }
+
+                if let Some(st_val) = tasks_table.get("show_tags") {
+                    if let Some(b) = st_val.as_bool() {
+                        config.tasks.show_tags = b;
+                    } else {
+                        warnings.push("tasks.show_tags must be a boolean · using true".to_string());
+                    }
+                }
+            } else {
+                warnings.push("[tasks] must be a table".to_string());
             }
         }
 

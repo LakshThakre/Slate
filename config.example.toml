@@ -59,6 +59,10 @@ symbols = "unicode"
 # hints/shortcuts are omitted from the footer and help overlay. Historical data is preserved.
 show_history = true
 
+# Show or hide the Upcoming view and tab
+# Default: true
+show_upcoming = true
+
 # Opt-in mouse support
 # Default: false
 # When true, enables mouse capture for clicking tabs, selecting task rows, clicking checkboxes,
@@ -80,6 +84,16 @@ width = 10
 # Show the count text alongside the progress bar (e.g. "2 of 3 done")
 # Default: true
 show_count = true
+
+[tasks]
+# Task list sort order
+# Options: "manual" (default), "priority"
+# Sorting is a view projection and never rewrites stored order.
+sort = "manual"
+
+# Show or hide dim tags inline in task rows
+# Default: true
+show_tags = true
 
 [keys]
 # Keybinding navigation mode

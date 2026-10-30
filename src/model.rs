@@ -75,6 +75,24 @@ pub enum SortMode {
     Priority,
 }
 
+impl std::fmt::Display for SortMode {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            SortMode::Manual => write!(f, "manual"),
+            SortMode::Priority => write!(f, "priority"),
+        }
+    }
+}
+
+impl SortMode {
+    pub fn next(self) -> Self {
+        match self {
+            SortMode::Manual => SortMode::Priority,
+            SortMode::Priority => SortMode::Manual,
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct Filter {
     pub tags: Vec<String>,

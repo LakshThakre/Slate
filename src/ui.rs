@@ -338,6 +338,14 @@ fn draw_header(app: &mut App, frame: &mut Frame, area: Rect) {
         });
     }
 
+    if app.sort_mode != crate::model::SortMode::Manual {
+        header_spans.push(Span::raw("    "));
+        header_spans.push(Span::styled(
+            format!("sort: {}", app.sort_mode),
+            app.theme.dim_style(),
+        ));
+    }
+
     let line = Line::from(header_spans);
 
     frame.render_widget(Paragraph::new(line), area);
@@ -1224,8 +1232,26 @@ fn format_todo_row(
         Span::styled(symbols.check_todo, theme.dim_style())
     };
 
+    let (prio_str, prio_len, prio_style) = match todo.priority {
+        1 => {
+            if todo.done {
+                ("! ", 2, theme.dim_style())
+            } else {
+                ("! ", 2, theme.priority_1_style())
+            }
+        }
+        2 => {
+            if todo.done {
+                ("!! ", 3, theme.dim_style())
+            } else {
+                ("!! ", 3, theme.priority_2_style())
+            }
+        }
+        _ => ("", 0, Style::default()),
+    };
+
     let checkbox_len = symbols.check_done.chars().count();
-    let avail = max_width.saturating_sub(marker_len + checkbox_len + 1);
+    let avail = max_width.saturating_sub(marker_len + checkbox_len + prio_len + 1);
     let text_truncated = truncate_text(&todo.text, avail, symbols.ellipsis);
 
     let text_span = if todo.done {
@@ -1237,7 +1263,13 @@ fn format_todo_row(
         Span::styled(text_truncated, theme.text_style())
     };
 
-    ListItem::new(Line::from(vec![marker, checkbox, text_span]))
+    let mut spans = vec![marker, checkbox];
+    if prio_len > 0 {
+        spans.push(Span::styled(prio_str, prio_style));
+    }
+    spans.push(text_span);
+
+    ListItem::new(Line::from(spans))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -1273,6 +1305,24 @@ fn format_todo_row_history(
         Span::styled(symbols.check_todo, theme.dim_style())
     };
 
+    let (prio_str, prio_len, prio_style) = match todo.priority {
+        1 => {
+            if todo.done {
+                ("! ", 2, theme.dim_style())
+            } else {
+                ("! ", 2, theme.priority_1_style())
+            }
+        }
+        2 => {
+            if todo.done {
+                ("!! ", 3, theme.dim_style())
+            } else {
+                ("!! ", 3, theme.priority_2_style())
+            }
+        }
+        _ => ("", 0, Style::default()),
+    };
+
     let checkbox_len = symbols.check_done.chars().count();
     let suffix_str = time_str.unwrap_or("").to_string();
     let suffix_len = if suffix_str.is_empty() {
@@ -1281,7 +1331,7 @@ fn format_todo_row_history(
         suffix_str.chars().count() + 2
     };
 
-    let avail = max_width.saturating_sub(marker_len + checkbox_len + suffix_len + 1);
+    let avail = max_width.saturating_sub(marker_len + checkbox_len + prio_len + suffix_len + 1);
     let text_truncated = truncate_text(&todo.text, avail, symbols.ellipsis);
 
     let text_span = if todo.done {
@@ -1293,10 +1343,16 @@ fn format_todo_row_history(
         Span::styled(text_truncated.clone(), theme.text_style())
     };
 
-    let pad_len = max_width
-        .saturating_sub(marker_len + checkbox_len + text_truncated.chars().count() + suffix_len);
+    let pad_len = max_width.saturating_sub(
+        marker_len + checkbox_len + prio_len + text_truncated.chars().count() + suffix_len,
+    );
 
-    let mut spans = vec![marker, checkbox, text_span, Span::raw(" ".repeat(pad_len))];
+    let mut spans = vec![marker, checkbox];
+    if prio_len > 0 {
+        spans.push(Span::styled(prio_str, prio_style));
+    }
+    spans.push(text_span);
+    spans.push(Span::raw(" ".repeat(pad_len)));
 
     if !suffix_str.is_empty() {
         spans.push(Span::styled(suffix_str, theme.dim_style()));
@@ -1592,6 +1648,24 @@ fn build_right_help_lines(
         help_entry(
             &keymap.hint(crate::keymap::Action::Toggle),
             "toggle complete",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::CyclePriority),
+            "cycle priority",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::CycleSort),
+            "cycle sort mode",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::Reschedule),
+            "reschedule task",
             12,
             theme,
         ),
@@ -2427,5 +2501,46 @@ mod tests {
             app.current_view = crate::model::View::History;
             terminal.draw(|f| render(&mut app, f)).unwrap();
         }
+    }
+
+    #[test]
+    fn test_render_priorities_and_header_sort() {
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Important task".to_string(),
+                    created_date: today,
+                    priority: 1,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Urgent task".to_string(),
+                    created_date: today,
+                    priority: 2,
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        app.sort_mode = crate::model::SortMode::Priority;
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content.contains("sort: priority"));
+        assert!(content.contains("! Important task"));
+        assert!(content.contains("!! Urgent task"));
     }
 }

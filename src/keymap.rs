@@ -28,10 +28,12 @@ pub enum Action {
     FocusTasks,
     FocusDates,
     Reschedule,
+    CyclePriority,
+    CycleSort,
 }
 
 impl Action {
-    pub const ALL: [Action; 23] = [
+    pub const ALL: [Action; 25] = [
         Action::Quit,
         Action::Add,
         Action::Edit,
@@ -55,6 +57,8 @@ impl Action {
         Action::FocusTasks,
         Action::FocusDates,
         Action::Reschedule,
+        Action::CyclePriority,
+        Action::CycleSort,
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -82,6 +86,8 @@ impl Action {
             "focus_tasks" => Some(Action::FocusTasks),
             "focus_dates" => Some(Action::FocusDates),
             "reschedule" => Some(Action::Reschedule),
+            "cycle_priority" | "priority" => Some(Action::CyclePriority),
+            "cycle_sort" | "sort" => Some(Action::CycleSort),
             _ => None,
         }
     }
@@ -111,6 +117,8 @@ impl Action {
             Action::FocusTasks => "focus_tasks",
             Action::FocusDates => "focus_dates",
             Action::Reschedule => "reschedule",
+            Action::CyclePriority => "cycle_priority",
+            Action::CycleSort => "cycle_sort",
         }
     }
 }
@@ -590,6 +598,20 @@ impl Keymap {
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
+                (
+                    Action::CyclePriority,
+                    vec![KeyChord {
+                        code: KeyCode::Char('p'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::CycleSort,
+                    vec![KeyChord {
+                        code: KeyCode::Char('s'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
             KeyMode::Arrows => vec![
                 (
@@ -771,6 +793,20 @@ impl Keymap {
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
+                (
+                    Action::CyclePriority,
+                    vec![KeyChord {
+                        code: KeyCode::Char('p'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::CycleSort,
+                    vec![KeyChord {
+                        code: KeyCode::Char('s'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
         }
     }
@@ -945,6 +981,8 @@ impl Keymap {
             Action::FocusTasks => "enter/l".to_string(),
             Action::FocusDates => "h".to_string(),
             Action::Reschedule => "t".to_string(),
+            Action::CyclePriority => "p".to_string(),
+            Action::CycleSort => "s".to_string(),
         }
     }
 }

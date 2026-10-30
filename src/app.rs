@@ -153,7 +153,7 @@ impl App {
             selected_upcoming_date: None,
             upcoming_pane: HistoryPane::Dates,
             prompt_error: None,
-            sort_mode: crate::model::SortMode::Manual,
+            sort_mode: config.tasks.sort,
             filter: crate::model::Filter::default(),
             status_message: None,
             undo_stack: Vec::new(),
@@ -637,6 +637,10 @@ impl App {
     }
 
     pub fn reorder_today(&mut self, down: bool) {
+        if self.sort_mode != crate::model::SortMode::Manual {
+            self.set_transient_message("Reorder works in manual sort");
+            return;
+        }
         let today = self.today;
         let selected = self.today_selected_index;
         if !crate::store::can_reorder_day_task(&self.todos, today, selected, down) {
@@ -649,6 +653,10 @@ impl App {
     }
 
     pub fn reorder_history(&mut self, down: bool) {
+        if self.sort_mode != crate::model::SortMode::Manual {
+            self.set_transient_message("Reorder works in manual sort");
+            return;
+        }
         let dates = self.dates_list();
         if let Some(&selected_date) = dates.get(self.history_date_index) {
             let selected = self.history_todo_index;
@@ -1001,6 +1009,10 @@ impl App {
     }
 
     pub fn reorder_upcoming(&mut self, down: bool) {
+        if self.sort_mode != crate::model::SortMode::Manual {
+            self.set_transient_message("Reorder works in manual sort");
+            return;
+        }
         let dates = self.upcoming_dates_list();
         if let Some(&selected_date) = dates.get(self.upcoming_date_index) {
             let selected = self.upcoming_todo_index;
@@ -1010,6 +1022,47 @@ impl App {
             self.upcoming_todo_id = self.visible_rows_upcoming().get(selected).map(|r| r.id);
             self.mutate(|todos| {
                 crate::store::reorder_day_task(todos, selected_date, selected, down);
+            });
+        }
+    }
+
+    pub fn selected_task_id(&self) -> Option<u64> {
+        match self.current_view {
+            View::Today => self
+                .visible_rows_today()
+                .get(self.today_selected_index)
+                .map(|r| r.id),
+            View::Upcoming => {
+                if self.upcoming_pane == HistoryPane::Todos {
+                    self.visible_rows_upcoming()
+                        .get(self.upcoming_todo_index)
+                        .map(|r| r.id)
+                } else {
+                    None
+                }
+            }
+            View::History => {
+                if self.history_pane == HistoryPane::Todos {
+                    self.visible_rows_history()
+                        .get(self.history_todo_index)
+                        .map(|r| r.id)
+                } else {
+                    None
+                }
+            }
+        }
+    }
+
+    pub fn cycle_selected_priority(&mut self) {
+        if let Some(id) = self.selected_task_id() {
+            self.mutate(|todos| {
+                if let Some(t) = todos.iter_mut().find(|t| t.id == id) {
+                    t.priority = match t.priority {
+                        0 => 1,
+                        1 => 2,
+                        _ => 0,
+                    };
+                }
             });
         }
     }
@@ -1704,36 +1757,20 @@ impl App {
                 self.prompt_error = None;
             }
             crate::keymap::Action::Reschedule => {
-                let target_id = match self.current_view {
-                    View::Today => self
-                        .visible_rows_today()
-                        .get(self.today_selected_index)
-                        .map(|r| r.id),
-                    View::Upcoming => {
-                        if self.upcoming_pane == HistoryPane::Todos {
-                            self.visible_rows_upcoming()
-                                .get(self.upcoming_todo_index)
-                                .map(|r| r.id)
-                        } else {
-                            None
-                        }
-                    }
-                    View::History => {
-                        if self.history_pane == HistoryPane::Todos {
-                            self.visible_rows_history()
-                                .get(self.history_todo_index)
-                                .map(|r| r.id)
-                        } else {
-                            None
-                        }
-                    }
-                };
+                let target_id = self.selected_task_id();
                 if let Some(id) = target_id {
                     self.input_mode = InputMode::Rescheduling(id);
                     self.input_buffer.clear();
                     self.cursor_position = 0;
                     self.prompt_error = None;
                 }
+            }
+            crate::keymap::Action::CyclePriority => {
+                self.cycle_selected_priority();
+            }
+            crate::keymap::Action::CycleSort => {
+                self.sort_mode = self.sort_mode.next();
+                self.re_resolve_selections();
             }
             crate::keymap::Action::Undo => {
                 self.undo();
@@ -3625,5 +3662,96 @@ mod tests {
 
         // Task moved to upcoming, today is now empty
         assert!(app.visible_rows_today().is_empty());
+    }
+
+    #[test]
+    fn test_cycle_priority_with_p_key() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![Todo {
+                id: 1,
+                text: "Task".to_string(),
+                created_date: today,
+                priority: 0,
+                ..Default::default()
+            }],
+            today,
+        );
+
+        // Press 'p': 0 -> 1
+        app.handle_key(key_press(KeyCode::Char('p')));
+        assert_eq!(app.todos[0].priority, 1);
+
+        // Press 'p': 1 -> 2
+        app.handle_key(key_press(KeyCode::Char('p')));
+        assert_eq!(app.todos[0].priority, 2);
+
+        // Press 'p': 2 -> 0
+        app.handle_key(key_press(KeyCode::Char('p')));
+        assert_eq!(app.todos[0].priority, 0);
+
+        // Undo restores to priority 2
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.todos[0].priority, 2);
+    }
+
+    #[test]
+    fn test_cycle_sort_and_reorder_guard() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Low priority".to_string(),
+                    created_date: today,
+                    priority: 0,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "High priority".to_string(),
+                    created_date: today,
+                    priority: 2,
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        // In Manual sort, visible rows are in stored order [1, 2]
+        assert_eq!(app.sort_mode, crate::model::SortMode::Manual);
+        let rows = app.visible_rows_today();
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[1].id, 2);
+
+        // Press 's': switch to Priority sort
+        app.handle_key(key_press(KeyCode::Char('s')));
+        assert_eq!(app.sort_mode, crate::model::SortMode::Priority);
+
+        // In Priority sort, visible rows are [2, 1]
+        let rows = app.visible_rows_today();
+        assert_eq!(rows[0].id, 2);
+        assert_eq!(rows[1].id, 1);
+
+        // Stored order is NOT rewritten
+        assert_eq!(app.todos[0].id, 1);
+        assert_eq!(app.todos[1].id, 2);
+
+        // Attempting to reorder while in Priority sort should be blocked
+        app.handle_key(key_press(KeyCode::Char('J')));
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Reorder works in manual sort")
+        );
+        // Stored order unchanged
+        assert_eq!(app.todos[0].id, 1);
+        assert_eq!(app.todos[1].id, 2);
+
+        // Press 's' again: back to Manual sort
+        app.handle_key(key_press(KeyCode::Char('s')));
+        assert_eq!(app.sort_mode, crate::model::SortMode::Manual);
+        let rows = app.visible_rows_today();
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[1].id, 2);
     }
 }

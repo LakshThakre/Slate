@@ -172,6 +172,26 @@ impl Theme {
             Style::default().fg(self.warn)
         }
     }
+
+    pub fn priority_1_style(&self) -> Style {
+        if self.is_mono {
+            Style::default()
+                .fg(Color::Reset)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default().fg(self.accent)
+        }
+    }
+
+    pub fn priority_2_style(&self) -> Style {
+        if self.is_mono {
+            Style::default()
+                .fg(Color::Reset)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default().fg(self.warn)
+        }
+    }
 }
 
 pub fn supports_truecolor(env: &impl EnvLookup) -> bool {
