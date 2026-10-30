@@ -1,15 +1,100 @@
 use chrono::{DateTime, Local, NaiveDate};
 
-use crate::model::Todo;
+use crate::model::{Filter, Row, SortMode, Todo};
 
 /// Returns all tasks created on `date`, preserving their order in `todos`.
 pub fn tasks_for_date(todos: &[Todo], date: NaiveDate) -> Vec<&Todo> {
     todos.iter().filter(|t| t.created_date == date).collect()
 }
 
-/// Generates the next sequential ID for a task.
+/// Computes the visible projected rows for a given date, filter, and sort mode.
+pub fn visible_rows(todos: &[Todo], date: NaiveDate, filter: &Filter, sort: SortMode) -> Vec<Row> {
+    let day_tasks: Vec<&Todo> = todos.iter().filter(|t| t.created_date == date).collect();
+
+    let mut top_level: Vec<&Todo> = Vec::new();
+    let mut subtasks_map: std::collections::HashMap<u64, Vec<&Todo>> =
+        std::collections::HashMap::new();
+
+    for &task in &day_tasks {
+        if let Some(parent_id) = task.parent {
+            subtasks_map.entry(parent_id).or_default().push(task);
+        } else {
+            top_level.push(task);
+        }
+    }
+
+    let mut filtered_top: Vec<&Todo> = Vec::new();
+    for &parent in &top_level {
+        let parent_matches = filter.matches(parent);
+        let subtasks = subtasks_map.get(&parent.id);
+        let any_subtask_matches =
+            subtasks.is_some_and(|subs| subs.iter().any(|s| filter.matches(s)));
+
+        if filter.is_empty() || parent_matches || any_subtask_matches {
+            filtered_top.push(parent);
+        }
+    }
+
+    match sort {
+        SortMode::Manual => {}
+        SortMode::Priority => {
+            filtered_top.sort_by_key(|b| std::cmp::Reverse(b.priority));
+        }
+    }
+
+    let mut rows = Vec::new();
+    for parent in filtered_top {
+        rows.push(Row {
+            id: parent.id,
+            depth: 0,
+        });
+
+        if let Some(subtasks) = subtasks_map.get(&parent.id) {
+            let parent_matches = filter.matches(parent);
+            for &subtask in subtasks {
+                if filter.is_empty() || parent_matches || filter.matches(subtask) {
+                    rows.push(Row {
+                        id: subtask.id,
+                        depth: 1,
+                    });
+                }
+            }
+        }
+    }
+
+    rows
+}
+
+/// Generates the next sequential ID for a task based on current slice.
 pub fn next_task_id(todos: &[Todo]) -> u64 {
     todos.iter().map(|t| t.id).max().unwrap_or(0) + 1
+}
+
+/// Adds a new task for the given date with a specific ID.
+pub fn add_task_with_id(
+    todos: &mut Vec<Todo>,
+    id: u64,
+    text: &str,
+    date: NaiveDate,
+) -> Option<u64> {
+    let clean_text = text.trim();
+    if clean_text.is_empty() {
+        return None;
+    }
+
+    todos.push(Todo {
+        id,
+        text: clean_text.to_string(),
+        created_date: date,
+        done: false,
+        done_at: None,
+        priority: 0,
+        tags: Vec::new(),
+        note: None,
+        parent: None,
+        recurring_id: None,
+    });
+    Some(id)
 }
 
 /// Adds a new task for the given date. Returns the new task's ID if added.
@@ -20,14 +105,7 @@ pub fn add_task(todos: &mut Vec<Todo>, text: &str, date: NaiveDate) -> Option<u6
     }
 
     let id = next_task_id(todos);
-    todos.push(Todo {
-        id,
-        text: clean_text.to_string(),
-        created_date: date,
-        done: false,
-        done_at: None,
-    });
-    Some(id)
+    add_task_with_id(todos, id, clean_text, date)
 }
 
 /// Sets the completion state of a task by ID.
@@ -186,10 +264,6 @@ pub fn get_task_by_1based_index(
 }
 
 /// Resolves a case-insensitive substring match against the tasks for `date`.
-/// Returns:
-/// - `Ok(Some(&Todo))` if exactly one task matches.
-/// - `Ok(None)` if no task matches.
-/// - `Err(candidates)` if multiple tasks match, where candidates are `(1-based-index, task_text)`.
 pub fn match_task_by_text<'a>(
     todos: &'a [Todo],
     date: NaiveDate,
@@ -269,7 +343,7 @@ mod tests {
         let id = add_task(&mut todos, "Task to edit", date).unwrap();
         assert!(edit_task(&mut todos, id, "Updated text"));
         assert_eq!(todos[0].text, "Updated text");
-        assert!(!edit_task(&mut todos, id, "  ")); // Empty edit rejected
+        assert!(!edit_task(&mut todos, id, "  "));
 
         let deleted = delete_task(&mut todos, id);
         assert!(deleted.is_some());
@@ -313,18 +387,68 @@ mod tests {
         );
         assert_eq!(get_task_by_1based_index(&todos, date, 4), None);
 
-        // Unique match
         let m = match_task_by_text(&todos, date, "milk").unwrap();
         assert_eq!(m.unwrap().text, "Buy milk");
 
-        // No match
         let none = match_task_by_text(&todos, date, "cookies").unwrap();
         assert!(none.is_none());
 
-        // Ambiguous match
         let err = match_task_by_text(&todos, date, "buy").unwrap_err();
         assert_eq!(err.len(), 2);
         assert_eq!(err[0], (1, "Buy milk".to_string()));
         assert_eq!(err[1], (2, "Buy fresh bread".to_string()));
+    }
+
+    #[test]
+    fn test_visible_rows_projection() {
+        let date = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Top 1".to_string(),
+                created_date: date,
+                done: false,
+                priority: 0,
+                ..Default::default()
+            },
+            Todo {
+                id: 2,
+                text: "Sub 1.1".to_string(),
+                created_date: date,
+                done: false,
+                parent: Some(1),
+                ..Default::default()
+            },
+            Todo {
+                id: 3,
+                text: "Top 2".to_string(),
+                created_date: date,
+                done: false,
+                priority: 2,
+                ..Default::default()
+            },
+        ];
+
+        // Manual sort: Top 1 (with sub 1.1), then Top 2
+        let rows_manual = visible_rows(&todos, date, &Filter::default(), SortMode::Manual);
+        assert_eq!(
+            rows_manual,
+            vec![
+                Row { id: 1, depth: 0 },
+                Row { id: 2, depth: 1 },
+                Row { id: 3, depth: 0 },
+            ]
+        );
+
+        // Priority sort: Top 2 (prio 2), then Top 1 (prio 0 with sub 1.1)
+        let rows_priority = visible_rows(&todos, date, &Filter::default(), SortMode::Priority);
+        assert_eq!(
+            rows_priority,
+            vec![
+                Row { id: 3, depth: 0 },
+                Row { id: 1, depth: 0 },
+                Row { id: 2, depth: 1 },
+            ]
+        );
     }
 }

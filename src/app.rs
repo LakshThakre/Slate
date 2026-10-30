@@ -4,7 +4,7 @@ use chrono::{Local, NaiveDate};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyModifiers};
 
 use crate::model::{HistoryPane, InputMode, Todo, View};
-use crate::storage::{load_todos, save_todos};
+use crate::storage::load_todos;
 
 use std::path::PathBuf;
 
@@ -12,14 +12,22 @@ pub struct App {
     pub data_path: PathBuf,
     pub today: NaiveDate,
     pub todos: Vec<Todo>,
+    pub next_id: u64,
+    pub recurring: Vec<crate::model::Recurring>,
+    pub focus: Option<u64>,
+    pub original_version: u32,
     pub current_view: View,
     pub history_pane: HistoryPane,
     pub input_mode: InputMode,
     pub input_buffer: String,
     pub cursor_position: usize,
     pub today_selected_index: usize,
+    pub today_selected_id: Option<u64>,
     pub history_date_index: usize,
     pub history_todo_index: usize,
+    pub history_todo_id: Option<u64>,
+    pub sort_mode: crate::model::SortMode,
+    pub filter: crate::model::Filter,
     pub status_message: Option<String>,
     pub undo_stack: Vec<Vec<Todo>>,
     pub redo_stack: Vec<Vec<Todo>>,
@@ -118,14 +126,22 @@ impl App {
             data_path,
             today,
             todos: load_res.todos,
+            next_id: load_res.next_id,
+            recurring: load_res.recurring,
+            focus: load_res.focus,
+            original_version: load_res.original_version,
             current_view: View::Today,
             history_pane: HistoryPane::Dates,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             cursor_position: 0,
             today_selected_index: 0,
+            today_selected_id: None,
             history_date_index: 0,
             history_todo_index: 0,
+            history_todo_id: None,
+            sort_mode: crate::model::SortMode::Manual,
+            filter: crate::model::Filter::default(),
             status_message: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -162,18 +178,27 @@ impl App {
 
     #[cfg(test)]
     pub fn new_for_test_with_date(todos: Vec<Todo>, today: NaiveDate) -> Self {
+        let next_id = todos.iter().map(|t| t.id).max().unwrap_or(0) + 1;
         let mut app = Self {
             data_path: PathBuf::from("dummy_test.json"),
             today,
             todos,
+            next_id,
+            recurring: Vec::new(),
+            focus: None,
+            original_version: crate::storage::migrate::CURRENT_SCHEMA_VERSION,
             current_view: View::Today,
             history_pane: HistoryPane::Dates,
             input_mode: InputMode::Normal,
             input_buffer: String::new(),
             cursor_position: 0,
             today_selected_index: 0,
+            today_selected_id: None,
             history_date_index: 0,
             history_todo_index: 0,
+            history_todo_id: None,
+            sort_mode: crate::model::SortMode::Manual,
+            filter: crate::model::Filter::default(),
             status_message: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -202,16 +227,24 @@ impl App {
         if !self.auto_save {
             return;
         }
-        let res = save_todos(
+        let data = crate::storage::StorageData {
+            version: crate::storage::migrate::CURRENT_SCHEMA_VERSION,
+            next_id: self.next_id,
+            todos: self.todos.clone(),
+            recurring: self.recurring.clone(),
+            focus: self.focus,
+        };
+        let res = crate::storage::save_storage_data(
             &self.data_path,
-            &self.todos,
-            self.is_legacy_format,
+            &data,
+            self.original_version,
             self.fingerprint,
             self.is_first_save,
             self.last_backup_time,
         );
         match res {
             Ok(save_res) => {
+                self.original_version = crate::storage::migrate::CURRENT_SCHEMA_VERSION;
                 self.is_legacy_format = false;
                 self.is_first_save = false;
                 self.fingerprint = save_res.new_fingerprint;
@@ -244,43 +277,108 @@ impl App {
         list
     }
 
-    pub fn clamp_selections(&mut self) {
-        let today = self.today;
-        let today_count = self
-            .todos
-            .iter()
-            .filter(|t| t.created_date == today)
-            .count();
-        if today_count == 0 {
+    pub fn visible_rows_today(&self) -> Vec<crate::model::Row> {
+        crate::store::visible_rows(&self.todos, self.today, &self.filter, self.sort_mode)
+    }
+
+    pub fn visible_rows_history(&self) -> Vec<crate::model::Row> {
+        let dates = self.dates_list();
+        if let Some(&date) = dates.get(self.history_date_index) {
+            crate::store::visible_rows(&self.todos, date, &self.filter, self.sort_mode)
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn re_resolve_selections(&mut self) {
+        let rows_today = self.visible_rows_today();
+        if rows_today.is_empty() {
             self.today_selected_index = 0;
-        } else if self.today_selected_index >= today_count {
-            self.today_selected_index = today_count - 1;
+            self.today_selected_id = None;
+        } else if let Some(id) = self.today_selected_id {
+            if let Some(pos) = rows_today.iter().position(|r| r.id == id) {
+                self.today_selected_index = pos;
+            } else {
+                if self.today_selected_index >= rows_today.len() {
+                    self.today_selected_index = rows_today.len() - 1;
+                }
+                self.today_selected_id = rows_today.get(self.today_selected_index).map(|r| r.id);
+            }
+        } else {
+            if self.today_selected_index >= rows_today.len() {
+                self.today_selected_index = rows_today.len() - 1;
+            }
+            self.today_selected_id = rows_today.get(self.today_selected_index).map(|r| r.id);
         }
 
         let dates = self.dates_list();
         if dates.is_empty() {
             self.history_date_index = 0;
             self.selected_history_date = None;
+            self.history_todo_index = 0;
+            self.history_todo_id = None;
         } else {
             if self.history_date_index >= dates.len() {
                 self.history_date_index = dates.len() - 1;
             }
             self.selected_history_date = dates.get(self.history_date_index).copied();
+
+            let rows_hist = self.visible_rows_history();
+            if rows_hist.is_empty() {
+                self.history_todo_index = 0;
+                self.history_todo_id = None;
+            } else if let Some(id) = self.history_todo_id {
+                if let Some(pos) = rows_hist.iter().position(|r| r.id == id) {
+                    self.history_todo_index = pos;
+                } else {
+                    if self.history_todo_index >= rows_hist.len() {
+                        self.history_todo_index = rows_hist.len() - 1;
+                    }
+                    self.history_todo_id = rows_hist.get(self.history_todo_index).map(|r| r.id);
+                }
+            } else {
+                if self.history_todo_index >= rows_hist.len() {
+                    self.history_todo_index = rows_hist.len() - 1;
+                }
+                self.history_todo_id = rows_hist.get(self.history_todo_index).map(|r| r.id);
+            }
+        }
+    }
+
+    pub fn clamp_selections(&mut self) {
+        let rows_today = self.visible_rows_today();
+        if rows_today.is_empty() {
+            self.today_selected_index = 0;
+            self.today_selected_id = None;
+        } else {
+            if self.today_selected_index >= rows_today.len() {
+                self.today_selected_index = rows_today.len() - 1;
+            }
+            self.today_selected_id = rows_today.get(self.today_selected_index).map(|r| r.id);
         }
 
-        if let Some(&selected_date) = dates.get(self.history_date_index) {
-            let date_todos_count = self
-                .todos
-                .iter()
-                .filter(|t| t.created_date == selected_date)
-                .count();
-            if date_todos_count == 0 {
-                self.history_todo_index = 0;
-            } else if self.history_todo_index >= date_todos_count {
-                self.history_todo_index = date_todos_count - 1;
-            }
-        } else {
+        let dates = self.dates_list();
+        if dates.is_empty() {
+            self.history_date_index = 0;
+            self.selected_history_date = None;
             self.history_todo_index = 0;
+            self.history_todo_id = None;
+        } else {
+            if self.history_date_index >= dates.len() {
+                self.history_date_index = dates.len() - 1;
+            }
+            self.selected_history_date = dates.get(self.history_date_index).copied();
+
+            let rows_hist = self.visible_rows_history();
+            if rows_hist.is_empty() {
+                self.history_todo_index = 0;
+                self.history_todo_id = None;
+            } else {
+                if self.history_todo_index >= rows_hist.len() {
+                    self.history_todo_index = rows_hist.len() - 1;
+                }
+                self.history_todo_id = rows_hist.get(self.history_todo_index).map(|r| r.id);
+            }
         }
     }
 
@@ -337,7 +435,7 @@ impl App {
         self.redo_stack.clear();
         f(&mut self.todos);
         self.save();
-        self.clamp_selections();
+        self.re_resolve_selections();
     }
 
     pub fn undo(&mut self) {
@@ -348,7 +446,7 @@ impl App {
             }
             self.todos = prev;
             self.save();
-            self.clamp_selections();
+            self.re_resolve_selections();
             self.set_transient_message("Undone");
         } else {
             self.set_transient_message("Nothing to undo");
@@ -363,7 +461,7 @@ impl App {
             }
             self.todos = next;
             self.save();
-            self.clamp_selections();
+            self.re_resolve_selections();
             self.set_transient_message("Redone");
         } else {
             self.set_transient_message("Nothing to redo");
@@ -371,28 +469,20 @@ impl App {
     }
 
     pub fn start_editing_today(&mut self) {
-        let today = self.today;
-        let today_todos: Vec<&Todo> = self
-            .todos
-            .iter()
-            .filter(|t| t.created_date == today)
-            .collect();
-        if let Some(todo) = today_todos.get(self.today_selected_index) {
-            self.input_mode = InputMode::Editing(todo.id);
-            self.input_buffer = todo.text.clone();
-            self.cursor_position = self.input_buffer.chars().count();
+        let rows = self.visible_rows_today();
+        if let Some(row) = rows.get(self.today_selected_index) {
+            if let Some(todo) = self.todos.iter().find(|t| t.id == row.id) {
+                self.input_mode = InputMode::Editing(todo.id);
+                self.input_buffer = todo.text.clone();
+                self.cursor_position = self.input_buffer.chars().count();
+            }
         }
     }
 
     pub fn start_editing_history(&mut self) {
-        let dates = self.dates_list();
-        if let Some(&selected_date) = dates.get(self.history_date_index) {
-            let date_todos: Vec<&Todo> = self
-                .todos
-                .iter()
-                .filter(|t| t.created_date == selected_date)
-                .collect();
-            if let Some(todo) = date_todos.get(self.history_todo_index) {
+        let rows = self.visible_rows_history();
+        if let Some(row) = rows.get(self.history_todo_index) {
+            if let Some(todo) = self.todos.iter().find(|t| t.id == row.id) {
                 self.input_mode = InputMode::Editing(todo.id);
                 self.input_buffer = todo.text.clone();
                 self.cursor_position = self.input_buffer.chars().count();
@@ -441,14 +531,10 @@ impl App {
         if !crate::store::can_reorder_day_task(&self.todos, today, selected, down) {
             return;
         }
+        self.today_selected_id = self.visible_rows_today().get(selected).map(|r| r.id);
         self.mutate(|todos| {
             crate::store::reorder_day_task(todos, today, selected, down);
         });
-        if down {
-            self.today_selected_index += 1;
-        } else if self.today_selected_index > 0 {
-            self.today_selected_index -= 1;
-        }
     }
 
     pub fn reorder_history(&mut self, down: bool) {
@@ -458,14 +544,10 @@ impl App {
             if !crate::store::can_reorder_day_task(&self.todos, selected_date, selected, down) {
                 return;
             }
+            self.history_todo_id = self.visible_rows_history().get(selected).map(|r| r.id);
             self.mutate(|todos| {
                 crate::store::reorder_day_task(todos, selected_date, selected, down);
             });
-            if down {
-                self.history_todo_index += 1;
-            } else if self.history_todo_index > 0 {
-                self.history_todo_index -= 1;
-            }
         }
     }
 
@@ -509,15 +591,18 @@ impl App {
         match self.current_view {
             View::Today => {
                 self.today_selected_index = 0;
+                self.today_selected_id = self.visible_rows_today().first().map(|r| r.id);
             }
             View::History => match self.history_pane {
                 HistoryPane::Dates => {
                     self.history_date_index = 0;
                     self.history_todo_index = 0;
+                    self.history_todo_id = self.visible_rows_history().first().map(|r| r.id);
                     self.clamp_selections();
                 }
                 HistoryPane::Todos => {
                     self.history_todo_index = 0;
+                    self.history_todo_id = self.visible_rows_history().first().map(|r| r.id);
                 }
             },
         }
@@ -526,13 +611,9 @@ impl App {
     pub fn jump_bottom(&mut self) {
         match self.current_view {
             View::Today => {
-                let today = self.today;
-                let count = self
-                    .todos
-                    .iter()
-                    .filter(|t| t.created_date == today)
-                    .count();
-                self.today_selected_index = count.saturating_sub(1);
+                let rows = self.visible_rows_today();
+                self.today_selected_index = rows.len().saturating_sub(1);
+                self.today_selected_id = rows.get(self.today_selected_index).map(|r| r.id);
             }
             View::History => match self.history_pane {
                 HistoryPane::Dates => {
@@ -542,12 +623,9 @@ impl App {
                     self.clamp_selections();
                 }
                 HistoryPane::Todos => {
-                    let dates = self.dates_list();
-                    let count = dates
-                        .get(self.history_date_index)
-                        .map(|&d| self.todos.iter().filter(|t| t.created_date == d).count())
-                        .unwrap_or(0);
-                    self.history_todo_index = count.saturating_sub(1);
+                    let rows = self.visible_rows_history();
+                    self.history_todo_index = rows.len().saturating_sub(1);
+                    self.history_todo_id = rows.get(self.history_todo_index).map(|r| r.id);
                 }
             },
         }
@@ -557,17 +635,14 @@ impl App {
         let step = (self.visible_list_height / 2).max(1);
         match self.current_view {
             View::Today => {
-                let today = self.today;
-                let count = self
-                    .todos
-                    .iter()
-                    .filter(|t| t.created_date == today)
-                    .count();
+                let rows = self.visible_rows_today();
+                let count = rows.len();
                 if count > 0 {
                     self.today_selected_index = (self.today_selected_index + step).min(count - 1);
                 } else {
                     self.today_selected_index = 0;
                 }
+                self.today_selected_id = rows.get(self.today_selected_index).map(|r| r.id);
             }
             View::History => match self.history_pane {
                 HistoryPane::Dates => {
@@ -582,16 +657,14 @@ impl App {
                     self.clamp_selections();
                 }
                 HistoryPane::Todos => {
-                    let dates = self.dates_list();
-                    let count = dates
-                        .get(self.history_date_index)
-                        .map(|&d| self.todos.iter().filter(|t| t.created_date == d).count())
-                        .unwrap_or(0);
+                    let rows = self.visible_rows_history();
+                    let count = rows.len();
                     if count > 0 {
                         self.history_todo_index = (self.history_todo_index + step).min(count - 1);
                     } else {
                         self.history_todo_index = 0;
                     }
+                    self.history_todo_id = rows.get(self.history_todo_index).map(|r| r.id);
                 }
             },
         }
@@ -602,6 +675,10 @@ impl App {
         match self.current_view {
             View::Today => {
                 self.today_selected_index = self.today_selected_index.saturating_sub(step);
+                self.today_selected_id = self
+                    .visible_rows_today()
+                    .get(self.today_selected_index)
+                    .map(|r| r.id);
             }
             View::History => match self.history_pane {
                 HistoryPane::Dates => {
@@ -611,6 +688,10 @@ impl App {
                 }
                 HistoryPane::Todos => {
                     self.history_todo_index = self.history_todo_index.saturating_sub(step);
+                    self.history_todo_id = self
+                        .visible_rows_history()
+                        .get(self.history_todo_index)
+                        .map(|r| r.id);
                 }
             },
         }
@@ -623,33 +704,20 @@ impl App {
         }
 
         let today = self.today;
-        let mut added = false;
+        let id = self.next_id;
+        self.next_id += 1;
         self.mutate(|todos| {
-            added = crate::store::add_task(todos, clean_text, today).is_some();
+            crate::store::add_task_with_id(todos, id, clean_text, today);
         });
 
-        if added {
-            // Selection lands on the newly added todo
-            let today_count = self
-                .todos
-                .iter()
-                .filter(|t| t.created_date == today)
-                .count();
-            self.today_selected_index = today_count.saturating_sub(1);
-            self.clamp_selections();
-        }
+        self.today_selected_id = Some(id);
+        self.re_resolve_selections();
     }
 
     pub fn toggle_today_todo(&mut self) {
-        let today = self.today;
-        let today_ids: Vec<u64> = self
-            .todos
-            .iter()
-            .filter(|t| t.created_date == today)
-            .map(|t| t.id)
-            .collect();
-
-        if let Some(&target_id) = today_ids.get(self.today_selected_index) {
+        let rows = self.visible_rows_today();
+        if let Some(row) = rows.get(self.today_selected_index) {
+            let target_id = row.id;
             let now = Local::now();
             self.mutate(|todos| {
                 crate::store::toggle_task(todos, target_id, now);
@@ -658,15 +726,9 @@ impl App {
     }
 
     pub fn delete_today_todo(&mut self) {
-        let today = self.today;
-        let today_ids: Vec<u64> = self
-            .todos
-            .iter()
-            .filter(|t| t.created_date == today)
-            .map(|t| t.id)
-            .collect();
-
-        if let Some(&target_id) = today_ids.get(self.today_selected_index) {
+        let rows = self.visible_rows_today();
+        if let Some(row) = rows.get(self.today_selected_index) {
+            let target_id = row.id;
             let mut deleted_text = None;
             self.mutate(|todos| {
                 if let Some(t) = crate::store::delete_task(todos, target_id) {
@@ -683,47 +745,31 @@ impl App {
     }
 
     pub fn toggle_history_todo(&mut self) {
-        let dates = self.dates_list();
-        if let Some(&selected_date) = dates.get(self.history_date_index) {
-            let date_ids: Vec<u64> = self
-                .todos
-                .iter()
-                .filter(|t| t.created_date == selected_date)
-                .map(|t| t.id)
-                .collect();
-
-            if let Some(&target_id) = date_ids.get(self.history_todo_index) {
-                let now = Local::now();
-                self.mutate(|todos| {
-                    crate::store::toggle_task(todos, target_id, now);
-                });
-            }
+        let rows = self.visible_rows_history();
+        if let Some(row) = rows.get(self.history_todo_index) {
+            let target_id = row.id;
+            let now = Local::now();
+            self.mutate(|todos| {
+                crate::store::toggle_task(todos, target_id, now);
+            });
         }
     }
 
     pub fn delete_history_todo(&mut self) {
-        let dates = self.dates_list();
-        if let Some(&selected_date) = dates.get(self.history_date_index) {
-            let date_ids: Vec<u64> = self
-                .todos
-                .iter()
-                .filter(|t| t.created_date == selected_date)
-                .map(|t| t.id)
-                .collect();
-
-            if let Some(&target_id) = date_ids.get(self.history_todo_index) {
-                let mut deleted_text = None;
-                self.mutate(|todos| {
-                    if let Some(t) = crate::store::delete_task(todos, target_id) {
-                        deleted_text = Some(t.text);
-                    }
-                });
-                if let Some(text) = deleted_text {
-                    self.set_transient_message(format!(
-                        "Deleted \"{}\" · u to undo",
-                        truncate_str(&text, 24)
-                    ));
+        let rows = self.visible_rows_history();
+        if let Some(row) = rows.get(self.history_todo_index) {
+            let target_id = row.id;
+            let mut deleted_text = None;
+            self.mutate(|todos| {
+                if let Some(t) = crate::store::delete_task(todos, target_id) {
+                    deleted_text = Some(t.text);
                 }
+            });
+            if let Some(text) = deleted_text {
+                self.set_transient_message(format!(
+                    "Deleted \"{}\" · u to undo",
+                    truncate_str(&text, 24)
+                ));
             }
         }
     }
@@ -744,14 +790,9 @@ impl App {
             return;
         }
 
-        let date_todos: Vec<u64> = self
-            .todos
-            .iter()
-            .filter(|t| t.created_date == selected_date)
-            .map(|t| t.id)
-            .collect();
-
-        if let Some(&todo_id) = date_todos.get(self.history_todo_index) {
+        let rows = self.visible_rows_history();
+        if let Some(row) = rows.get(self.history_todo_index) {
+            let todo_id = row.id;
             self.mutate(|todos| {
                 crate::store::move_task_to_date(todos, todo_id, today);
             });
@@ -833,6 +874,8 @@ impl App {
                             }
                             crate::ui::HitTarget::TodayTask { index } => {
                                 self.today_selected_index = index;
+                                self.today_selected_id =
+                                    self.visible_rows_today().get(index).map(|r| r.id);
                                 return true;
                             }
                             crate::ui::HitTarget::HistoryDate { index } => {
@@ -845,6 +888,8 @@ impl App {
                             crate::ui::HitTarget::HistoryTask { index } => {
                                 self.history_pane = HistoryPane::Todos;
                                 self.history_todo_index = index;
+                                self.history_todo_id =
+                                    self.visible_rows_history().get(index).map(|r| r.id);
                                 return true;
                             }
                             _ => {}
@@ -859,13 +904,13 @@ impl App {
                 let row = event.row;
                 match self.current_view {
                     View::Today => {
-                        let count = self
-                            .todos
-                            .iter()
-                            .filter(|t| t.created_date == self.today)
-                            .count();
+                        let count = self.visible_rows_today().len();
                         if count > 0 && self.today_selected_index + 1 < count {
                             self.today_selected_index += 1;
+                            self.today_selected_id = self
+                                .visible_rows_today()
+                                .get(self.today_selected_index)
+                                .map(|r| r.id);
                             return true;
                         }
                     }
@@ -894,15 +939,13 @@ impl App {
                                 return true;
                             }
                         } else {
-                            let dates = self.dates_list();
-                            let selected_date = dates.get(self.history_date_index).copied();
-                            let count = if let Some(d) = selected_date {
-                                self.todos.iter().filter(|t| t.created_date == d).count()
-                            } else {
-                                0
-                            };
+                            let count = self.visible_rows_history().len();
                             if count > 0 && self.history_todo_index + 1 < count {
                                 self.history_todo_index += 1;
+                                self.history_todo_id = self
+                                    .visible_rows_history()
+                                    .get(self.history_todo_index)
+                                    .map(|r| r.id);
                                 return true;
                             }
                         }
@@ -917,6 +960,10 @@ impl App {
                     View::Today => {
                         if self.today_selected_index > 0 {
                             self.today_selected_index -= 1;
+                            self.today_selected_id = self
+                                .visible_rows_today()
+                                .get(self.today_selected_index)
+                                .map(|r| r.id);
                             return true;
                         }
                     }
@@ -945,6 +992,10 @@ impl App {
                             }
                         } else if self.history_todo_index > 0 {
                             self.history_todo_index -= 1;
+                            self.history_todo_id = self
+                                .visible_rows_history()
+                                .get(self.history_todo_index)
+                                .map(|r| r.id);
                             return true;
                         }
                     }
@@ -1142,12 +1193,7 @@ impl App {
     }
 
     fn handle_today_action(&mut self, action: crate::keymap::Action) {
-        let today = self.today;
-        let count = self
-            .todos
-            .iter()
-            .filter(|t| t.created_date == today)
-            .count();
+        let count = self.visible_rows_today().len();
 
         match action {
             crate::keymap::Action::ReorderDown => {
@@ -1159,10 +1205,18 @@ impl App {
             crate::keymap::Action::MoveSelectionDown => {
                 if count > 0 && self.today_selected_index + 1 < count {
                     self.today_selected_index += 1;
+                    self.today_selected_id = self
+                        .visible_rows_today()
+                        .get(self.today_selected_index)
+                        .map(|r| r.id);
                 }
             }
             crate::keymap::Action::MoveSelectionUp => {
                 self.today_selected_index = self.today_selected_index.saturating_sub(1);
+                self.today_selected_id = self
+                    .visible_rows_today()
+                    .get(self.today_selected_index)
+                    .map(|r| r.id);
             }
             crate::keymap::Action::Toggle => {
                 self.toggle_today_todo();
@@ -1215,13 +1269,7 @@ impl App {
                 }
             }
             HistoryPane::Todos => {
-                let dates = self.dates_list();
-                let selected_date = dates.get(self.history_date_index).copied();
-                let count = if let Some(d) = selected_date {
-                    self.todos.iter().filter(|t| t.created_date == d).count()
-                } else {
-                    0
-                };
+                let count = self.visible_rows_history().len();
 
                 match action {
                     crate::keymap::Action::FocusDates => {
@@ -1236,10 +1284,18 @@ impl App {
                     crate::keymap::Action::MoveSelectionDown => {
                         if count > 0 && self.history_todo_index + 1 < count {
                             self.history_todo_index += 1;
+                            self.history_todo_id = self
+                                .visible_rows_history()
+                                .get(self.history_todo_index)
+                                .map(|r| r.id);
                         }
                     }
                     crate::keymap::Action::MoveSelectionUp => {
                         self.history_todo_index = self.history_todo_index.saturating_sub(1);
+                        self.history_todo_id = self
+                            .visible_rows_history()
+                            .get(self.history_todo_index)
+                            .map(|r| r.id);
                     }
                     crate::keymap::Action::Toggle => {
                         self.toggle_history_todo();
@@ -1294,6 +1350,7 @@ mod tests {
             created_date: today,
             done: true,
             done_at: Some(Local::now()),
+            ..Default::default()
         };
         let todo2 = Todo {
             id: 2,
@@ -1301,6 +1358,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let mut app = App::new_for_test(vec![todo1.clone(), todo2.clone()]);
         app.today_selected_index = 0;
@@ -1336,6 +1394,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let mut app = App::new_for_test(vec![todo]);
         app.handle_key(key_press(KeyCode::Char('e')));
@@ -1359,6 +1418,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let mut app = App::new_for_test(vec![todo]);
         app.handle_key(key_press(KeyCode::Char('e')));
@@ -1378,6 +1438,7 @@ mod tests {
             created_date: yesterday,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let mut app = App::new_for_test(vec![todo]);
         app.current_view = View::History;
@@ -1426,6 +1487,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let mut app = App::new_for_test(vec![todo]);
         app.handle_key(key_press(KeyCode::Char('e')));
@@ -1485,6 +1547,7 @@ mod tests {
             created_date: yesterday,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let y2 = Todo {
             id: 2,
@@ -1492,6 +1555,7 @@ mod tests {
             created_date: yesterday,
             done: true,
             done_at: Some(Local::now()),
+            ..Default::default()
         };
         let y3 = Todo {
             id: 3,
@@ -1499,6 +1563,7 @@ mod tests {
             created_date: yesterday,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let t1 = Todo {
             id: 4,
@@ -1506,6 +1571,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
 
         let mut app = App::new_for_test(vec![y1, y2, y3, t1]);
@@ -1562,6 +1628,7 @@ mod tests {
             created_date: yesterday,
             done: true,
             done_at: Some(Local::now()),
+            ..Default::default()
         };
         let app = App::new_for_test(vec![y_done]);
         assert!(app.uncarried_previous_tasks().is_none());
@@ -1576,6 +1643,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let t2 = Todo {
             id: 2,
@@ -1583,6 +1651,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let t3 = Todo {
             id: 3,
@@ -1590,6 +1659,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
 
         let mut app = App::new_for_test(vec![t1, t2, t3]);
@@ -1622,6 +1692,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let t2 = Todo {
             id: 2,
@@ -1629,6 +1700,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let mut app = App::new_for_test(vec![t1, t2]);
         app.today_selected_index = 0;
@@ -1664,6 +1736,7 @@ mod tests {
             created_date: past,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let t2 = Todo {
             id: 20,
@@ -1671,6 +1744,7 @@ mod tests {
             created_date: past,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let mut app = App::new_for_test(vec![t1, t2]);
         app.current_view = View::History;
@@ -1701,6 +1775,7 @@ mod tests {
             created_date: today,
             done: true,
             done_at: Some(Local::now()),
+            ..Default::default()
         };
         let t2 = Todo {
             id: 2,
@@ -1708,6 +1783,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let t3 = Todo {
             id: 3,
@@ -1715,6 +1791,7 @@ mod tests {
             created_date: today,
             done: true,
             done_at: Some(Local::now()),
+            ..Default::default()
         };
         let mut app = App::new_for_test(vec![t1, t2, t3]);
 
@@ -1741,6 +1818,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let mut app = App::new_for_test(vec![t1]);
 
@@ -1761,6 +1839,7 @@ mod tests {
             created_date: past,
             done: true,
             done_at: Some(Local::now()),
+            ..Default::default()
         };
         let t_past_todo = Todo {
             id: 2,
@@ -1768,6 +1847,7 @@ mod tests {
             created_date: past,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let t_today_done = Todo {
             id: 3,
@@ -1775,6 +1855,7 @@ mod tests {
             created_date: today,
             done: true,
             done_at: Some(Local::now()),
+            ..Default::default()
         };
 
         let mut app = App::new_for_test(vec![t_past_done, t_past_todo, t_today_done]);
@@ -1801,6 +1882,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             })
             .collect();
         let mut app = App::new_for_test(todos);
@@ -1860,6 +1942,7 @@ mod tests {
             created_date: d2,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let t2 = Todo {
             id: 2,
@@ -1867,6 +1950,7 @@ mod tests {
             created_date: d2,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let t3 = Todo {
             id: 3,
@@ -1874,6 +1958,7 @@ mod tests {
             created_date: d2,
             done: false,
             done_at: None,
+            ..Default::default()
         };
         let mut app = App::new_for_test(vec![t1, t2, t3]);
         app.current_view = View::History;
@@ -1942,6 +2027,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 2,
@@ -1949,6 +2035,7 @@ mod tests {
                 created_date: yesterday,
                 done: true,
                 done_at: Some(Local::now()),
+                ..Default::default()
             },
         ]);
 
@@ -2007,6 +2094,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         }]);
 
         // In Today view
@@ -2074,6 +2162,7 @@ mod tests {
                 created_date: older,
                 done: true,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 2,
@@ -2081,6 +2170,7 @@ mod tests {
                 created_date: yesterday,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 3,
@@ -2088,6 +2178,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
         ];
 
@@ -2178,6 +2269,7 @@ mod tests {
             created_date: day1,
             done: false,
             done_at: None,
+            ..Default::default()
         }];
 
         let mut app = App::new_for_test_with_date(todos, day1);
@@ -2215,6 +2307,7 @@ mod tests {
                 created_date: day1,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 2,
@@ -2222,6 +2315,7 @@ mod tests {
                 created_date: day2,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
         ];
 
@@ -2294,6 +2388,7 @@ mod tests {
             created_date: day1,
             done: false,
             done_at: None,
+            ..Default::default()
         }];
 
         let mut app = App::new_for_test_with_date(todos, day1);
@@ -2362,6 +2457,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 2,
@@ -2369,6 +2465,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
         ];
 
@@ -2435,6 +2532,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 2,
@@ -2442,6 +2540,7 @@ mod tests {
                 created_date: past,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
         ];
 
@@ -2556,6 +2655,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 2,
@@ -2563,6 +2663,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 3,
@@ -2570,6 +2671,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
         ];
 
@@ -2658,6 +2760,7 @@ mod tests {
             created_date: today,
             done: false,
             done_at: None,
+            ..Default::default()
         });
         terminal.draw(|f| render(&mut app, f)).unwrap();
 

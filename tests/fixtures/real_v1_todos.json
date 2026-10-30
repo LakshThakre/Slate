@@ -1,0 +1,19 @@
+{
+  "version": 1,
+  "todos": [
+    {
+      "id": 1,
+      "text": "Existing task 1",
+      "created_date": "2026-10-27",
+      "done": false,
+      "done_at": null
+    },
+    {
+      "id": 2,
+      "text": "Existing task 2",
+      "created_date": "2026-10-28",
+      "done": true,
+      "done_at": "2026-10-28T14:30:00+05:30"
+    }
+  ]
+}

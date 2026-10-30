@@ -10,6 +10,93 @@ pub struct Todo {
     pub done: bool,
     #[serde(default)]
     pub done_at: Option<DateTime<Local>>,
+    #[serde(default)]
+    pub priority: u8,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub note: Option<String>,
+    #[serde(default)]
+    pub parent: Option<u64>,
+    #[serde(default)]
+    pub recurring_id: Option<u64>,
+}
+
+impl Default for Todo {
+    fn default() -> Self {
+        Self {
+            id: 0,
+            text: String::new(),
+            created_date: NaiveDate::from_ymd_opt(1970, 1, 1).unwrap(),
+            done: false,
+            done_at: None,
+            priority: 0,
+            tags: Vec::new(),
+            note: None,
+            parent: None,
+            recurring_id: None,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "lowercase")]
+pub enum RecurrenceRule {
+    Daily,
+    Weekdays,
+    Weekly,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct Recurring {
+    pub id: u64,
+    pub text: String,
+    #[serde(default)]
+    pub tags: Vec<String>,
+    #[serde(default)]
+    pub priority: u8,
+    pub rule: RecurrenceRule,
+    pub anchor: NaiveDate,
+    #[serde(default)]
+    pub last_materialized: Option<NaiveDate>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Row {
+    pub id: u64,
+    pub depth: usize,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SortMode {
+    #[default]
+    Manual,
+    Priority,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct Filter {
+    pub tags: Vec<String>,
+    pub min_priority: u8,
+}
+
+impl Filter {
+    pub fn is_empty(&self) -> bool {
+        self.tags.is_empty() && self.min_priority == 0
+    }
+
+    pub fn matches(&self, todo: &Todo) -> bool {
+        if self.min_priority > 0 && todo.priority < self.min_priority {
+            return false;
+        }
+        for tag in &self.tags {
+            if !todo.tags.iter().any(|t| t.eq_ignore_ascii_case(tag)) {
+                return false;
+            }
+        }
+        true
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

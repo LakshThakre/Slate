@@ -447,18 +447,20 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
         return;
     }
 
-    let items: Vec<ListItem> = today_todos
+    let rows = app.visible_rows_today();
+    let items: Vec<ListItem> = rows
         .iter()
         .enumerate()
-        .map(|(idx, todo)| {
+        .filter_map(|(idx, row)| {
+            let todo = app.todos.iter().find(|t| t.id == row.id)?;
             let is_selected = idx == app.today_selected_index;
-            format_todo_row(
+            Some(format_todo_row(
                 todo,
                 is_selected,
                 list_area.width as usize,
                 &app.theme,
                 &app.symbols,
-            )
+            ))
         })
         .collect();
 
@@ -468,7 +470,7 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
     frame.render_stateful_widget(list, list_area, &mut list_state);
 
     let offset = list_state.offset();
-    let visible_count = today_todos
+    let visible_count = rows
         .len()
         .saturating_sub(offset)
         .min(list_area.height as usize);
@@ -667,10 +669,12 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
             );
         } else {
             let is_date_overdue = date < today;
-            let items: Vec<ListItem> = date_todos
+            let rows = app.visible_rows_history();
+            let items: Vec<ListItem> = rows
                 .iter()
                 .enumerate()
-                .map(|(idx, todo)| {
+                .filter_map(|(idx, row)| {
+                    let todo = app.todos.iter().find(|t| t.id == row.id)?;
                     let is_selected = idx == app.history_todo_index;
                     let active_marker = is_selected && is_todo_pane_active;
                     let is_todo_overdue = is_date_overdue && !todo.done;
@@ -685,7 +689,7 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
                         None
                     };
 
-                    format_todo_row_history(
+                    Some(format_todo_row_history(
                         todo,
                         is_selected,
                         active_marker,
@@ -694,7 +698,7 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
                         time_str.as_deref(),
                         &app.theme,
                         &app.symbols,
-                    )
+                    ))
                 })
                 .collect();
 
@@ -704,7 +708,7 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
             frame.render_stateful_widget(list, right_rows[2], &mut todo_state);
 
             let todo_offset = todo_state.offset();
-            let visible_todos = date_todos
+            let visible_todos = rows
                 .len()
                 .saturating_sub(todo_offset)
                 .min(right_rows[2].height as usize);
@@ -1378,6 +1382,7 @@ mod tests {
                 created_date: yesterday,
                 done: false,
                 done_at: None,
+                ..Default::default()
             }],
             today,
         );
@@ -1427,6 +1432,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             }],
             today,
         );
@@ -1516,6 +1522,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 2,
@@ -1523,6 +1530,7 @@ mod tests {
                 created_date: today.pred_opt().unwrap(),
                 done: true,
                 done_at: None,
+                ..Default::default()
             },
         ];
 
@@ -1656,6 +1664,7 @@ mod tests {
                     created_date: today,
                     done: false,
                     done_at: None,
+                    ..Default::default()
                 },
                 Todo {
                     id: 2,
@@ -1663,6 +1672,7 @@ mod tests {
                     created_date: today,
                     done: true,
                     done_at: None,
+                    ..Default::default()
                 },
             ],
             today,
@@ -1731,6 +1741,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 2,
@@ -1738,6 +1749,7 @@ mod tests {
                 created_date: today,
                 done: true,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 3,
@@ -1745,6 +1757,7 @@ mod tests {
                 created_date: past,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
         ];
 
@@ -1907,6 +1920,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 2,
@@ -1914,6 +1928,7 @@ mod tests {
                 created_date: past,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
         ];
 
@@ -2047,6 +2062,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 2,
@@ -2054,6 +2070,7 @@ mod tests {
                 created_date: past,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
         ];
 

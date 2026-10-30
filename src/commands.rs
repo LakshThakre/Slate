@@ -164,9 +164,11 @@ pub fn handle_add_with_reader<R: BufRead>(
         vec![trimmed]
     };
 
-    crate::storage::try_load_modify_save(data_path, |todos| {
+    crate::storage::try_load_modify_save(data_path, |data| {
         for t in &tasks_to_add {
-            crate::store::add_task(todos, t, date);
+            let id = data.next_id;
+            data.next_id += 1;
+            crate::store::add_task_with_id(&mut data.todos, id, t, date);
         }
         Ok::<(), CmdError>(())
     })
@@ -214,10 +216,11 @@ pub fn handle_done(
     };
     let now = chrono::Local::now();
 
-    crate::storage::try_load_modify_save(data_path, |todos| {
-        let target_ids = resolve_target_task_ids(todos, date, &indices, match_query.as_deref())?;
+    crate::storage::try_load_modify_save(data_path, |data| {
+        let target_ids =
+            resolve_target_task_ids(&data.todos, date, &indices, match_query.as_deref())?;
         for id in target_ids {
-            crate::store::set_task_done(todos, id, true, now);
+            crate::store::set_task_done(&mut data.todos, id, true, now);
         }
         Ok::<(), CmdError>(())
     })
@@ -239,10 +242,11 @@ pub fn handle_undone(
     };
     let now = chrono::Local::now();
 
-    crate::storage::try_load_modify_save(data_path, |todos| {
-        let target_ids = resolve_target_task_ids(todos, date, &indices, match_query.as_deref())?;
+    crate::storage::try_load_modify_save(data_path, |data| {
+        let target_ids =
+            resolve_target_task_ids(&data.todos, date, &indices, match_query.as_deref())?;
         for id in target_ids {
-            crate::store::set_task_done(todos, id, false, now);
+            crate::store::set_task_done(&mut data.todos, id, false, now);
         }
         Ok::<(), CmdError>(())
     })
@@ -263,10 +267,11 @@ pub fn handle_rm(
         None => today,
     };
 
-    crate::storage::try_load_modify_save(data_path, |todos| {
-        let target_ids = resolve_target_task_ids(todos, date, &indices, match_query.as_deref())?;
+    crate::storage::try_load_modify_save(data_path, |data| {
+        let target_ids =
+            resolve_target_task_ids(&data.todos, date, &indices, match_query.as_deref())?;
         for id in target_ids {
-            crate::store::delete_task(todos, id);
+            crate::store::delete_task(&mut data.todos, id);
         }
         Ok::<(), CmdError>(())
     })
@@ -447,6 +452,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 20,
@@ -454,6 +460,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
             Todo {
                 id: 30,
@@ -461,6 +468,7 @@ mod tests {
                 created_date: today,
                 done: false,
                 done_at: None,
+                ..Default::default()
             },
         ];
 
