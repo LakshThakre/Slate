@@ -38,6 +38,9 @@ pub struct App {
     pub upcoming_filter: crate::model::Filter,
     pub history_filter: crate::model::Filter,
     pub marks: std::collections::HashSet<u64>,
+    pub show_detail_pane: bool,
+    pub note_buffer: String,
+    pub note_cursor: usize,
     pub status_message: Option<String>,
     pub undo_stack: Vec<Vec<Todo>>,
     pub redo_stack: Vec<Vec<Todo>>,
@@ -161,6 +164,9 @@ impl App {
             upcoming_filter: crate::model::Filter::default(),
             history_filter: crate::model::Filter::default(),
             marks: std::collections::HashSet::new(),
+            show_detail_pane: config.ui.detail_pane,
+            note_buffer: String::new(),
+            note_cursor: 0,
             status_message: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -227,6 +233,9 @@ impl App {
             upcoming_filter: crate::model::Filter::default(),
             history_filter: crate::model::Filter::default(),
             marks: std::collections::HashSet::new(),
+            show_detail_pane: false,
+            note_buffer: String::new(),
+            note_cursor: 0,
             status_message: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -1180,6 +1189,7 @@ impl App {
             InputMode::Editing(id) => self.handle_editing_key(id, key),
             InputMode::Rescheduling(id) => self.handle_rescheduling_key(id, key),
             InputMode::Filtering => self.handle_filtering_key(key),
+            InputMode::EditingNote(id) => self.handle_note_key(id, key),
             InputMode::Normal => self.handle_normal_key(key),
         }
     }
@@ -1802,6 +1812,174 @@ impl App {
         false
     }
 
+    fn note_cursor_up(text: &str, cursor: usize) -> usize {
+        let chars: Vec<char> = text.chars().collect();
+        let clamped_cursor = cursor.min(chars.len());
+
+        let mut line_starts = vec![0];
+        for (i, &c) in chars.iter().enumerate() {
+            if c == '\n' {
+                line_starts.push(i + 1);
+            }
+        }
+
+        let cur_line = match line_starts.binary_search(&clamped_cursor) {
+            Ok(idx) => idx,
+            Err(idx) => idx.saturating_sub(1),
+        };
+
+        if cur_line == 0 {
+            return 0;
+        }
+
+        let cur_col = clamped_cursor - line_starts[cur_line];
+        let prev_line_start = line_starts[cur_line - 1];
+        let prev_line_end = line_starts[cur_line] - 1;
+        let prev_line_len = prev_line_end - prev_line_start;
+
+        prev_line_start + cur_col.min(prev_line_len)
+    }
+
+    fn note_cursor_down(text: &str, cursor: usize) -> usize {
+        let chars: Vec<char> = text.chars().collect();
+        let clamped_cursor = cursor.min(chars.len());
+
+        let mut line_starts = vec![0];
+        for (i, &c) in chars.iter().enumerate() {
+            if c == '\n' {
+                line_starts.push(i + 1);
+            }
+        }
+
+        let cur_line = match line_starts.binary_search(&clamped_cursor) {
+            Ok(idx) => idx,
+            Err(idx) => idx.saturating_sub(1),
+        };
+
+        if cur_line + 1 >= line_starts.len() {
+            return chars.len();
+        }
+
+        let cur_col = clamped_cursor - line_starts[cur_line];
+        let next_line_start = line_starts[cur_line + 1];
+        let next_line_end = if cur_line + 2 < line_starts.len() {
+            line_starts[cur_line + 2] - 1
+        } else {
+            chars.len()
+        };
+        let next_line_len = next_line_end - next_line_start;
+
+        next_line_start + cur_col.min(next_line_len)
+    }
+
+    fn note_cursor_home(text: &str, cursor: usize) -> usize {
+        let chars: Vec<char> = text.chars().collect();
+        let clamped_cursor = cursor.min(chars.len());
+        let mut line_start = 0;
+        for (i, &c) in chars.iter().enumerate().take(clamped_cursor) {
+            if c == '\n' {
+                line_start = i + 1;
+            }
+        }
+        line_start
+    }
+
+    fn note_cursor_end(text: &str, cursor: usize) -> usize {
+        let chars: Vec<char> = text.chars().collect();
+        let clamped_cursor = cursor.min(chars.len());
+        for (i, &c) in chars.iter().enumerate().skip(clamped_cursor) {
+            if c == '\n' {
+                return i;
+            }
+        }
+        chars.len()
+    }
+
+    fn handle_note_key(&mut self, target_id: u64, key: KeyEvent) -> bool {
+        let is_newline = (key.code == KeyCode::Enter && key.modifiers.contains(KeyModifiers::ALT))
+            || (key.code == KeyCode::Char('j') && key.modifiers.contains(KeyModifiers::CONTROL));
+
+        if is_newline {
+            let mut chars: Vec<char> = self.note_buffer.chars().collect();
+            if chars.len() < 2000 {
+                chars.insert(self.note_cursor, '\n');
+                self.note_buffer = chars.into_iter().collect();
+                self.note_cursor += 1;
+            }
+            return false;
+        }
+
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.note_buffer.clear();
+                self.note_cursor = 0;
+            }
+            KeyCode::Enter => {
+                let clean = self.note_buffer.trim().to_string();
+                let note_val = if clean.is_empty() {
+                    None
+                } else {
+                    Some(self.note_buffer.clone())
+                };
+                self.mutate(|todos| {
+                    if let Some(t) = todos.iter_mut().find(|t| t.id == target_id) {
+                        t.note = note_val;
+                    }
+                });
+                self.input_mode = InputMode::Normal;
+                self.note_buffer.clear();
+                self.note_cursor = 0;
+            }
+            KeyCode::Up => {
+                self.note_cursor = Self::note_cursor_up(&self.note_buffer, self.note_cursor);
+            }
+            KeyCode::Down => {
+                self.note_cursor = Self::note_cursor_down(&self.note_buffer, self.note_cursor);
+            }
+            KeyCode::Left => {
+                self.note_cursor = self.note_cursor.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let len = self.note_buffer.chars().count();
+                if self.note_cursor < len {
+                    self.note_cursor += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.note_cursor = Self::note_cursor_home(&self.note_buffer, self.note_cursor);
+            }
+            KeyCode::End => {
+                self.note_cursor = Self::note_cursor_end(&self.note_buffer, self.note_cursor);
+            }
+            KeyCode::Backspace => {
+                if self.note_cursor > 0 {
+                    let mut chars: Vec<char> = self.note_buffer.chars().collect();
+                    chars.remove(self.note_cursor - 1);
+                    self.note_buffer = chars.into_iter().collect();
+                    self.note_cursor -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                let mut chars: Vec<char> = self.note_buffer.chars().collect();
+                if self.note_cursor < chars.len() {
+                    chars.remove(self.note_cursor);
+                    self.note_buffer = chars.into_iter().collect();
+                }
+            }
+            KeyCode::Char(c) => {
+                let mut chars: Vec<char> = self.note_buffer.chars().collect();
+                if chars.len() < 2000 {
+                    chars.insert(self.note_cursor, c);
+                    self.note_buffer = chars.into_iter().collect();
+                    self.note_cursor += 1;
+                }
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
         if self.show_help {
             match key.code {
@@ -1888,6 +2066,24 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.prompt_error = None;
+            }
+            crate::keymap::Action::ToggleDetail => {
+                self.show_detail_pane = !self.show_detail_pane;
+            }
+            crate::keymap::Action::EditNote => {
+                if self.terminal_height < 20 {
+                    self.set_transient_message("Terminal too small for note editor");
+                } else if let Some(id) = self.selected_task_id() {
+                    let existing_note = self
+                        .todos
+                        .iter()
+                        .find(|t| t.id == id)
+                        .and_then(|t| t.note.clone())
+                        .unwrap_or_default();
+                    self.note_cursor = existing_note.chars().count();
+                    self.note_buffer = existing_note;
+                    self.input_mode = InputMode::EditingNote(id);
+                }
             }
             crate::keymap::Action::Undo => {
                 self.undo();
@@ -3986,5 +4182,76 @@ mod tests {
         app.current_view = View::Today;
         assert_eq!(app.today_filter.tags, vec!["work"]);
         assert_eq!(app.visible_rows_today().len(), 1);
+    }
+
+    #[test]
+    fn test_note_editor_and_toggle_detail_pane() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![Todo {
+                id: 1,
+                text: "Task with note".to_string(),
+                created_date: today,
+                ..Default::default()
+            }],
+            today,
+        );
+
+        // 1. Toggle detail pane with 'i'
+        assert!(!app.show_detail_pane);
+        app.handle_key(key_press(KeyCode::Char('i')));
+        assert!(app.show_detail_pane);
+        app.handle_key(key_press(KeyCode::Char('i')));
+        assert!(!app.show_detail_pane);
+
+        // 2. Open note editor with 'n'
+        app.handle_key(key_press(KeyCode::Char('n')));
+        assert_eq!(app.input_mode, InputMode::EditingNote(1));
+
+        // Type "Line 1"
+        for c in "Line 1".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+
+        // Insert newline with Alt+Enter
+        app.handle_key(KeyEvent::new(KeyCode::Enter, KeyModifiers::ALT));
+
+        // Type "Line 2"
+        for c in "Line 2".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+
+        // Test cursor home/end/up/down
+        app.handle_key(key_press(KeyCode::Home));
+        assert_eq!(app.note_cursor, 7); // start of Line 2
+
+        app.handle_key(key_press(KeyCode::Up));
+        assert_eq!(app.note_cursor, 0); // start of Line 1
+
+        app.handle_key(key_press(KeyCode::End));
+        assert_eq!(app.note_cursor, 6); // end of Line 1
+
+        app.handle_key(key_press(KeyCode::Down));
+        assert_eq!(app.note_cursor, 13); // end of Line 2
+
+        // Save with Enter
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.todos[0].note.as_deref(), Some("Line 1\nLine 2"));
+
+        // Undo restores note to None
+        app.handle_key(key_press(KeyCode::Char('u')));
+        assert_eq!(app.todos[0].note, None);
+
+        // Redo restores note
+        app.handle_key(KeyEvent::new(KeyCode::Char('r'), KeyModifiers::CONTROL));
+        assert_eq!(app.todos[0].note.as_deref(), Some("Line 1\nLine 2"));
+
+        // Clearing note with empty input
+        app.handle_key(key_press(KeyCode::Char('n')));
+        app.note_buffer.clear();
+        app.note_cursor = 0;
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.todos[0].note, None);
     }
 }

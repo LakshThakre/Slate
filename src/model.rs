@@ -152,4 +152,5 @@ pub enum InputMode {
     Editing(u64),
     Rescheduling(u64),
     Filtering,
+    EditingNote(u64),
 }

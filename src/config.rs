@@ -110,6 +110,9 @@ pub struct UiConfig {
     pub show_upcoming: bool,
 
     #[serde(default)]
+    pub detail_pane: bool,
+
+    #[serde(default)]
     pub mouse: bool,
 }
 
@@ -123,6 +126,7 @@ impl Default for UiConfig {
             symbols: SymbolsMode::Unicode,
             show_history: true,
             show_upcoming: true,
+            detail_pane: false,
             mouse: false,
         }
     }
@@ -438,7 +442,13 @@ impl Config {
         // 7. [ui]
         if let Some(ui_val) = table.get("ui") {
             if let Some(ui_table) = ui_val.as_table() {
-                let allowed_ui_keys = ["symbols", "show_history", "show_upcoming", "mouse"];
+                let allowed_ui_keys = [
+                    "symbols",
+                    "show_history",
+                    "show_upcoming",
+                    "detail_pane",
+                    "mouse",
+                ];
                 for k in ui_table.keys() {
                     if !allowed_ui_keys.contains(&k.as_str()) {
                         warnings.push(format!("Unknown ui config key: '{k}'"));
@@ -475,6 +485,14 @@ impl Config {
                     } else {
                         warnings
                             .push("ui.show_upcoming must be a boolean · using true".to_string());
+                    }
+                }
+
+                if let Some(dp_val) = ui_table.get("detail_pane") {
+                    if let Some(b) = dp_val.as_bool() {
+                        config.ui.detail_pane = b;
+                    } else {
+                        warnings.push("ui.detail_pane must be a boolean · using false".to_string());
                     }
                 }
 

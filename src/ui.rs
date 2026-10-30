@@ -20,6 +20,7 @@ pub struct Symbols {
     pub prompt_edit: &'static str,
     pub prompt_reschedule: &'static str,
     pub prompt_filter: &'static str,
+    pub note: &'static str,
     pub v_divider: &'static str,
     pub h_rule: &'static str,
     pub bullet: &'static str,
@@ -48,6 +49,7 @@ impl Symbols {
             prompt_edit: "› Edit task ",
             prompt_reschedule: "› Reschedule: ",
             prompt_filter: "› filter ",
+            note: "≡",
             v_divider: "│",
             h_rule: "─",
             bullet: "•",
@@ -70,6 +72,7 @@ impl Symbols {
             prompt_edit: "> Edit task ",
             prompt_reschedule: "> Reschedule: ",
             prompt_filter: "> filter ",
+            note: "=",
             v_divider: "|",
             h_rule: "-",
             bullet: "*",
@@ -492,7 +495,25 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
         frame.render_widget(Paragraph::new(hint_line), parts[1]);
     }
 
-    let list_area = if has_uncarried { parts[3] } else { parts[2] };
+    let raw_list_area = if has_uncarried { parts[3] } else { parts[2] };
+
+    let show_detail = (app.show_detail_pane
+        || matches!(app.input_mode, crate::model::InputMode::EditingNote(_)))
+        && app.terminal_height >= 20;
+
+    let (list_area, divider_area, detail_area) = if show_detail && raw_list_area.height >= 8 {
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Min(4),
+                Constraint::Length(1),
+                Constraint::Length(6.min(raw_list_area.height.saturating_sub(5))),
+            ])
+            .split(raw_list_area);
+        (chunks[0], Some(chunks[1]), Some(chunks[2]))
+    } else {
+        (raw_list_area, None, None)
+    };
 
     // Empty state or task list
     if today_todos.is_empty() {
@@ -550,6 +571,10 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
             rect: Rect::new(list_area.x, row_y, list_area.width, 1),
             target: HitTarget::TodayTask { index: item_idx },
         });
+    }
+
+    if let (Some(div), Some(det)) = (divider_area, detail_area) {
+        draw_detail_pane(app, frame, det, div, app.today_selected_id);
     }
 }
 
@@ -733,6 +758,26 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
         } else {
             let is_date_overdue = date < today;
             let rows = app.visible_rows_history();
+
+            let show_detail = (app.show_detail_pane
+                || matches!(app.input_mode, crate::model::InputMode::EditingNote(_)))
+                && app.terminal_height >= 20;
+
+            let (tasks_list_area, divider_area, detail_area) =
+                if show_detail && right_rows[2].height >= 8 {
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Min(4),
+                            Constraint::Length(1),
+                            Constraint::Length(6.min(right_rows[2].height.saturating_sub(5))),
+                        ])
+                        .split(right_rows[2]);
+                    (chunks[0], Some(chunks[1]), Some(chunks[2]))
+                } else {
+                    (right_rows[2], None, None)
+                };
+
             let items: Vec<ListItem> = rows
                 .iter()
                 .enumerate()
@@ -757,7 +802,7 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
                         is_selected,
                         active_marker,
                         is_todo_overdue,
-                        right_rows[2].width as usize,
+                        tasks_list_area.width as usize,
                         app.terminal_width,
                         app.config.tasks.show_tags,
                         time_str.as_deref(),
@@ -770,26 +815,30 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
             let list = List::new(items);
             let mut todo_state = ListState::default();
             todo_state.select(Some(app.history_todo_index));
-            frame.render_stateful_widget(list, right_rows[2], &mut todo_state);
+            frame.render_stateful_widget(list, tasks_list_area, &mut todo_state);
 
             let todo_offset = todo_state.offset();
             let visible_todos = rows
                 .len()
                 .saturating_sub(todo_offset)
-                .min(right_rows[2].height as usize);
+                .min(tasks_list_area.height as usize);
             let marker_len = app.symbols.marker.chars().count() as u16;
             let checkbox_len = app.symbols.check_done.chars().count() as u16;
             for i in 0..visible_todos {
                 let todo_idx = todo_offset + i;
-                let row_y = right_rows[2].y + i as u16;
+                let row_y = tasks_list_area.y + i as u16;
                 app.hit_areas.push(HitArea {
-                    rect: Rect::new(right_rows[2].x + marker_len, row_y, checkbox_len, 1),
+                    rect: Rect::new(tasks_list_area.x + marker_len, row_y, checkbox_len, 1),
                     target: HitTarget::HistoryCheckbox { index: todo_idx },
                 });
                 app.hit_areas.push(HitArea {
-                    rect: Rect::new(right_rows[2].x, row_y, right_rows[2].width, 1),
+                    rect: Rect::new(tasks_list_area.x, row_y, tasks_list_area.width, 1),
                     target: HitTarget::HistoryTask { index: todo_idx },
                 });
+            }
+
+            if let (Some(div), Some(det)) = (divider_area, detail_area) {
+                draw_detail_pane(app, frame, det, div, app.history_todo_id);
             }
         }
     }
@@ -979,6 +1028,26 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
             );
         } else {
             let rows = app.visible_rows_upcoming();
+
+            let show_detail = (app.show_detail_pane
+                || matches!(app.input_mode, crate::model::InputMode::EditingNote(_)))
+                && app.terminal_height >= 20;
+
+            let (tasks_list_area, divider_area, detail_area) =
+                if show_detail && right_rows[2].height >= 8 {
+                    let chunks = Layout::default()
+                        .direction(Direction::Vertical)
+                        .constraints([
+                            Constraint::Min(4),
+                            Constraint::Length(1),
+                            Constraint::Length(6.min(right_rows[2].height.saturating_sub(5))),
+                        ])
+                        .split(right_rows[2]);
+                    (chunks[0], Some(chunks[1]), Some(chunks[2]))
+                } else {
+                    (right_rows[2], None, None)
+                };
+
             let items: Vec<ListItem> = rows
                 .iter()
                 .enumerate()
@@ -1002,7 +1071,7 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
                         is_selected,
                         active_marker,
                         false,
-                        right_rows[2].width as usize,
+                        tasks_list_area.width as usize,
                         app.terminal_width,
                         app.config.tasks.show_tags,
                         time_str.as_deref(),
@@ -1015,26 +1084,30 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
             let list = List::new(items);
             let mut todo_state = ListState::default();
             todo_state.select(Some(app.upcoming_todo_index));
-            frame.render_stateful_widget(list, right_rows[2], &mut todo_state);
+            frame.render_stateful_widget(list, tasks_list_area, &mut todo_state);
 
             let todo_offset = todo_state.offset();
             let visible_todos = rows
                 .len()
                 .saturating_sub(todo_offset)
-                .min(right_rows[2].height as usize);
+                .min(tasks_list_area.height as usize);
             let marker_len = app.symbols.marker.chars().count() as u16;
             let checkbox_len = app.symbols.check_done.chars().count() as u16;
             for i in 0..visible_todos {
                 let todo_idx = todo_offset + i;
-                let row_y = right_rows[2].y + i as u16;
+                let row_y = tasks_list_area.y + i as u16;
                 app.hit_areas.push(HitArea {
-                    rect: Rect::new(right_rows[2].x + marker_len, row_y, checkbox_len, 1),
+                    rect: Rect::new(tasks_list_area.x + marker_len, row_y, checkbox_len, 1),
                     target: HitTarget::UpcomingCheckbox { index: todo_idx },
                 });
                 app.hit_areas.push(HitArea {
-                    rect: Rect::new(right_rows[2].x, row_y, right_rows[2].width, 1),
+                    rect: Rect::new(tasks_list_area.x, row_y, tasks_list_area.width, 1),
                     target: HitTarget::UpcomingTask { index: todo_idx },
                 });
+            }
+
+            if let (Some(div), Some(det)) = (divider_area, detail_area) {
+                draw_detail_pane(app, frame, det, div, app.upcoming_todo_id);
             }
         }
     }
@@ -1273,7 +1346,9 @@ fn format_todo_row(
     };
 
     let checkbox_len = symbols.check_done.chars().count();
-    let avail_total = max_width.saturating_sub(marker_len + checkbox_len + prio_len + 1);
+    let has_note = todo.note.as_ref().is_some_and(|n| !n.trim().is_empty());
+    let note_len = if has_note { 2 } else { 0 };
+    let avail_total = max_width.saturating_sub(marker_len + checkbox_len + prio_len + note_len + 1);
 
     let can_show_tags = show_tags && terminal_width >= 60 && !todo.tags.is_empty();
     let (tags_str, tags_len) = if can_show_tags {
@@ -1320,6 +1395,12 @@ fn format_todo_row(
     spans.push(text_span);
     if show_rendered_tags {
         spans.push(Span::styled(tags_str, theme.dim_style()));
+    }
+    if has_note {
+        spans.push(Span::styled(
+            format!(" {}", symbols.note),
+            theme.dim_style(),
+        ));
     }
 
     ListItem::new(Line::from(spans))
@@ -1386,8 +1467,11 @@ fn format_todo_row_history(
         suffix_str.chars().count() + 2
     };
 
+    let has_note = todo.note.as_ref().is_some_and(|n| !n.trim().is_empty());
+    let note_len = if has_note { 2 } else { 0 };
+
     let avail_total =
-        max_width.saturating_sub(marker_len + checkbox_len + prio_len + suffix_len + 1);
+        max_width.saturating_sub(marker_len + checkbox_len + prio_len + suffix_len + note_len + 1);
 
     let can_show_tags = show_tags && terminal_width >= 60 && !todo.tags.is_empty();
     let (tags_str, tags_len) = if can_show_tags {
@@ -1436,6 +1520,7 @@ fn format_todo_row_history(
             + prio_len
             + text_truncated.chars().count()
             + actual_tags_len
+            + note_len
             + suffix_len,
     );
 
@@ -1447,6 +1532,12 @@ fn format_todo_row_history(
     if show_rendered_tags {
         spans.push(Span::styled(tags_str, theme.dim_style()));
     }
+    if has_note {
+        spans.push(Span::styled(
+            format!(" {}", symbols.note),
+            theme.dim_style(),
+        ));
+    }
     spans.push(Span::raw(" ".repeat(pad_len)));
 
     if !suffix_str.is_empty() {
@@ -1454,6 +1545,196 @@ fn format_todo_row_history(
     }
 
     ListItem::new(Line::from(spans))
+}
+
+fn draw_detail_pane(
+    app: &App,
+    frame: &mut Frame,
+    area: Rect,
+    divider_area: Rect,
+    task_id: Option<u64>,
+) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    // 1. Thin divider rule
+    if divider_area.width > 0 && divider_area.height > 0 {
+        frame.render_widget(
+            Paragraph::new(app.symbols.h_rule.repeat(divider_area.width as usize))
+                .style(app.theme.divider_style()),
+            divider_area,
+        );
+    }
+
+    // 2. Note editing mode
+    if let crate::model::InputMode::EditingNote(_) = app.input_mode {
+        let title_line = Line::from(vec![
+            Span::styled(
+                "Note ",
+                app.theme.accent_style().add_modifier(Modifier::BOLD),
+            ),
+            Span::styled(
+                format!(
+                    "(Enter save {} Alt+Enter/Ctrl+j newline {} Esc cancel)",
+                    app.symbols.dot, app.symbols.dot
+                ),
+                app.theme.dim_style(),
+            ),
+        ]);
+
+        let chunks = Layout::default()
+            .direction(Direction::Vertical)
+            .constraints([
+                Constraint::Length(1), // Title line
+                Constraint::Min(0),    // Note editor lines
+            ])
+            .split(area);
+
+        frame.render_widget(Paragraph::new(title_line), chunks[0]);
+
+        let body_area = chunks[1];
+        if body_area.width > 0 && body_area.height > 0 {
+            let chars: Vec<char> = app.note_buffer.chars().collect();
+            let mut line_num = 0;
+            let mut col_num = 0;
+            for (idx, &c) in chars.iter().enumerate() {
+                if idx == app.note_cursor {
+                    break;
+                }
+                if c == '\n' {
+                    line_num += 1;
+                    col_num = 0;
+                } else {
+                    col_num += 1;
+                }
+            }
+
+            let lines: Vec<Line> = app
+                .note_buffer
+                .split('\n')
+                .map(|line| Line::from(Span::styled(line.to_string(), app.theme.text_style())))
+                .collect();
+
+            frame.render_widget(Paragraph::new(lines), body_area);
+
+            let cursor_x = (body_area.x + col_num as u16).min(body_area.right().saturating_sub(1));
+            let cursor_y =
+                (body_area.y + line_num as u16).min(body_area.bottom().saturating_sub(1));
+            frame.set_cursor_position(ratatui::layout::Position::new(cursor_x, cursor_y));
+        }
+        return;
+    }
+
+    // 3. Normal detail display
+    let Some(id) = task_id else {
+        return;
+    };
+    let Some(todo) = app.todos.iter().find(|t| t.id == id) else {
+        return;
+    };
+
+    let mut lines = Vec::new();
+
+    // Full wrapped text
+    lines.push(Line::from(vec![
+        Span::styled("Task: ", app.theme.dim_style()),
+        Span::styled(
+            &todo.text,
+            app.theme.text_style().add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // Metadata line: Date, Priority, Tags, Recurrence, Subtasks
+    let mut meta_spans = vec![
+        Span::styled("Date: ", app.theme.dim_style()),
+        Span::styled(
+            todo.created_date
+                .format(&app.config.date_format)
+                .to_string(),
+            app.theme.text_style(),
+        ),
+    ];
+
+    if todo.priority > 0 {
+        meta_spans.push(Span::raw("    "));
+        meta_spans.push(Span::styled("Priority: ", app.theme.dim_style()));
+        let prio_style = if todo.priority == 2 {
+            app.theme.priority_2_style()
+        } else {
+            app.theme.priority_1_style()
+        };
+        let prio_str = if todo.priority == 2 { "!!" } else { "!" };
+        meta_spans.push(Span::styled(prio_str, prio_style));
+    }
+
+    if !todo.tags.is_empty() {
+        meta_spans.push(Span::raw("    "));
+        meta_spans.push(Span::styled("Tags: ", app.theme.dim_style()));
+        meta_spans.push(Span::styled(
+            todo.tags
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(" "),
+            app.theme.dim_style(),
+        ));
+    }
+
+    if let Some(rule) = todo
+        .recurring_id
+        .and_then(|rid| app.recurring.iter().find(|r| r.id == rid).map(|r| r.rule))
+    {
+        meta_spans.push(Span::raw("    "));
+        meta_spans.push(Span::styled("Repeats: ", app.theme.dim_style()));
+        let rule_str = match rule {
+            crate::model::RecurrenceRule::Daily => "daily",
+            crate::model::RecurrenceRule::Weekdays => "weekdays",
+            crate::model::RecurrenceRule::Weekly => "weekly",
+        };
+        meta_spans.push(Span::styled(rule_str, app.theme.text_style()));
+    }
+
+    let subtasks: Vec<&Todo> = app
+        .todos
+        .iter()
+        .filter(|t| t.parent == Some(todo.id))
+        .collect();
+    if !subtasks.is_empty() {
+        let done_subs = subtasks.iter().filter(|t| t.done).count();
+        meta_spans.push(Span::raw("    "));
+        meta_spans.push(Span::styled("Subtasks: ", app.theme.dim_style()));
+        meta_spans.push(Span::styled(
+            format!("{done_subs}/{} done", subtasks.len()),
+            app.theme.dim_style(),
+        ));
+    }
+
+    lines.push(Line::from(meta_spans));
+
+    // Note section
+    if let Some(ref note) = todo.note {
+        lines.push(Line::from(vec![Span::styled(
+            "Note:",
+            app.theme.dim_style(),
+        )]));
+        for line in note.lines() {
+            lines.push(Line::from(Span::styled(
+                format!("  {line}"),
+                app.theme.text_style(),
+            )));
+        }
+    } else {
+        lines.push(Line::from(Span::styled(
+            "Note: (none · press 'n' to add)",
+            app.theme.dim_style(),
+        )));
+    }
+
+    frame.render_widget(
+        Paragraph::new(lines).wrap(ratatui::widgets::Wrap { trim: false }),
+        area,
+    );
 }
 
 /// Formats dates friendly: "Today", "Yesterday", "Tomorrow", or "Mon 19 Oct"
@@ -1767,6 +2048,18 @@ fn build_right_help_lines(
         help_entry(
             &keymap.hint(crate::keymap::Action::Filter),
             "filter tasks",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::ToggleDetail),
+            "toggle detail pane",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::EditNote),
+            "edit task note",
             12,
             theme,
         ),
@@ -2217,6 +2510,7 @@ mod tests {
             sym.prompt_edit,
             sym.prompt_reschedule,
             sym.prompt_filter,
+            sym.note,
             sym.v_divider,
             sym.h_rule,
             sym.bullet,
@@ -2719,5 +3013,65 @@ mod tests {
 
         assert!(!content_notags.contains("#work #urgent"));
         assert!(content_notags.contains("Project work"));
+    }
+
+    #[test]
+    fn test_render_note_glyph_and_detail_pane() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![Todo {
+                id: 1,
+                text: "Refactor storage layer".to_string(),
+                created_date: today,
+                note: Some("Make sure backups prune correctly".to_string()),
+                ..Default::default()
+            }],
+            today,
+        );
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // 1. Task row displays note glyph ≡
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content.contains("≡"));
+
+        // 2. Open detail pane
+        app.show_detail_pane = true;
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_detail: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content_detail.contains("Task: Refactor storage layer"));
+        assert!(content_detail.contains("Note:"));
+        assert!(content_detail.contains("Make sure backups prune correctly"));
+
+        // 3. Auto-hide when terminal height is below 20
+        let backend_small = TestBackend::new(80, 18);
+        let mut terminal_small = Terminal::new(backend_small).unwrap();
+        app.terminal_height = 18;
+        terminal_small.draw(|f| render(&mut app, f)).unwrap();
+        let content_small: String = terminal_small
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(!content_small.contains("Make sure backups prune correctly"));
     }
 }

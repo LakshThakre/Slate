@@ -63,6 +63,12 @@ show_history = true
 # Default: true
 show_upcoming = true
 
+# Show or hide the task detail pane
+# Default: false
+# When true, shows full wrapped text, notes, and metadata below the list.
+# Auto-hides when terminal height is below 20 rows.
+detail_pane = false
+
 # Opt-in mouse support
 # Default: false
 # When true, enables mouse capture for clicking tabs, selecting task rows, clicking checkboxes,

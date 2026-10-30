@@ -31,10 +31,12 @@ pub enum Action {
     CyclePriority,
     CycleSort,
     Filter,
+    ToggleDetail,
+    EditNote,
 }
 
 impl Action {
-    pub const ALL: [Action; 26] = [
+    pub const ALL: [Action; 28] = [
         Action::Quit,
         Action::Add,
         Action::Edit,
@@ -61,6 +63,8 @@ impl Action {
         Action::CyclePriority,
         Action::CycleSort,
         Action::Filter,
+        Action::ToggleDetail,
+        Action::EditNote,
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -91,6 +95,8 @@ impl Action {
             "cycle_priority" | "priority" => Some(Action::CyclePriority),
             "cycle_sort" | "sort" => Some(Action::CycleSort),
             "filter" => Some(Action::Filter),
+            "toggle_detail" | "detail" => Some(Action::ToggleDetail),
+            "edit_note" | "note" => Some(Action::EditNote),
             _ => None,
         }
     }
@@ -123,6 +129,8 @@ impl Action {
             Action::CyclePriority => "cycle_priority",
             Action::CycleSort => "cycle_sort",
             Action::Filter => "filter",
+            Action::ToggleDetail => "toggle_detail",
+            Action::EditNote => "edit_note",
         }
     }
 }
@@ -623,6 +631,20 @@ impl Keymap {
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
+                (
+                    Action::ToggleDetail,
+                    vec![KeyChord {
+                        code: KeyCode::Char('i'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::EditNote,
+                    vec![KeyChord {
+                        code: KeyCode::Char('n'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
             KeyMode::Arrows => vec![
                 (
@@ -825,6 +847,20 @@ impl Keymap {
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
+                (
+                    Action::ToggleDetail,
+                    vec![KeyChord {
+                        code: KeyCode::Char('i'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::EditNote,
+                    vec![KeyChord {
+                        code: KeyCode::Char('n'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
         }
     }
@@ -1002,6 +1038,8 @@ impl Keymap {
             Action::CyclePriority => "p".to_string(),
             Action::CycleSort => "s".to_string(),
             Action::Filter => "f".to_string(),
+            Action::ToggleDetail => "i".to_string(),
+            Action::EditNote => "n".to_string(),
         }
     }
 }
