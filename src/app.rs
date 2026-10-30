@@ -34,7 +34,10 @@ pub struct App {
     pub upcoming_pane: HistoryPane,
     pub prompt_error: Option<String>,
     pub sort_mode: crate::model::SortMode,
-    pub filter: crate::model::Filter,
+    pub today_filter: crate::model::Filter,
+    pub upcoming_filter: crate::model::Filter,
+    pub history_filter: crate::model::Filter,
+    pub marks: std::collections::HashSet<u64>,
     pub status_message: Option<String>,
     pub undo_stack: Vec<Vec<Todo>>,
     pub redo_stack: Vec<Vec<Todo>>,
@@ -154,7 +157,10 @@ impl App {
             upcoming_pane: HistoryPane::Dates,
             prompt_error: None,
             sort_mode: config.tasks.sort,
-            filter: crate::model::Filter::default(),
+            today_filter: crate::model::Filter::default(),
+            upcoming_filter: crate::model::Filter::default(),
+            history_filter: crate::model::Filter::default(),
+            marks: std::collections::HashSet::new(),
             status_message: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -217,7 +223,10 @@ impl App {
             upcoming_pane: HistoryPane::Dates,
             prompt_error: None,
             sort_mode: crate::model::SortMode::Manual,
-            filter: crate::model::Filter::default(),
+            today_filter: crate::model::Filter::default(),
+            upcoming_filter: crate::model::Filter::default(),
+            history_filter: crate::model::Filter::default(),
+            marks: std::collections::HashSet::new(),
             status_message: None,
             undo_stack: Vec::new(),
             redo_stack: Vec::new(),
@@ -295,14 +304,34 @@ impl App {
         list
     }
 
+    pub fn current_filter(&self) -> &crate::model::Filter {
+        match self.current_view {
+            View::Today => &self.today_filter,
+            View::Upcoming => &self.upcoming_filter,
+            View::History => &self.history_filter,
+        }
+    }
+
+    pub fn current_filter_mut(&mut self) -> &mut crate::model::Filter {
+        match self.current_view {
+            View::Today => &mut self.today_filter,
+            View::Upcoming => &mut self.upcoming_filter,
+            View::History => &mut self.history_filter,
+        }
+    }
+
+    pub fn clear_current_filter(&mut self) {
+        *self.current_filter_mut() = crate::model::Filter::default();
+    }
+
     pub fn visible_rows_today(&self) -> Vec<crate::model::Row> {
-        crate::store::visible_rows(&self.todos, self.today, &self.filter, self.sort_mode)
+        crate::store::visible_rows(&self.todos, self.today, &self.today_filter, self.sort_mode)
     }
 
     pub fn visible_rows_history(&self) -> Vec<crate::model::Row> {
         let dates = self.dates_list();
         if let Some(&date) = dates.get(self.history_date_index) {
-            crate::store::visible_rows(&self.todos, date, &self.filter, self.sort_mode)
+            crate::store::visible_rows(&self.todos, date, &self.history_filter, self.sort_mode)
         } else {
             Vec::new()
         }
@@ -324,7 +353,7 @@ impl App {
     pub fn visible_rows_upcoming(&self) -> Vec<crate::model::Row> {
         let dates = self.upcoming_dates_list();
         if let Some(&date) = dates.get(self.upcoming_date_index) {
-            crate::store::visible_rows(&self.todos, date, &self.filter, self.sort_mode)
+            crate::store::visible_rows(&self.todos, date, &self.upcoming_filter, self.sort_mode)
         } else {
             Vec::new()
         }
@@ -1150,6 +1179,7 @@ impl App {
             InputMode::Adding => self.handle_adding_key(key),
             InputMode::Editing(id) => self.handle_editing_key(id, key),
             InputMode::Rescheduling(id) => self.handle_rescheduling_key(id, key),
+            InputMode::Filtering => self.handle_filtering_key(key),
             InputMode::Normal => self.handle_normal_key(key),
         }
     }
@@ -1463,43 +1493,51 @@ impl App {
                         let priority = parsed.priority;
                         let tags = parsed.tags;
 
+                        let added_task = Todo {
+                            id,
+                            text,
+                            created_date: target_date,
+                            done: false,
+                            done_at: None,
+                            priority,
+                            tags,
+                            note: None,
+                            parent: None,
+                            recurring_id: None,
+                        };
+
+                        let is_hidden_by_filter = !self.current_filter().matches(&added_task);
+
                         self.mutate(|todos| {
-                            todos.push(Todo {
-                                id,
-                                text,
-                                created_date: target_date,
-                                done: false,
-                                done_at: None,
-                                priority,
-                                tags,
-                                note: None,
-                                parent: None,
-                                recurring_id: None,
-                            });
+                            todos.push(added_task);
                         });
 
-                        match cur_view {
-                            View::Today => {
-                                self.today_selected_id = Some(id);
-                                if target_date != today {
-                                    self.set_transient_message(format!(
-                                        "Scheduled for {}",
-                                        target_date.format(&self.config.short_date_format)
-                                    ));
+                        if is_hidden_by_filter {
+                            self.set_transient_message("Added (hidden by filter)");
+                        } else {
+                            match cur_view {
+                                View::Today => {
+                                    self.today_selected_id = Some(id);
+                                    if target_date != today {
+                                        self.set_transient_message(format!(
+                                            "Scheduled for {}",
+                                            target_date.format(&self.config.short_date_format)
+                                        ));
+                                    }
                                 }
-                            }
-                            View::Upcoming => {
-                                self.upcoming_todo_id = Some(id);
-                                let cur_up_date = self.selected_upcoming_date.unwrap_or(today);
-                                if target_date != cur_up_date {
-                                    self.set_transient_message(format!(
-                                        "Scheduled for {}",
-                                        target_date.format(&self.config.short_date_format)
-                                    ));
+                                View::Upcoming => {
+                                    self.upcoming_todo_id = Some(id);
+                                    let cur_up_date = self.selected_upcoming_date.unwrap_or(today);
+                                    if target_date != cur_up_date {
+                                        self.set_transient_message(format!(
+                                            "Scheduled for {}",
+                                            target_date.format(&self.config.short_date_format)
+                                        ));
+                                    }
                                 }
-                            }
-                            View::History => {
-                                self.history_todo_id = Some(id);
+                                View::History => {
+                                    self.history_todo_id = Some(id);
+                                }
                             }
                         }
 
@@ -1703,6 +1741,67 @@ impl App {
         false
     }
 
+    fn handle_filtering_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.prompt_error = None;
+            }
+            KeyCode::Enter => {
+                let filter = crate::parser::parse_filter(&self.input_buffer);
+                *self.current_filter_mut() = filter;
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.prompt_error = None;
+                self.re_resolve_selections();
+            }
+            KeyCode::Left => {
+                self.cursor_position = self.cursor_position.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_len = self.input_buffer.chars().count();
+                if self.cursor_position < char_len {
+                    self.cursor_position += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor_position = 0;
+            }
+            KeyCode::End => {
+                self.cursor_position = self.input_buffer.chars().count();
+            }
+            KeyCode::Backspace => {
+                self.prompt_error = None;
+                if self.cursor_position > 0 {
+                    let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                    chars.remove(self.cursor_position - 1);
+                    self.input_buffer = chars.into_iter().collect();
+                    self.cursor_position -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                if self.cursor_position < chars.len() {
+                    chars.remove(self.cursor_position);
+                    self.input_buffer = chars.into_iter().collect();
+                }
+            }
+            KeyCode::Char(c) => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                chars.insert(self.cursor_position, c);
+                self.input_buffer = chars.into_iter().collect();
+                self.cursor_position += 1;
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn handle_normal_key(&mut self, key: KeyEvent) -> bool {
         if self.show_help {
             match key.code {
@@ -1712,6 +1811,18 @@ impl App {
                 _ => {}
             }
             return false;
+        }
+
+        if key.code == KeyCode::Esc {
+            if !self.marks.is_empty() {
+                self.marks.clear();
+                return false;
+            }
+            if !self.current_filter().is_empty() {
+                self.clear_current_filter();
+                self.re_resolve_selections();
+                return false;
+            }
         }
 
         let Some(action) = self.keymap.resolve(&key) else {
@@ -1771,6 +1882,12 @@ impl App {
             crate::keymap::Action::CycleSort => {
                 self.sort_mode = self.sort_mode.next();
                 self.re_resolve_selections();
+            }
+            crate::keymap::Action::Filter => {
+                self.input_mode = InputMode::Filtering;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.prompt_error = None;
             }
             crate::keymap::Action::Undo => {
                 self.undo();
@@ -3753,5 +3870,121 @@ mod tests {
         let rows = app.visible_rows_today();
         assert_eq!(rows[0].id, 1);
         assert_eq!(rows[1].id, 2);
+    }
+
+    #[test]
+    fn test_filter_with_f_key_and_esc_clears() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Work task".to_string(),
+                    created_date: today,
+                    tags: vec!["work".to_string()],
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Home task".to_string(),
+                    created_date: today,
+                    tags: vec!["home".to_string()],
+                    ..Default::default()
+                },
+                Todo {
+                    id: 3,
+                    text: "Urgent work task".to_string(),
+                    created_date: today,
+                    tags: vec!["work".to_string()],
+                    priority: 1,
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        assert_eq!(app.visible_rows_today().len(), 3);
+
+        // Press 'f': open filter prompt
+        app.handle_key(key_press(KeyCode::Char('f')));
+        assert_eq!(app.input_mode, InputMode::Filtering);
+
+        // Filter by "#work"
+        app.input_buffer = "#work".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.today_filter.tags, vec!["work"]);
+
+        let rows = app.visible_rows_today();
+        assert_eq!(rows.len(), 2);
+        assert_eq!(rows[0].id, 1);
+        assert_eq!(rows[1].id, 3);
+
+        // Esc in normal mode clears filter
+        app.handle_key(key_press(KeyCode::Esc));
+        assert!(app.today_filter.is_empty());
+        assert_eq!(app.visible_rows_today().len(), 3);
+    }
+
+    #[test]
+    fn test_add_task_hidden_by_filter_shows_transient() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(Vec::new(), today);
+
+        // Set active filter for Today
+        app.today_filter = crate::parser::parse_filter("#work");
+
+        // Add task without #work tag
+        app.handle_key(key_press(KeyCode::Char('a')));
+        app.input_buffer = "Buy groceries #home".to_string();
+        app.handle_key(key_press(KeyCode::Enter));
+
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Added (hidden by filter)")
+        );
+        assert!(app.visible_rows_today().is_empty());
+    }
+
+    #[test]
+    fn test_filter_is_per_view() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let tomorrow = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Today work".to_string(),
+                    created_date: today,
+                    tags: vec!["work".to_string()],
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Upcoming personal".to_string(),
+                    created_date: tomorrow,
+                    tags: vec!["personal".to_string()],
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        // Set filter on Today
+        app.today_filter = crate::parser::parse_filter("#work");
+        assert_eq!(app.visible_rows_today().len(), 1);
+
+        // Switch to Upcoming
+        app.current_view = View::Upcoming;
+        app.clamp_selections();
+        // Upcoming filter is empty
+        assert!(app.upcoming_filter.is_empty());
+        assert_eq!(app.visible_rows_upcoming().len(), 1);
+
+        // Switch back to Today
+        app.current_view = View::Today;
+        assert_eq!(app.today_filter.tags, vec!["work"]);
+        assert_eq!(app.visible_rows_today().len(), 1);
     }
 }

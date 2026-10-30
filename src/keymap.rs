@@ -30,10 +30,11 @@ pub enum Action {
     Reschedule,
     CyclePriority,
     CycleSort,
+    Filter,
 }
 
 impl Action {
-    pub const ALL: [Action; 25] = [
+    pub const ALL: [Action; 26] = [
         Action::Quit,
         Action::Add,
         Action::Edit,
@@ -59,6 +60,7 @@ impl Action {
         Action::Reschedule,
         Action::CyclePriority,
         Action::CycleSort,
+        Action::Filter,
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -88,6 +90,7 @@ impl Action {
             "reschedule" => Some(Action::Reschedule),
             "cycle_priority" | "priority" => Some(Action::CyclePriority),
             "cycle_sort" | "sort" => Some(Action::CycleSort),
+            "filter" => Some(Action::Filter),
             _ => None,
         }
     }
@@ -119,6 +122,7 @@ impl Action {
             Action::Reschedule => "reschedule",
             Action::CyclePriority => "cycle_priority",
             Action::CycleSort => "cycle_sort",
+            Action::Filter => "filter",
         }
     }
 }
@@ -612,6 +616,13 @@ impl Keymap {
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
+                (
+                    Action::Filter,
+                    vec![KeyChord {
+                        code: KeyCode::Char('f'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
             KeyMode::Arrows => vec![
                 (
@@ -807,6 +818,13 @@ impl Keymap {
                         modifiers: KeyModifiers::NONE,
                     }],
                 ),
+                (
+                    Action::Filter,
+                    vec![KeyChord {
+                        code: KeyCode::Char('f'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
         }
     }
@@ -983,6 +1001,7 @@ impl Keymap {
             Action::Reschedule => "t".to_string(),
             Action::CyclePriority => "p".to_string(),
             Action::CycleSort => "s".to_string(),
+            Action::Filter => "f".to_string(),
         }
     }
 }

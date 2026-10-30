@@ -115,6 +115,19 @@ impl Filter {
         }
         true
     }
+
+    pub fn format_header(&self) -> String {
+        let mut parts = Vec::new();
+        for tag in &self.tags {
+            parts.push(format!("#{tag}"));
+        }
+        if self.min_priority == 2 {
+            parts.push("!!".to_string());
+        } else if self.min_priority == 1 {
+            parts.push("!".to_string());
+        }
+        format!("filter: {}", parts.join(" "))
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -138,4 +151,5 @@ pub enum InputMode {
     Adding,
     Editing(u64),
     Rescheduling(u64),
+    Filtering,
 }

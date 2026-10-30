@@ -349,6 +349,28 @@ pub fn re_serialize_tokens(todo: &Todo, today: NaiveDate) -> String {
     parts.join(" ")
 }
 
+/// Parses filter prompt input: space-separated `#tag` words (all must match) and/or `!` (priority >= 1) or `!!` (priority >= 2).
+/// Empty input clears the filter.
+pub fn parse_filter(input: &str) -> crate::model::Filter {
+    let mut tags = Vec::new();
+    let mut min_priority = 0;
+
+    for word in input.split_whitespace() {
+        if word == "!" {
+            min_priority = min_priority.max(1);
+        } else if word == "!!" {
+            min_priority = 2;
+        } else {
+            let tag = word.strip_prefix('#').unwrap_or(word).to_lowercase();
+            if !tag.is_empty() && !tags.contains(&tag) {
+                tags.push(tag);
+            }
+        }
+    }
+
+    crate::model::Filter { tags, min_priority }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -519,5 +541,26 @@ mod tests {
         };
         let s = re_serialize_tokens(&todo, today);
         assert_eq!(s, "Buy groceries !! #home #food @2026-11-05");
+    }
+
+    #[test]
+    fn test_parse_filter() {
+        let f_empty = parse_filter("   ");
+        assert!(f_empty.is_empty());
+
+        let f_tags = parse_filter("#work #HOME #work");
+        assert_eq!(f_tags.tags, vec!["work", "home"]);
+        assert_eq!(f_tags.min_priority, 0);
+        assert_eq!(f_tags.format_header(), "filter: #work #home");
+
+        let f_prio1 = parse_filter("#work !");
+        assert_eq!(f_prio1.tags, vec!["work"]);
+        assert_eq!(f_prio1.min_priority, 1);
+        assert_eq!(f_prio1.format_header(), "filter: #work !");
+
+        let f_prio2 = parse_filter("!! #urgent");
+        assert_eq!(f_prio2.tags, vec!["urgent"]);
+        assert_eq!(f_prio2.min_priority, 2);
+        assert_eq!(f_prio2.format_header(), "filter: #urgent !!");
     }
 }

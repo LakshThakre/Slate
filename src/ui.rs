@@ -19,6 +19,7 @@ pub struct Symbols {
     pub prompt_default: &'static str,
     pub prompt_edit: &'static str,
     pub prompt_reschedule: &'static str,
+    pub prompt_filter: &'static str,
     pub v_divider: &'static str,
     pub h_rule: &'static str,
     pub bullet: &'static str,
@@ -46,6 +47,7 @@ impl Symbols {
             prompt_default: "› ",
             prompt_edit: "› Edit task ",
             prompt_reschedule: "› Reschedule: ",
+            prompt_filter: "› filter ",
             v_divider: "│",
             h_rule: "─",
             bullet: "•",
@@ -67,6 +69,7 @@ impl Symbols {
             prompt_default: "> ",
             prompt_edit: "> Edit task ",
             prompt_reschedule: "> Reschedule: ",
+            prompt_filter: "> filter ",
             v_divider: "|",
             h_rule: "-",
             bullet: "*",
@@ -346,6 +349,15 @@ fn draw_header(app: &mut App, frame: &mut Frame, area: Rect) {
         ));
     }
 
+    let cur_filter = app.current_filter();
+    if !cur_filter.is_empty() {
+        header_spans.push(Span::raw("    "));
+        header_spans.push(Span::styled(
+            cur_filter.format_header(),
+            app.theme.dim_style(),
+        ));
+    }
+
     let line = Line::from(header_spans);
 
     frame.render_widget(Paragraph::new(line), area);
@@ -507,6 +519,8 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
                 todo,
                 is_selected,
                 list_area.width as usize,
+                app.terminal_width,
+                app.config.tasks.show_tags,
                 &app.theme,
                 &app.symbols,
             ))
@@ -744,6 +758,8 @@ fn draw_history(app: &mut App, frame: &mut Frame, area: Rect) {
                         active_marker,
                         is_todo_overdue,
                         right_rows[2].width as usize,
+                        app.terminal_width,
+                        app.config.tasks.show_tags,
                         time_str.as_deref(),
                         &app.theme,
                         &app.symbols,
@@ -987,6 +1003,8 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
                         active_marker,
                         false,
                         right_rows[2].width as usize,
+                        app.terminal_width,
+                        app.config.tasks.show_tags,
                         time_str.as_deref(),
                         &app.theme,
                         &app.symbols,
@@ -1030,6 +1048,7 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     let prompt_label = match app.input_mode {
         crate::model::InputMode::Editing(_) => app.symbols.prompt_edit,
         crate::model::InputMode::Rescheduling(_) => app.symbols.prompt_reschedule,
+        crate::model::InputMode::Filtering => app.symbols.prompt_filter,
         _ => app.symbols.prompt_default,
     };
 
@@ -1072,6 +1091,7 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
         let placeholder = match app.input_mode {
             crate::model::InputMode::Editing(_) => "",
             crate::model::InputMode::Rescheduling(_) => "tomorrow, fri, +3d, YYYY-MM-DD",
+            crate::model::InputMode::Filtering => "#tag, ! (empty clears)",
             _ => "What needs doing today?",
         };
         spans.push(Span::styled(placeholder, app.theme.dim_style()));
@@ -1213,6 +1233,8 @@ fn format_todo_row(
     todo: &Todo,
     is_selected: bool,
     max_width: usize,
+    terminal_width: u16,
+    show_tags: bool,
     theme: &Theme,
     symbols: &Symbols,
 ) -> ListItem<'static> {
@@ -1251,8 +1273,36 @@ fn format_todo_row(
     };
 
     let checkbox_len = symbols.check_done.chars().count();
-    let avail = max_width.saturating_sub(marker_len + checkbox_len + prio_len + 1);
-    let text_truncated = truncate_text(&todo.text, avail, symbols.ellipsis);
+    let avail_total = max_width.saturating_sub(marker_len + checkbox_len + prio_len + 1);
+
+    let can_show_tags = show_tags && terminal_width >= 60 && !todo.tags.is_empty();
+    let (tags_str, tags_len) = if can_show_tags {
+        let s = format!(
+            " {}",
+            todo.tags
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let len = s.chars().count();
+        (s, len)
+    } else {
+        (String::new(), 0)
+    };
+
+    let (text_truncated, show_rendered_tags) = if tags_len > 0 && avail_total > tags_len + 2 {
+        let avail_text = avail_total.saturating_sub(tags_len);
+        (
+            truncate_text(&todo.text, avail_text, symbols.ellipsis),
+            true,
+        )
+    } else {
+        (
+            truncate_text(&todo.text, avail_total, symbols.ellipsis),
+            false,
+        )
+    };
 
     let text_span = if todo.done {
         Span::styled(
@@ -1268,6 +1318,9 @@ fn format_todo_row(
         spans.push(Span::styled(prio_str, prio_style));
     }
     spans.push(text_span);
+    if show_rendered_tags {
+        spans.push(Span::styled(tags_str, theme.dim_style()));
+    }
 
     ListItem::new(Line::from(spans))
 }
@@ -1279,6 +1332,8 @@ fn format_todo_row_history(
     is_active: bool,
     is_overdue: bool,
     max_width: usize,
+    terminal_width: u16,
+    show_tags: bool,
     time_str: Option<&str>,
     theme: &Theme,
     symbols: &Symbols,
@@ -1331,8 +1386,40 @@ fn format_todo_row_history(
         suffix_str.chars().count() + 2
     };
 
-    let avail = max_width.saturating_sub(marker_len + checkbox_len + prio_len + suffix_len + 1);
-    let text_truncated = truncate_text(&todo.text, avail, symbols.ellipsis);
+    let avail_total =
+        max_width.saturating_sub(marker_len + checkbox_len + prio_len + suffix_len + 1);
+
+    let can_show_tags = show_tags && terminal_width >= 60 && !todo.tags.is_empty();
+    let (tags_str, tags_len) = if can_show_tags {
+        let s = format!(
+            " {}",
+            todo.tags
+                .iter()
+                .map(|t| format!("#{t}"))
+                .collect::<Vec<_>>()
+                .join(" ")
+        );
+        let len = s.chars().count();
+        (s, len)
+    } else {
+        (String::new(), 0)
+    };
+
+    let (text_truncated, show_rendered_tags, actual_tags_len) =
+        if tags_len > 0 && avail_total > tags_len + 2 {
+            let avail_text = avail_total.saturating_sub(tags_len);
+            (
+                truncate_text(&todo.text, avail_text, symbols.ellipsis),
+                true,
+                tags_len,
+            )
+        } else {
+            (
+                truncate_text(&todo.text, avail_total, symbols.ellipsis),
+                false,
+                0,
+            )
+        };
 
     let text_span = if todo.done {
         Span::styled(
@@ -1344,7 +1431,12 @@ fn format_todo_row_history(
     };
 
     let pad_len = max_width.saturating_sub(
-        marker_len + checkbox_len + prio_len + text_truncated.chars().count() + suffix_len,
+        marker_len
+            + checkbox_len
+            + prio_len
+            + text_truncated.chars().count()
+            + actual_tags_len
+            + suffix_len,
     );
 
     let mut spans = vec![marker, checkbox];
@@ -1352,6 +1444,9 @@ fn format_todo_row_history(
         spans.push(Span::styled(prio_str, prio_style));
     }
     spans.push(text_span);
+    if show_rendered_tags {
+        spans.push(Span::styled(tags_str, theme.dim_style()));
+    }
     spans.push(Span::raw(" ".repeat(pad_len)));
 
     if !suffix_str.is_empty() {
@@ -1666,6 +1761,12 @@ fn build_right_help_lines(
         help_entry(
             &keymap.hint(crate::keymap::Action::Reschedule),
             "reschedule task",
+            12,
+            theme,
+        ),
+        help_entry(
+            &keymap.hint(crate::keymap::Action::Filter),
+            "filter tasks",
             12,
             theme,
         ),
@@ -2114,6 +2215,8 @@ mod tests {
             sym.marker,
             sym.prompt_default,
             sym.prompt_edit,
+            sym.prompt_reschedule,
+            sym.prompt_filter,
             sym.v_divider,
             sym.h_rule,
             sym.bullet,
@@ -2542,5 +2645,79 @@ mod tests {
         assert!(content.contains("sort: priority"));
         assert!(content.contains("! Important task"));
         assert!(content.contains("!! Urgent task"));
+    }
+
+    #[test]
+    fn test_render_tags_and_filter_header() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let make_app = || {
+            App::new_for_test_with_date(
+                vec![Todo {
+                    id: 1,
+                    text: "Project work".to_string(),
+                    created_date: today,
+                    tags: vec!["work".to_string(), "urgent".to_string()],
+                    ..Default::default()
+                }],
+                today,
+            )
+        };
+
+        // 1. Normal width (80 cols) with show_tags=true: tags render
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = make_app();
+        app.terminal_width = 80;
+        app.today_filter = crate::parser::parse_filter("#work");
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content.contains("filter: #work"));
+        assert!(content.contains("#work #urgent"));
+
+        // 2. Narrow width (55 cols < 60): tags are hidden
+        let backend_narrow = TestBackend::new(55, 24);
+        let mut terminal_narrow = Terminal::new(backend_narrow).unwrap();
+        let mut app_narrow = make_app();
+        app_narrow.terminal_width = 55;
+        terminal_narrow
+            .draw(|f| render(&mut app_narrow, f))
+            .unwrap();
+        let content_narrow: String = terminal_narrow
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(!content_narrow.contains("#work #urgent"));
+        assert!(content_narrow.contains("Project work"));
+
+        // 3. Normal width with show_tags=false: tags are hidden
+        let backend_notags = TestBackend::new(80, 24);
+        let mut terminal_notags = Terminal::new(backend_notags).unwrap();
+        let mut app_notags = make_app();
+        app_notags.terminal_width = 80;
+        app_notags.config.tasks.show_tags = false;
+        terminal_notags
+            .draw(|f| render(&mut app_notags, f))
+            .unwrap();
+        let content_notags: String = terminal_notags
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(!content_notags.contains("#work #urgent"));
+        assert!(content_notags.contains("Project work"));
     }
 }
