@@ -15,6 +15,27 @@ pub struct Snapshot {
     pub focus: Option<u64>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum MutationTarget {
+    None,
+    Single(u64),
+    Bulk(Vec<u64>),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct MutationOutcome {
+    pub total: usize,
+    pub applied: usize,
+    pub skipped: usize,
+}
+
+pub struct AppStoreMut<'a> {
+    pub todos: &'a mut Vec<Todo>,
+    pub recurring: &'a mut Vec<crate::model::Recurring>,
+    pub next_id: &'a mut u64,
+    pub focus: &'a mut Option<u64>,
+}
+
 #[derive(Debug, Clone)]
 pub struct SearchStateSnapshot {
     pub current_view: View,
@@ -333,7 +354,7 @@ impl App {
         app
     }
 
-    pub fn save(&mut self) {
+    pub fn save_unlocked(&mut self) {
         if !self.auto_save {
             return;
         }
@@ -344,7 +365,7 @@ impl App {
             recurring: self.recurring.clone(),
             focus: self.focus,
         };
-        let res = crate::storage::save_storage_data(
+        let res = crate::storage::save_storage_data_unlocked(
             &self.data_path,
             &data,
             self.original_version,
@@ -377,6 +398,23 @@ impl App {
                 self.status_message = Some(format!("Save error: {e}"));
             }
         }
+    }
+
+    pub fn save(&mut self) {
+        if !self.auto_save {
+            return;
+        }
+        let _lock = match crate::storage::lock::acquire_lock(
+            &self.data_path,
+            std::time::Duration::from_secs(3),
+        ) {
+            Ok(l) => l,
+            Err(e) => {
+                self.status_message = Some(format!("Save error: {e}"));
+                return;
+            }
+        };
+        self.save_unlocked();
     }
 
     pub fn dates_list(&self) -> Vec<NaiveDate> {
@@ -690,14 +728,14 @@ impl App {
                 self.history_date_index = pos;
                 self.selected_history_date = Some(target_date);
             } else if !new_dates.is_empty() {
-                let (nearest_pos, nearest_date) = new_dates
+                if let Some((nearest_pos, &nearest_date)) = new_dates
                     .iter()
                     .enumerate()
                     .min_by_key(|(_, &d)| (d - target_date).num_days().abs())
-                    .map(|(i, &d)| (i, d))
-                    .unwrap();
-                self.history_date_index = nearest_pos;
-                self.selected_history_date = Some(nearest_date);
+                {
+                    self.history_date_index = nearest_pos;
+                    self.selected_history_date = Some(nearest_date);
+                }
             }
         }
 
@@ -708,14 +746,14 @@ impl App {
                 self.upcoming_date_index = pos;
                 self.selected_upcoming_date = Some(target_date);
             } else if !new_up_dates.is_empty() {
-                let (nearest_pos, nearest_date) = new_up_dates
+                if let Some((nearest_pos, &nearest_date)) = new_up_dates
                     .iter()
                     .enumerate()
                     .min_by_key(|(_, &d)| (d - target_date).num_days().abs())
-                    .map(|(i, &d)| (i, d))
-                    .unwrap();
-                self.upcoming_date_index = nearest_pos;
-                self.selected_upcoming_date = Some(nearest_date);
+                {
+                    self.upcoming_date_index = nearest_pos;
+                    self.selected_upcoming_date = Some(nearest_date);
+                }
             }
         }
 
@@ -866,12 +904,122 @@ impl App {
         self.redo_stack.clear();
     }
 
-    pub fn mutate<F>(&mut self, f: F)
+    fn refresh_if_changed(&mut self) -> Result<(), ()> {
+        if self.auto_save && self.data_path.exists() {
+            let current_fp = crate::storage::FileFingerprint::of(&self.data_path);
+            if current_fp != self.fingerprint {
+                match crate::storage::load_todos(&self.data_path) {
+                    Ok(load_res) => {
+                        self.apply_external_data(load_res, false);
+                        self.pending_external_change = false;
+                    }
+                    Err(e) => {
+                        if let Some(fp) = current_fp {
+                            self.detector.record_failed(fp);
+                        }
+                        match e {
+                            crate::storage::LoadError::VersionTooNew { .. } => {
+                                self.set_transient_message(e.to_string());
+                            }
+                            _ => {
+                                self.set_transient_message(
+                                    "Can't save: data file is unreadable · see backups/",
+                                );
+                            }
+                        }
+                        return Err(());
+                    }
+                }
+            } else {
+                self.pending_external_change = false;
+            }
+        }
+        Ok(())
+    }
+
+    pub fn mutate_with_store<F>(&mut self, target: MutationTarget, f: F) -> Option<MutationOutcome>
     where
-        F: FnOnce(&mut Vec<Todo>),
+        F: FnOnce(&mut AppStoreMut<'_>, &[u64]),
     {
+        let _lock = if self.auto_save {
+            match crate::storage::lock::acquire_lock(
+                &self.data_path,
+                std::time::Duration::from_secs(3),
+            ) {
+                Ok(lock) => Some(lock),
+                Err(e) => {
+                    self.set_transient_message(format!("Can't save: {e}"));
+                    return None;
+                }
+            }
+        } else {
+            None
+        };
+
+        if self.refresh_if_changed().is_err() {
+            return None;
+        }
+
         self.snapshot();
-        f(&mut self.todos);
+
+        let (valid_ids, outcome) = match target {
+            MutationTarget::None => (
+                Vec::new(),
+                MutationOutcome {
+                    total: 0,
+                    applied: 0,
+                    skipped: 0,
+                },
+            ),
+            MutationTarget::Single(id) => {
+                if !self.todos.iter().any(|t| t.id == id) {
+                    self.undo_stack.pop();
+                    self.set_transient_message("Task no longer exists");
+                    return None;
+                }
+                (
+                    vec![id],
+                    MutationOutcome {
+                        total: 1,
+                        applied: 1,
+                        skipped: 0,
+                    },
+                )
+            }
+            MutationTarget::Bulk(ids) => {
+                let total = ids.len();
+                let valid: Vec<u64> = ids
+                    .into_iter()
+                    .filter(|id| self.todos.iter().any(|t| t.id == *id))
+                    .collect();
+                let applied = valid.len();
+                let skipped = total.saturating_sub(applied);
+                if applied == 0 {
+                    self.undo_stack.pop();
+                    self.set_transient_message("Task no longer exists");
+                    return None;
+                }
+                (
+                    valid,
+                    MutationOutcome {
+                        total,
+                        applied,
+                        skipped,
+                    },
+                )
+            }
+        };
+
+        {
+            let mut store = AppStoreMut {
+                todos: &mut self.todos,
+                recurring: &mut self.recurring,
+                next_id: &mut self.next_id,
+                focus: &mut self.focus,
+            };
+            f(&mut store, &valid_ids);
+        }
+
         self.data_revision += 1;
         self.stats_cache.invalidate();
         if let Some(fid) = self.focus {
@@ -879,11 +1027,42 @@ impl App {
                 self.focus = None;
             }
         }
-        self.save();
+
+        self.save_unlocked();
         self.re_resolve_selections();
+
+        Some(outcome)
+    }
+
+    pub fn mutate<F>(&mut self, target: MutationTarget, f: F) -> Option<MutationOutcome>
+    where
+        F: FnOnce(&mut Vec<Todo>, &[u64]),
+    {
+        self.mutate_with_store(target, |store, valid_ids| {
+            f(store.todos, valid_ids);
+        })
     }
 
     pub fn undo(&mut self) {
+        let _lock = if self.auto_save {
+            match crate::storage::lock::acquire_lock(
+                &self.data_path,
+                std::time::Duration::from_secs(3),
+            ) {
+                Ok(lock) => Some(lock),
+                Err(e) => {
+                    self.set_transient_message(format!("Can't save: {e}"));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        if self.refresh_if_changed().is_err() {
+            return;
+        }
+
         if let Some(prev) = self.undo_stack.pop() {
             self.redo_stack.push(Snapshot {
                 todos: self.todos.clone(),
@@ -898,7 +1077,7 @@ impl App {
             self.focus = prev.focus;
             self.data_revision += 1;
             self.stats_cache.invalidate();
-            self.save();
+            self.save_unlocked();
             self.re_resolve_selections();
             self.set_transient_message("Undone");
         } else {
@@ -907,6 +1086,25 @@ impl App {
     }
 
     pub fn redo(&mut self) {
+        let _lock = if self.auto_save {
+            match crate::storage::lock::acquire_lock(
+                &self.data_path,
+                std::time::Duration::from_secs(3),
+            ) {
+                Ok(lock) => Some(lock),
+                Err(e) => {
+                    self.set_transient_message(format!("Can't save: {e}"));
+                    return;
+                }
+            }
+        } else {
+            None
+        };
+
+        if self.refresh_if_changed().is_err() {
+            return;
+        }
+
         if let Some(next) = self.redo_stack.pop() {
             self.undo_stack.push(Snapshot {
                 todos: self.todos.clone(),
@@ -921,7 +1119,7 @@ impl App {
             self.focus = next.focus;
             self.data_revision += 1;
             self.stats_cache.invalidate();
-            self.save();
+            self.save_unlocked();
             self.re_resolve_selections();
             self.set_transient_message("Redone");
         } else {
@@ -998,18 +1196,28 @@ impl App {
     pub fn carry_over(&mut self) {
         if let Some((_, ids)) = self.uncarried_previous_tasks() {
             let today = self.today;
-            let parent_count = self
-                .todos
-                .iter()
-                .filter(|t| ids.contains(&t.id) && t.parent.is_none())
-                .count();
-            self.mutate(|todos| {
-                crate::store::carry_over_tasks(todos, &ids, today);
+            let outcome = self.mutate(MutationTarget::Bulk(ids.clone()), |todos, valid_ids| {
+                crate::store::carry_over_tasks(todos, valid_ids, today);
             });
-            self.set_transient_message(format!(
-                "Carried over {parent_count} unfinished task{} · u to undo",
-                if parent_count == 1 { "" } else { "s" }
-            ));
+            if let Some(outcome) = outcome {
+                let parent_count = self
+                    .todos
+                    .iter()
+                    .filter(|t| t.created_date == today && t.parent.is_none())
+                    .count();
+                if outcome.skipped > 0 {
+                    self.set_transient_message(format!(
+                        "Carried over {parent_count} unfinished task{} ({} skipped) · u to undo",
+                        if parent_count == 1 { "" } else { "s" },
+                        outcome.skipped
+                    ));
+                } else {
+                    self.set_transient_message(format!(
+                        "Carried over {parent_count} unfinished task{} · u to undo",
+                        if parent_count == 1 { "" } else { "s" }
+                    ));
+                }
+            }
         }
     }
 
@@ -1031,7 +1239,7 @@ impl App {
             return;
         }
         self.today_selected_id = Some(selected_id);
-        self.mutate(|todos| {
+        self.mutate(MutationTarget::Single(selected_id), |todos, _| {
             crate::store::reorder_day_task(todos, today, selected_id, down);
         });
     }
@@ -1055,7 +1263,7 @@ impl App {
                 return;
             }
             self.history_todo_id = Some(selected_id);
-            self.mutate(|todos| {
+            self.mutate(MutationTarget::Single(selected_id), |todos, _| {
                 crate::store::reorder_day_task(todos, selected_date, selected_id, down);
             });
         }
@@ -1063,56 +1271,77 @@ impl App {
 
     pub fn clear_completed_today(&mut self) {
         let today = self.today;
-        let completed_count = self
+        let completed_ids: Vec<u64> = self
             .todos
             .iter()
             .filter(|t| t.created_date == today && t.done)
-            .count();
-        if completed_count == 0 {
+            .map(|t| t.id)
+            .collect();
+        if completed_ids.is_empty() {
             self.set_transient_message("No completed tasks");
             return;
         }
-        self.mutate(|todos| {
-            crate::store::clear_completed(todos, today);
+        let outcome = self.mutate(MutationTarget::Bulk(completed_ids), |todos, valid_ids| {
+            let valid_set: std::collections::HashSet<u64> = valid_ids.iter().copied().collect();
+            todos.retain(|t| !valid_set.contains(&t.id));
         });
-        self.set_transient_message(format!("Cleared {completed_count} completed · u to undo"));
+        if let Some(outcome) = outcome {
+            self.set_transient_message(format!(
+                "Cleared {} completed · u to undo",
+                outcome.applied
+            ));
+        }
     }
 
     pub fn clear_completed_history(&mut self) {
         let dates = self.dates_list();
         if let Some(&selected_date) = dates.get(self.history_date_index) {
-            let completed_count = self
+            let completed_ids: Vec<u64> = self
                 .todos
                 .iter()
                 .filter(|t| t.created_date == selected_date && t.done)
-                .count();
-            if completed_count == 0 {
+                .map(|t| t.id)
+                .collect();
+            if completed_ids.is_empty() {
                 self.set_transient_message("No completed tasks");
                 return;
             }
-            self.mutate(|todos| {
-                crate::store::clear_completed(todos, selected_date);
+            let outcome = self.mutate(MutationTarget::Bulk(completed_ids), |todos, valid_ids| {
+                let valid_set: std::collections::HashSet<u64> = valid_ids.iter().copied().collect();
+                todos.retain(|t| !valid_set.contains(&t.id));
             });
-            self.set_transient_message(format!("Cleared {completed_count} completed · u to undo"));
+            if let Some(outcome) = outcome {
+                self.set_transient_message(format!(
+                    "Cleared {} completed · u to undo",
+                    outcome.applied
+                ));
+            }
         }
     }
 
     pub fn clear_completed_upcoming(&mut self) {
         let dates = self.upcoming_dates_list();
         if let Some(&selected_date) = dates.get(self.upcoming_date_index) {
-            let completed_count = self
+            let completed_ids: Vec<u64> = self
                 .todos
                 .iter()
                 .filter(|t| t.created_date == selected_date && t.done)
-                .count();
-            if completed_count == 0 {
+                .map(|t| t.id)
+                .collect();
+            if completed_ids.is_empty() {
                 self.set_transient_message("No completed tasks");
                 return;
             }
-            self.mutate(|todos| {
-                crate::store::clear_completed(todos, selected_date);
+            let outcome = self.mutate(MutationTarget::Bulk(completed_ids), |todos, valid_ids| {
+                let valid_set: std::collections::HashSet<u64> = valid_ids.iter().copied().collect();
+                todos.retain(|t| !valid_set.contains(&t.id));
             });
-            self.set_transient_message(format!("Cleared {completed_count} completed · u to undo"));
+            if let Some(outcome) = outcome {
+                self.set_transient_message(format!(
+                    "Cleared {} completed · u to undo",
+                    outcome.applied
+                ));
+            }
         }
     }
 
@@ -1305,14 +1534,18 @@ impl App {
         }
 
         let today = self.today;
-        let id = self.next_id;
-        self.next_id += 1;
-        self.mutate(|todos| {
-            crate::store::add_task_with_id(todos, id, clean_text, today);
+        let mut added_id = 0;
+        self.mutate_with_store(MutationTarget::None, |store, _| {
+            let id = *store.next_id;
+            *store.next_id += 1;
+            added_id = id;
+            crate::store::add_task_with_id(store.todos, id, clean_text, today);
         });
 
-        self.today_selected_id = Some(id);
-        self.re_resolve_selections();
+        if added_id > 0 {
+            self.today_selected_id = Some(added_id);
+            self.re_resolve_selections();
+        }
     }
 
     pub fn toggle_today_todo(&mut self) {
@@ -1320,7 +1553,7 @@ impl App {
         if let Some(row) = rows.get(self.today_selected_index) {
             let target_id = row.id;
             let now = Local::now();
-            self.mutate(|todos| {
+            self.mutate(MutationTarget::Single(target_id), |todos, _| {
                 crate::store::toggle_task(todos, target_id, now);
             });
         }
@@ -1337,16 +1570,18 @@ impl App {
                 }
             }
             let mut deleted_text = None;
-            self.mutate(|todos| {
+            let outcome = self.mutate(MutationTarget::Single(target_id), |todos, _| {
                 if let Some(t) = crate::store::delete_task(todos, target_id) {
                     deleted_text = Some(t.text);
                 }
             });
-            if let Some(text) = deleted_text {
-                self.set_transient_message(format!(
-                    "Deleted \"{}\" · u to undo",
-                    truncate_str(&text, 24)
-                ));
+            if outcome.is_some() {
+                if let Some(text) = deleted_text {
+                    self.set_transient_message(format!(
+                        "Deleted \"{}\" · u to undo",
+                        truncate_str(&text, 24)
+                    ));
+                }
             }
         }
     }
@@ -1356,7 +1591,7 @@ impl App {
         if let Some(row) = rows.get(self.history_todo_index) {
             let target_id = row.id;
             let now = Local::now();
-            self.mutate(|todos| {
+            self.mutate(MutationTarget::Single(target_id), |todos, _| {
                 crate::store::toggle_task(todos, target_id, now);
             });
         }
@@ -1373,16 +1608,18 @@ impl App {
                 }
             }
             let mut deleted_text = None;
-            self.mutate(|todos| {
+            let outcome = self.mutate(MutationTarget::Single(target_id), |todos, _| {
                 if let Some(t) = crate::store::delete_task(todos, target_id) {
                     deleted_text = Some(t.text);
                 }
             });
-            if let Some(text) = deleted_text {
-                self.set_transient_message(format!(
-                    "Deleted \"{}\" · u to undo",
-                    truncate_str(&text, 24)
-                ));
+            if outcome.is_some() {
+                if let Some(text) = deleted_text {
+                    self.set_transient_message(format!(
+                        "Deleted \"{}\" · u to undo",
+                        truncate_str(&text, 24)
+                    ));
+                }
             }
         }
     }
@@ -1396,7 +1633,7 @@ impl App {
         if let Some(row) = rows.get(self.upcoming_todo_index) {
             let target_id = row.id;
             let now = Local::now();
-            self.mutate(|todos| {
+            self.mutate(MutationTarget::Single(target_id), |todos, _| {
                 crate::store::toggle_task(todos, target_id, now);
             });
         }
@@ -1413,11 +1650,30 @@ impl App {
                 }
             }
             let mut deleted_text = None;
-            self.mutate(|todos| {
+            let outcome = self.mutate(MutationTarget::Single(target_id), |todos, _| {
                 if let Some(t) = crate::store::delete_task(todos, target_id) {
                     deleted_text = Some(t.text);
                 }
             });
+            if outcome.is_some() {
+                if let Some(text) = deleted_text {
+                    self.set_transient_message(format!(
+                        "Deleted \"{}\" · u to undo",
+                        truncate_str(&text, 24)
+                    ));
+                }
+            }
+        }
+    }
+
+    pub fn delete_recurring_instance(&mut self, target_id: u64) {
+        let mut deleted_text = None;
+        let outcome = self.mutate(MutationTarget::Single(target_id), |todos, _| {
+            if let Some(t) = crate::store::delete_task(todos, target_id) {
+                deleted_text = Some(t.text);
+            }
+        });
+        if outcome.is_some() {
             if let Some(text) = deleted_text {
                 self.set_transient_message(format!(
                     "Deleted \"{}\" · u to undo",
@@ -1427,62 +1683,47 @@ impl App {
         }
     }
 
-    pub fn delete_recurring_instance(&mut self, target_id: u64) {
-        let mut deleted_text = None;
-        self.mutate(|todos| {
-            if let Some(t) = crate::store::delete_task(todos, target_id) {
-                deleted_text = Some(t.text);
-            }
-        });
-        if let Some(text) = deleted_text {
-            self.set_transient_message(format!(
-                "Deleted \"{}\" · u to undo",
-                truncate_str(&text, 24)
-            ));
-        }
-    }
-
     pub fn delete_recurring_all(&mut self, target_id: u64) {
-        let Some(todo) = self.todos.iter().find(|t| t.id == target_id).cloned() else {
-            return;
-        };
-        let tpl_id = todo.recurring_id;
+        let mut deleted_text = None;
+        let outcome = self.mutate_with_store(MutationTarget::Single(target_id), |store, _| {
+            let Some(todo) = store.todos.iter().find(|t| t.id == target_id).cloned() else {
+                return;
+            };
+            deleted_text = Some(todo.text.clone());
+            let tpl_id = todo.recurring_id;
 
-        self.snapshot();
+            crate::store::delete_task(store.todos, target_id);
 
-        crate::store::delete_task(&mut self.todos, target_id);
+            if let Some(tid) = tpl_id {
+                store.recurring.retain(|r| r.id != tid);
 
-        if let Some(tid) = tpl_id {
-            self.recurring.retain(|r| r.id != tid);
+                let future_instance_ids: Vec<u64> = store
+                    .todos
+                    .iter()
+                    .filter(|t| t.recurring_id == Some(tid) && t.created_date > todo.created_date)
+                    .map(|t| t.id)
+                    .collect();
 
-            let future_instance_ids: Vec<u64> = self
-                .todos
-                .iter()
-                .filter(|t| t.recurring_id == Some(tid) && t.created_date > todo.created_date)
-                .map(|t| t.id)
-                .collect();
+                for fid in future_instance_ids {
+                    crate::store::delete_task(store.todos, fid);
+                }
 
-            for fid in future_instance_ids {
-                crate::store::delete_task(&mut self.todos, fid);
-            }
-
-            for t in &mut self.todos {
-                if t.recurring_id == Some(tid) {
-                    t.recurring_id = None;
+                for t in store.todos.iter_mut() {
+                    if t.recurring_id == Some(tid) {
+                        t.recurring_id = None;
+                    }
                 }
             }
-        }
+        });
 
-        if self.focus == Some(target_id) {
-            self.focus = None;
+        if outcome.is_some() {
+            if let Some(text) = deleted_text {
+                self.set_transient_message(format!(
+                    "Deleted recurring \"{}\" and template · u to undo",
+                    truncate_str(&text, 24)
+                ));
+            }
         }
-
-        self.save();
-        self.re_resolve_selections();
-        self.set_transient_message(format!(
-            "Deleted recurring \"{}\" and template · u to undo",
-            truncate_str(&todo.text, 24)
-        ));
     }
 
     pub fn reorder_upcoming(&mut self, down: bool) {
@@ -1504,7 +1745,7 @@ impl App {
                 return;
             }
             self.upcoming_todo_id = Some(selected_id);
-            self.mutate(|todos| {
+            self.mutate(MutationTarget::Single(selected_id), |todos, _| {
                 crate::store::reorder_day_task(todos, selected_date, selected_id, down);
             });
         }
@@ -1540,7 +1781,7 @@ impl App {
 
     pub fn cycle_selected_priority(&mut self) {
         if let Some(id) = self.selected_task_id() {
-            self.mutate(|todos| {
+            self.mutate(MutationTarget::Single(id), |todos, _| {
                 if let Some(t) = todos.iter_mut().find(|t| t.id == id) {
                     t.priority = match t.priority {
                         0 => 1,
@@ -1557,22 +1798,19 @@ impl App {
             return;
         };
 
-        if let Some(todo) = self.todos.iter().find(|t| t.id == target_id) {
-            if todo.done {
-                return;
+        self.mutate_with_store(MutationTarget::Single(target_id), |store, _| {
+            if let Some(todo) = store.todos.iter().find(|t| t.id == target_id) {
+                if todo.done {
+                    return;
+                }
             }
-        }
 
-        self.snapshot();
-
-        if self.focus == Some(target_id) {
-            self.focus = None;
-        } else {
-            self.focus = Some(target_id);
-        }
-
-        self.save();
-        self.re_resolve_selections();
+            if *store.focus == Some(target_id) {
+                *store.focus = None;
+            } else {
+                *store.focus = Some(target_id);
+            }
+        });
     }
 
     pub fn toggle_mark_selected(&mut self) {
@@ -1625,18 +1863,19 @@ impl App {
         if self.marks.is_empty() {
             return;
         }
-        let marked_ids: std::collections::HashSet<u64> = self.marks.clone();
-        let all_done = self
-            .todos
-            .iter()
-            .filter(|t| marked_ids.contains(&t.id))
-            .all(|t| t.done);
+        let marked_ids: Vec<u64> = self.marks.iter().copied().collect();
         let now = Local::now();
 
-        self.mutate(|todos| {
+        let outcome = self.mutate(MutationTarget::Bulk(marked_ids), |todos, valid_ids| {
+            let valid_set: std::collections::HashSet<u64> = valid_ids.iter().copied().collect();
+            let all_done = todos
+                .iter()
+                .filter(|t| valid_set.contains(&t.id))
+                .all(|t| t.done);
+
             if all_done {
                 for t in todos.iter_mut() {
-                    if marked_ids.contains(&t.id) {
+                    if valid_set.contains(&t.id) {
                         t.done = false;
                         t.done_at = None;
                     }
@@ -1654,7 +1893,7 @@ impl App {
                 }
             } else {
                 for t in todos.iter_mut() {
-                    if marked_ids.contains(&t.id) {
+                    if valid_set.contains(&t.id) {
                         t.done = true;
                         t.done_at = Some(now);
                     }
@@ -1674,8 +1913,21 @@ impl App {
                 }
             }
         });
+
         self.marks.clear();
         self.re_resolve_selections();
+
+        if let Some(outcome) = outcome {
+            if outcome.skipped > 0 {
+                self.set_transient_message(format!(
+                    "Updated {} of {} · {} no longer exist{}",
+                    outcome.applied,
+                    outcome.total,
+                    outcome.skipped,
+                    if outcome.skipped == 1 { "s" } else { "" }
+                ));
+            }
+        }
     }
 
     pub fn bulk_delete(&mut self) {
@@ -1683,17 +1935,32 @@ impl App {
             return;
         }
         let marked_ids: Vec<u64> = self.marks.iter().copied().collect();
-        let count = marked_ids.len();
 
-        self.mutate(|todos| {
-            for id in marked_ids {
-                crate::store::delete_task(todos, id);
+        let outcome = self.mutate(MutationTarget::Bulk(marked_ids), |todos, valid_ids| {
+            for id in valid_ids {
+                crate::store::delete_task(todos, *id);
             }
         });
 
         self.marks.clear();
         self.re_resolve_selections();
-        self.set_transient_message(format!("Deleted {count} tasks · u to undo"));
+
+        if let Some(outcome) = outcome {
+            if outcome.skipped > 0 {
+                self.set_transient_message(format!(
+                    "Deleted {} of {} · {} no longer exist{}",
+                    outcome.applied,
+                    outcome.total,
+                    outcome.skipped,
+                    if outcome.skipped == 1 { "s" } else { "" }
+                ));
+            } else {
+                self.set_transient_message(format!(
+                    "Deleted {} tasks · u to undo",
+                    outcome.applied
+                ));
+            }
+        }
     }
 
     pub fn bulk_move_to_today(&mut self) {
@@ -1701,41 +1968,55 @@ impl App {
             return;
         }
         let marked_ids: Vec<u64> = self.marks.iter().copied().collect();
-        let count = marked_ids.len();
         let today = self.today;
 
-        self.mutate(|todos| {
-            for id in marked_ids {
-                crate::store::move_task_to_date(todos, id, today);
+        let outcome = self.mutate(MutationTarget::Bulk(marked_ids), |todos, valid_ids| {
+            for id in valid_ids {
+                crate::store::move_task_to_date(todos, *id, today);
             }
         });
 
         self.marks.clear();
         self.re_resolve_selections();
-        self.set_transient_message(format!("Moved {count} tasks to Today · u to undo"));
+
+        if let Some(outcome) = outcome {
+            if outcome.skipped > 0 {
+                self.set_transient_message(format!(
+                    "Moved {} of {} to Today · {} no longer exist{}",
+                    outcome.applied,
+                    outcome.total,
+                    outcome.skipped,
+                    if outcome.skipped == 1 { "s" } else { "" }
+                ));
+            } else {
+                self.set_transient_message(format!(
+                    "Moved {} tasks to Today · u to undo",
+                    outcome.applied
+                ));
+            }
+        }
     }
 
     pub fn set_recurrence_off(&mut self, target_id: u64) {
-        let Some(todo) = self.todos.iter().find(|t| t.id == target_id).cloned() else {
-            return;
-        };
-        let Some(tpl_id) = todo.recurring_id else {
-            self.set_transient_message("Task is not recurring");
-            return;
-        };
+        let outcome = self.mutate_with_store(MutationTarget::Single(target_id), |store, _| {
+            let Some(todo) = store.todos.iter().find(|t| t.id == target_id).cloned() else {
+                return;
+            };
+            let Some(tpl_id) = todo.recurring_id else {
+                return;
+            };
 
-        self.snapshot();
-
-        self.recurring.retain(|r| r.id != tpl_id);
-        for t in &mut self.todos {
-            if t.recurring_id == Some(tpl_id) {
-                t.recurring_id = None;
+            store.recurring.retain(|r| r.id != tpl_id);
+            for t in store.todos.iter_mut() {
+                if t.recurring_id == Some(tpl_id) {
+                    t.recurring_id = None;
+                }
             }
-        }
+        });
 
-        self.save();
-        self.re_resolve_selections();
-        self.set_transient_message("Recurrence off");
+        if outcome.is_some() {
+            self.set_transient_message("Recurrence off");
+        }
     }
 
     pub fn set_recurrence_rule(&mut self, target_id: u64, rule: crate::model::RecurrenceRule) {
@@ -1747,66 +2028,66 @@ impl App {
             return;
         }
 
-        self.snapshot();
-
         let rule_name = match rule {
             crate::model::RecurrenceRule::Daily => "daily",
             crate::model::RecurrenceRule::Weekdays => "weekdays",
             crate::model::RecurrenceRule::Weekly => "weekly",
         };
+        let today = self.today;
 
-        if let Some(tpl_id) = todo.recurring_id {
-            if let Some(tpl) = self.recurring.iter_mut().find(|r| r.id == tpl_id) {
-                tpl.rule = rule;
-                if rule == crate::model::RecurrenceRule::Weekly {
-                    tpl.anchor = todo.created_date;
-                }
-            }
-        } else {
-            let tpl_id = self.next_id;
-            self.next_id += 1;
-            let anchor = match rule {
-                crate::model::RecurrenceRule::Weekdays => {
-                    let wd = todo.created_date.weekday();
-                    if wd == chrono::Weekday::Sat {
-                        todo.created_date
-                            .succ_opt()
-                            .and_then(|d| d.succ_opt())
-                            .unwrap_or(todo.created_date)
-                    } else if wd == chrono::Weekday::Sun {
-                        todo.created_date.succ_opt().unwrap_or(todo.created_date)
-                    } else {
-                        todo.created_date
-                    }
-                }
-                _ => todo.created_date,
+        let outcome = self.mutate_with_store(MutationTarget::Single(target_id), |store, _| {
+            let Some(todo) = store.todos.iter().find(|t| t.id == target_id).cloned() else {
+                return;
             };
 
-            self.recurring.push(crate::model::Recurring {
-                id: tpl_id,
-                text: todo.text.clone(),
-                tags: todo.tags.clone(),
-                priority: todo.priority,
-                rule,
-                anchor,
-                last_materialized: Some(todo.created_date),
-            });
+            if let Some(tpl_id) = todo.recurring_id {
+                if let Some(tpl) = store.recurring.iter_mut().find(|r| r.id == tpl_id) {
+                    tpl.rule = rule;
+                    if rule == crate::model::RecurrenceRule::Weekly {
+                        tpl.anchor = todo.created_date;
+                    }
+                }
+            } else {
+                let tpl_id = *store.next_id;
+                *store.next_id += 1;
+                let anchor = match rule {
+                    crate::model::RecurrenceRule::Weekdays => {
+                        let wd = todo.created_date.weekday();
+                        if wd == chrono::Weekday::Sat {
+                            todo.created_date
+                                .succ_opt()
+                                .and_then(|d| d.succ_opt())
+                                .unwrap_or(todo.created_date)
+                        } else if wd == chrono::Weekday::Sun {
+                            todo.created_date.succ_opt().unwrap_or(todo.created_date)
+                        } else {
+                            todo.created_date
+                        }
+                    }
+                    _ => todo.created_date,
+                };
 
-            if let Some(t) = self.todos.iter_mut().find(|t| t.id == target_id) {
-                t.recurring_id = Some(tpl_id);
+                store.recurring.push(crate::model::Recurring {
+                    id: tpl_id,
+                    text: todo.text.clone(),
+                    tags: todo.tags.clone(),
+                    priority: todo.priority,
+                    rule,
+                    anchor,
+                    last_materialized: Some(todo.created_date),
+                });
+
+                if let Some(t) = store.todos.iter_mut().find(|t| t.id == target_id) {
+                    t.recurring_id = Some(tpl_id);
+                }
             }
+
+            crate::store::materialize_recurring(store.todos, store.recurring, store.next_id, today);
+        });
+
+        if outcome.is_some() {
+            self.set_transient_message(format!("Recurrence set to {rule_name}"));
         }
-
-        crate::store::materialize_recurring(
-            &mut self.todos,
-            &mut self.recurring,
-            &mut self.next_id,
-            self.today,
-        );
-
-        self.save();
-        self.re_resolve_selections();
-        self.set_transient_message(format!("Recurrence set to {rule_name}"));
     }
 
     pub fn reschedule_task(&mut self, id: u64, target_date: NaiveDate) {
@@ -1814,13 +2095,15 @@ impl App {
             self.set_transient_message("Cannot reschedule to a past date");
             return;
         }
-        self.mutate(|todos| {
+        let outcome = self.mutate(MutationTarget::Single(id), |todos, _| {
             crate::store::move_task_to_date(todos, id, target_date);
         });
-        self.set_transient_message(format!(
-            "Scheduled for {}",
-            target_date.format(&self.config.short_date_format)
-        ));
+        if outcome.is_some() {
+            self.set_transient_message(format!(
+                "Scheduled for {}",
+                target_date.format(&self.config.short_date_format)
+            ));
+        }
     }
 
     pub fn move_selected_todo_to_today(&mut self) {
@@ -1844,10 +2127,12 @@ impl App {
                 if let Some(row) = rows.get(self.history_todo_index) {
                     let todo_id = row.id;
                     let today = self.today;
-                    self.mutate(|todos| {
+                    let outcome = self.mutate(MutationTarget::Single(todo_id), |todos, _| {
                         crate::store::move_task_to_date(todos, todo_id, today);
                     });
-                    self.set_transient_message("Moved to Today");
+                    if outcome.is_some() {
+                        self.set_transient_message("Moved to Today");
+                    }
                 }
             }
             View::Upcoming => {
@@ -1866,10 +2151,12 @@ impl App {
                 if let Some(row) = rows.get(self.upcoming_todo_index) {
                     let todo_id = row.id;
                     let today = self.today;
-                    self.mutate(|todos| {
+                    let outcome = self.mutate(MutationTarget::Single(todo_id), |todos, _| {
                         crate::store::move_task_to_date(todos, todo_id, today);
                     });
-                    self.set_transient_message("Moved to Today");
+                    if outcome.is_some() {
+                        self.set_transient_message("Moved to Today");
+                    }
                 }
             }
             View::Summary => {}
@@ -2260,6 +2547,7 @@ impl App {
                 let today = self.today;
                 match crate::parser::parse_quick_add(&input, today) {
                     Ok(parsed) => {
+                        let filter = self.current_filter().clone();
                         let cur_view = self.current_view;
                         let target_date = parsed.date.unwrap_or_else(|| match cur_view {
                             View::Today | View::Summary => today,
@@ -2269,85 +2557,89 @@ impl App {
                                 .unwrap_or_else(|| today.succ_opt().unwrap_or(today)),
                         });
 
-                        let id = self.next_id;
-                        self.next_id += 1;
-                        let text = parsed.text;
-                        let priority = parsed.priority;
-                        let tags = parsed.tags;
+                        let mut added_id = 0;
+                        let mut actual_date = target_date;
+                        let mut is_hidden = false;
 
-                        let (recurring_id, actual_date) = if let Some(rule) = parsed.recurrence {
-                            self.snapshot();
-                            let tpl_id = self.next_id;
-                            self.next_id += 1;
-                            let anchor = match rule {
-                                crate::model::RecurrenceRule::Weekdays => {
-                                    let wd = target_date.weekday();
-                                    if wd == chrono::Weekday::Sat {
-                                        target_date
-                                            .succ_opt()
-                                            .and_then(|d| d.succ_opt())
-                                            .unwrap_or(target_date)
-                                    } else if wd == chrono::Weekday::Sun {
-                                        target_date.succ_opt().unwrap_or(target_date)
-                                    } else {
-                                        target_date
+                        let outcome = self.mutate_with_store(MutationTarget::None, |store, _| {
+                            let id = *store.next_id;
+                            *store.next_id += 1;
+                            added_id = id;
+
+                            let text = parsed.text;
+                            let priority = parsed.priority;
+                            let tags = parsed.tags;
+
+                            let (recurring_id, act_date) = if let Some(rule) = parsed.recurrence {
+                                let tpl_id = *store.next_id;
+                                *store.next_id += 1;
+                                let anchor = match rule {
+                                    crate::model::RecurrenceRule::Weekdays => {
+                                        let wd = target_date.weekday();
+                                        if wd == chrono::Weekday::Sat {
+                                            target_date
+                                                .succ_opt()
+                                                .and_then(|d| d.succ_opt())
+                                                .unwrap_or(target_date)
+                                        } else if wd == chrono::Weekday::Sun {
+                                            target_date.succ_opt().unwrap_or(target_date)
+                                        } else {
+                                            target_date
+                                        }
                                     }
-                                }
-                                _ => target_date,
+                                    _ => target_date,
+                                };
+                                store.recurring.push(crate::model::Recurring {
+                                    id: tpl_id,
+                                    text: text.clone(),
+                                    tags: tags.clone(),
+                                    priority,
+                                    rule,
+                                    anchor,
+                                    last_materialized: Some(anchor),
+                                });
+                                (Some(tpl_id), anchor)
+                            } else {
+                                (None, target_date)
                             };
-                            self.recurring.push(crate::model::Recurring {
-                                id: tpl_id,
-                                text: text.clone(),
-                                tags: tags.clone(),
+                            actual_date = act_date;
+
+                            let added_task = Todo {
+                                id,
+                                text,
+                                created_date: actual_date,
+                                done: false,
+                                done_at: None,
                                 priority,
-                                rule,
-                                anchor,
-                                last_materialized: Some(anchor),
-                            });
-                            (Some(tpl_id), anchor)
-                        } else {
-                            (None, target_date)
-                        };
+                                tags,
+                                note: None,
+                                parent: None,
+                                recurring_id,
+                            };
 
-                        let added_task = Todo {
-                            id,
-                            text,
-                            created_date: actual_date,
-                            done: false,
-                            done_at: None,
-                            priority,
-                            tags,
-                            note: None,
-                            parent: None,
-                            recurring_id,
-                        };
+                            is_hidden = !filter.matches(&added_task);
+                            store.todos.push(added_task);
 
-                        let is_hidden_by_filter = !self.current_filter().matches(&added_task);
+                            if recurring_id.is_some() {
+                                crate::store::materialize_recurring(
+                                    store.todos,
+                                    store.recurring,
+                                    store.next_id,
+                                    today,
+                                );
+                            }
+                        });
 
-                        if recurring_id.is_some() {
-                            self.todos.push(added_task);
-                            self.data_revision += 1;
-                            self.stats_cache.invalidate();
-                            crate::store::materialize_recurring(
-                                &mut self.todos,
-                                &mut self.recurring,
-                                &mut self.next_id,
-                                self.today,
-                            );
-                            self.save();
-                            self.re_resolve_selections();
-                        } else {
-                            self.mutate(|todos| {
-                                todos.push(added_task);
-                            });
+                        if outcome.is_none() {
+                            return false;
                         }
 
-                        if is_hidden_by_filter {
+                        if is_hidden {
                             self.set_transient_message("Added (hidden by filter)");
                         } else {
                             match cur_view {
                                 View::Today => {
-                                    self.today_selected_id = Some(id);
+                                    self.today_selected_id = Some(added_id);
                                     if actual_date != today {
                                         self.set_transient_message(format!(
                                             "Scheduled for {}",
@@ -2356,7 +2648,7 @@ impl App {
                                     }
                                 }
                                 View::Upcoming => {
-                                    self.upcoming_todo_id = Some(id);
+                                    self.upcoming_todo_id = Some(added_id);
                                     let cur_up_date = self.selected_upcoming_date.unwrap_or(today);
                                     if actual_date != cur_up_date {
                                         self.set_transient_message(format!(
@@ -2366,9 +2658,17 @@ impl App {
                                     }
                                 }
                                 View::History => {
-                                    self.history_todo_id = Some(id);
+                                    self.history_todo_id = Some(added_id);
+                                    let cur_hist_date = self.selected_history_date.unwrap_or(today);
+                                    if actual_date != cur_hist_date {
+                                        self.set_transient_message(format!(
+                                            "Scheduled for {}",
+                                            actual_date.format(&self.config.short_date_format)
+                                        ));
+                                    }
                                 }
                                 View::Summary => {
+                                    self.today_selected_id = Some(added_id);
                                     self.set_transient_message("Added to Today");
                                 }
                             }
@@ -2464,51 +2764,70 @@ impl App {
                             return false;
                         }
 
-                        let parent_date = match self.todos.iter().find(|t| t.id == parent_id) {
-                            Some(p) => p.created_date,
-                            None => {
-                                self.input_mode = InputMode::Normal;
-                                return false;
-                            }
-                        };
+                        let filter = self.current_filter().clone();
+                        let cur_view = self.current_view;
+                        let mut added_id = 0;
+                        let mut is_hidden = false;
 
-                        let id = self.next_id;
-                        self.next_id += 1;
-                        let text = parsed.text;
-                        let priority = parsed.priority;
-                        let tags = parsed.tags;
+                        let outcome = self.mutate_with_store(
+                            MutationTarget::Single(parent_id),
+                            |store, _| {
+                                let parent_date = match store
+                                    .todos
+                                    .iter()
+                                    .find(|t| t.id == parent_id)
+                                    .map(|t| t.created_date)
+                                {
+                                    Some(d) => d,
+                                    None => return,
+                                };
 
-                        let added_subtask = Todo {
-                            id,
-                            text,
-                            created_date: parent_date,
-                            done: false,
-                            done_at: None,
-                            priority,
-                            tags,
-                            note: None,
-                            parent: Some(parent_id),
-                            recurring_id: None,
-                        };
+                                let id = *store.next_id;
+                                *store.next_id += 1;
+                                added_id = id;
 
-                        let is_hidden_by_filter = !self.current_filter().matches(&added_subtask);
+                                let added_subtask = Todo {
+                                    id,
+                                    text: parsed.text,
+                                    created_date: parent_date,
+                                    done: false,
+                                    done_at: None,
+                                    priority: parsed.priority,
+                                    tags: parsed.tags,
+                                    note: None,
+                                    parent: Some(parent_id),
+                                    recurring_id: None,
+                                };
 
-                        self.mutate(|todos| {
-                            let insert_pos = todos
-                                .iter()
-                                .rposition(|t| t.id == parent_id || t.parent == Some(parent_id))
-                                .map(|p| p + 1)
-                                .unwrap_or(todos.len());
-                            todos.insert(insert_pos, added_subtask);
-                        });
+                                is_hidden = !filter.matches(&added_subtask);
 
-                        if is_hidden_by_filter {
+                                let insert_pos = store
+                                    .todos
+                                    .iter()
+                                    .rposition(|t| t.id == parent_id || t.parent == Some(parent_id))
+                                    .map(|p| p + 1)
+                                    .unwrap_or(store.todos.len());
+                                store.todos.insert(insert_pos, added_subtask);
+                            },
+                        );
+
+                        if outcome.is_none() {
+                            self.input_mode = InputMode::Normal;
+                            self.input_buffer.clear();
+                            self.cursor_position = 0;
+                            self.prompt_error = None;
+                            return false;
+                        }
+
+                        if is_hidden {
                             self.set_transient_message("Added (hidden by filter)");
                         } else {
-                            match self.current_view {
-                                View::Today | View::Summary => self.today_selected_id = Some(id),
-                                View::Upcoming => self.upcoming_todo_id = Some(id),
-                                View::History => self.history_todo_id = Some(id),
+                            match cur_view {
+                                View::Today | View::Summary => {
+                                    self.today_selected_id = Some(added_id)
+                                }
+                                View::Upcoming => self.upcoming_todo_id = Some(added_id),
+                                View::History => self.history_todo_id = Some(added_id),
                             }
                         }
 
@@ -2580,7 +2899,7 @@ impl App {
                 let today = self.today;
                 match crate::parser::parse_quick_add(&input, today) {
                     Ok(parsed) => {
-                        self.mutate(|todos| {
+                        let outcome = self.mutate(MutationTarget::Single(target_id), |todos, _| {
                             if let Some(todo) = todos.iter_mut().find(|t| t.id == target_id) {
                                 todo.text = parsed.text;
                                 todo.priority = parsed.priority;
@@ -2590,7 +2909,9 @@ impl App {
                                 }
                             }
                         });
-                        self.set_transient_message("Edited task · u to undo");
+                        if outcome.is_some() {
+                            self.set_transient_message("Edited task · u to undo");
+                        }
                         self.input_mode = InputMode::Normal;
                         self.input_buffer.clear();
                         self.cursor_position = 0;
@@ -2739,21 +3060,35 @@ impl App {
                             return false;
                         }
                         let marked_ids: Vec<u64> = self.marks.iter().copied().collect();
-                        let count = marked_ids.len();
-                        self.mutate(|todos| {
-                            for id in marked_ids {
-                                crate::store::move_task_to_date(todos, id, target_date);
-                            }
-                        });
+                        let outcome =
+                            self.mutate(MutationTarget::Bulk(marked_ids), |todos, valid_ids| {
+                                for id in valid_ids {
+                                    crate::store::move_task_to_date(todos, *id, target_date);
+                                }
+                            });
                         self.marks.clear();
                         self.input_mode = InputMode::Normal;
                         self.input_buffer.clear();
                         self.cursor_position = 0;
                         self.prompt_error = None;
-                        self.set_transient_message(format!(
-                            "Scheduled {count} tasks for {}",
-                            target_date.format(&self.config.short_date_format)
-                        ));
+                        if let Some(outcome) = outcome {
+                            if outcome.skipped > 0 {
+                                self.set_transient_message(format!(
+                                    "Scheduled {} of {} for {} · {} no longer exist{}",
+                                    outcome.applied,
+                                    outcome.total,
+                                    target_date.format(&self.config.short_date_format),
+                                    outcome.skipped,
+                                    if outcome.skipped == 1 { "s" } else { "" }
+                                ));
+                            } else {
+                                self.set_transient_message(format!(
+                                    "Scheduled {} tasks for {}",
+                                    outcome.applied,
+                                    target_date.format(&self.config.short_date_format)
+                                ));
+                            }
+                        }
                     }
                     Err(e) => {
                         self.prompt_error = Some(e);
@@ -3665,7 +4000,7 @@ impl App {
                 } else {
                     Some(self.note_buffer.clone())
                 };
-                self.mutate(|todos| {
+                self.mutate(MutationTarget::Single(target_id), |todos, _| {
                     if let Some(t) = todos.iter_mut().find(|t| t.id == target_id) {
                         t.note = note_val;
                     }
@@ -8289,5 +8624,295 @@ mod tests {
         assert_eq!(app.todos[0].text, "External add");
         // Search results re-ran
         assert_eq!(app.search_results.hits.len(), 1);
+    }
+
+    #[test]
+    fn test_refresh_before_mutate_deferred_add_commits_on_top_of_external_add() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 2,
+            "todos": [{"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false}]
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+        assert_eq!(app.todos.len(), 1);
+
+        // User starts adding a task
+        app.input_mode = InputMode::Adding;
+        app.input_buffer = "Local add".to_string();
+        app.cursor_position = 9;
+
+        // External process writes Task 2 to todos.json
+        let external_json = r#"{
+            "version": 2,
+            "next_id": 3,
+            "todos": [
+                {"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false},
+                {"id": 2, "text": "External add", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, external_json).unwrap();
+
+        // While prompt was open, observer detected change and deferred reload
+        let now = std::time::Instant::now();
+        app.check_for_external_changes(now);
+        app.check_for_external_changes(now);
+        assert!(app.pending_external_change);
+
+        // User commits with Enter
+        app.handle_key(key_press(KeyCode::Enter));
+
+        // Prompt is closed
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(!app.pending_external_change);
+
+        // Both external add and local add are present!
+        assert_eq!(app.todos.len(), 3);
+        assert!(app.todos.iter().any(|t| t.text == "Task 1"));
+        assert!(app
+            .todos
+            .iter()
+            .any(|t| t.text == "External add" && t.id == 2));
+        assert!(app.todos.iter().any(|t| t.text == "Local add" && t.id == 3));
+
+        // Also check on disk
+        let disk_data = crate::storage::load_todos(&path).unwrap();
+        assert_eq!(disk_data.todos.len(), 3);
+        assert!(disk_data.todos.iter().any(|t| t.text == "External add"));
+        assert!(disk_data.todos.iter().any(|t| t.text == "Local add"));
+    }
+
+    #[test]
+    fn test_refresh_before_mutate_edit_of_deleted_task_aborts_and_writes_nothing() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 3,
+            "todos": [
+                {"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false},
+                {"id": 2, "text": "Task 2 to edit", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+        app.today_selected_index = 1;
+        app.today_selected_id = Some(2);
+
+        // Start editing task 2
+        app.start_editing_today();
+        assert_eq!(app.input_mode, InputMode::Editing(2));
+        app.input_buffer = "Edited text".to_string();
+
+        // External process deletes task 2
+        let external_json = r#"{
+            "version": 2,
+            "next_id": 3,
+            "todos": [
+                {"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, external_json).unwrap();
+        let external_fp = crate::storage::FileFingerprint::of(&path);
+
+        // User presses Enter to commit edit
+        app.handle_key(key_press(KeyCode::Enter));
+
+        // Mutation aborted!
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Task no longer exists")
+        );
+
+        // Disk was not modified (same fingerprint/content)
+        assert_eq!(crate::storage::FileFingerprint::of(&path), external_fp);
+        let disk_data = crate::storage::load_todos(&path).unwrap();
+        assert_eq!(disk_data.todos.len(), 1);
+        assert_eq!(disk_data.todos[0].id, 1);
+    }
+
+    #[test]
+    fn test_refresh_before_mutate_bulk_action_partially_missing_ids() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 4,
+            "todos": [
+                {"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false},
+                {"id": 2, "text": "Task 2", "created_date": "2026-10-31", "done": false},
+                {"id": 3, "text": "Task 3", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+        app.marks.insert(1);
+        app.marks.insert(2);
+        app.marks.insert(3);
+
+        // External process deletes Task 2
+        let external_json = r#"{
+            "version": 2,
+            "next_id": 4,
+            "todos": [
+                {"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false},
+                {"id": 3, "text": "Task 3", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, external_json).unwrap();
+
+        // User triggers bulk delete
+        app.bulk_delete();
+
+        // Mentioned skipped count: 2 of 3 deleted, 1 no longer exists
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Deleted 2 of 3 · 1 no longer exists")
+        );
+        assert_eq!(app.todos.len(), 0);
+
+        // Disk has 0 tasks
+        let disk_data = crate::storage::load_todos(&path).unwrap();
+        assert_eq!(disk_data.todos.len(), 0);
+    }
+
+    #[test]
+    fn test_refresh_before_mutate_bulk_action_all_missing_ids_aborts() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 3,
+            "todos": [
+                {"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false},
+                {"id": 2, "text": "Task 2", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+        app.marks.insert(1);
+        app.marks.insert(2);
+
+        // External process deletes BOTH marked tasks, leaving only task 3
+        let external_json = r#"{
+            "version": 2,
+            "next_id": 4,
+            "todos": [
+                {"id": 3, "text": "Task 3", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, external_json).unwrap();
+        let external_fp = crate::storage::FileFingerprint::of(&path);
+
+        // User triggers bulk delete
+        app.bulk_delete();
+
+        // Aborted with "Task no longer exists" and wrote nothing
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Task no longer exists")
+        );
+        assert_eq!(crate::storage::FileFingerprint::of(&path), external_fp);
+        let disk_data = crate::storage::load_todos(&path).unwrap();
+        assert_eq!(disk_data.todos.len(), 1);
+        assert_eq!(disk_data.todos[0].id, 3);
+    }
+
+    #[test]
+    fn test_refresh_before_mutate_undo_redo_showing_nothing_to_undo_when_stacks_cleared() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 2,
+            "todos": [{"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false}]
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+
+        // Local add creates an undo snapshot
+        app.add_todo("Local task 2");
+        assert_eq!(app.undo_stack.len(), 1);
+
+        // External change to file
+        let external_json = r#"{
+            "version": 2,
+            "next_id": 3,
+            "todos": [
+                {"id": 1, "text": "Task 1 edited externally", "created_date": "2026-10-31", "done": false},
+                {"id": 2, "text": "Local task 2", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, external_json).unwrap();
+
+        // User triggers undo
+        app.undo();
+
+        // Refresh before mutate cleared the undo history, so nothing to undo
+        assert_eq!(app.transient_message.as_deref(), Some("Nothing to undo"));
+        assert_eq!(app.todos[0].text, "Task 1 edited externally");
+
+        // User triggers redo
+        app.redo();
+        assert_eq!(app.transient_message.as_deref(), Some("Nothing to redo"));
+    }
+
+    #[test]
+    fn test_refresh_before_mutate_failure_on_unreadable_file_aborts_mutation_and_writes_nothing() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 2,
+            "todos": [{"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false}]
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+
+        // Corrupt file externally
+        let corrupt_content = "{ invalid json content !!!";
+        std::fs::write(&path, corrupt_content).unwrap();
+        let corrupt_fp = crate::storage::FileFingerprint::of(&path);
+
+        // User tries to toggle task 1
+        app.toggle_today_todo();
+
+        // Mutation aborted with message
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Can't save: data file is unreadable · see backups/")
+        );
+
+        // Corrupt file was not overwritten
+        assert_eq!(crate::storage::FileFingerprint::of(&path), corrupt_fp);
+        let content = std::fs::read_to_string(&path).unwrap();
+        assert_eq!(content, corrupt_content);
     }
 }
