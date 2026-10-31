@@ -7484,4 +7484,131 @@ mod tests {
         assert!(app.undo_stack.is_empty());
         assert_eq!(app.todos, todos);
     }
+
+    #[test]
+    fn test_phase6_read_only_disk_and_undo_invariants() {
+        let temp_dir = tempfile::tempdir().unwrap();
+        let file_path = temp_dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let initial_json = r#"{
+  "version": 2,
+  "next_id": 4,
+  "todos": [
+    {
+      "id": 1,
+      "text": "Report task #work",
+      "created_date": "2026-10-27",
+      "done": true,
+      "done_at": null,
+      "priority": 1,
+      "tags": ["work"],
+      "note": "Important note text",
+      "parent": null,
+      "recurring_id": null
+    },
+    {
+      "id": 2,
+      "text": "Today meeting",
+      "created_date": "2026-10-28",
+      "done": false,
+      "done_at": null,
+      "priority": 0,
+      "tags": [],
+      "note": null,
+      "parent": null,
+      "recurring_id": null
+    },
+    {
+      "id": 3,
+      "text": "Tomorrow follow-up",
+      "created_date": "2026-10-29",
+      "done": false,
+      "done_at": null,
+      "priority": 2,
+      "tags": [],
+      "note": null,
+      "parent": null,
+      "recurring_id": null
+    }
+  ],
+  "recurring": [],
+  "focus": null
+}"#;
+        std::fs::write(&file_path, initial_json).unwrap();
+        let initial_bytes = std::fs::read(&file_path).unwrap();
+
+        let mut config = crate::config::Config::default();
+        config.stats.show_streak = true;
+        let mut app =
+            App::try_with_config_and_settings(file_path.clone(), today, config, Vec::new())
+                .unwrap();
+        app.today = today;
+
+        // 1. Search operations: open search, type, navigate, cancel
+        app.handle_key(key_press(KeyCode::Char('/')));
+        assert_eq!(app.input_mode, InputMode::Searching);
+        for c in "report".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Down));
+        app.handle_key(key_press(KeyCode::Up));
+        app.handle_key(key_press(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        // 2. Search and open hit
+        app.handle_key(key_press(KeyCode::Char('/')));
+        for c in "meeting".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Today);
+
+        // 3. Jump to date operations
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in "yesterday".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::History);
+
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in "tomorrow".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Upcoming);
+
+        // 4. Summary view operations
+        app.current_view = View::Summary;
+        // Week range navigation
+        app.handle_key(key_press(KeyCode::Char('j')));
+        app.handle_key(key_press(KeyCode::Char('k')));
+        app.handle_key(key_press(KeyCode::Char('[')));
+        app.handle_key(key_press(KeyCode::Char(']')));
+        app.handle_key(key_press(KeyCode::Char('g')));
+        // Toggle to Month range
+        app.handle_key(key_press(KeyCode::Char('w')));
+        assert_eq!(app.summary_range, crate::config::SummaryRange::Month);
+        app.handle_key(key_press(KeyCode::Char('j')));
+        app.handle_key(key_press(KeyCode::Char('k')));
+        app.handle_key(key_press(KeyCode::Char('[')));
+        app.handle_key(key_press(KeyCode::Char(']')));
+        app.handle_key(key_press(KeyCode::Char('g')));
+        // Drill into week with Enter
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.summary_range, crate::config::SummaryRange::Week);
+
+        // ASSERTIONS:
+        // - Undo stack is completely empty
+        assert!(app.undo_stack.is_empty(), "Undo stack must remain empty");
+        // - Todos in memory unchanged
+        assert_eq!(app.todos.len(), 3);
+        // - File on disk has identical bytes
+        let current_bytes = std::fs::read(&file_path).unwrap();
+        assert_eq!(
+            current_bytes, initial_bytes,
+            "Disk bytes must remain unchanged"
+        );
+    }
 }

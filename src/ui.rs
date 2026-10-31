@@ -528,30 +528,85 @@ fn draw_today(app: &mut App, frame: &mut Frame, area: Rect) {
         }
     }
 
-    if app.config.ui.show_history {
-        let overdue_count = app
-            .todos
+    let avail_w = parts[0].width as usize;
+    let used_w: usize = title_spans.iter().map(|s| s.content.chars().count()).sum();
+
+    let overdue_count = if app.config.ui.show_history {
+        app.todos
             .iter()
             .filter(|t| t.created_date < today && !t.done)
-            .count();
-        if overdue_count > 0 {
-            title_spans.push(Span::raw("    "));
-            title_spans.push(Span::styled(
-                format!("{overdue_count} overdue"),
-                app.theme.warn_style(),
-            ));
-        }
-    }
+            .count()
+    } else {
+        0
+    };
 
     let upcoming_count = app
         .todos
         .iter()
         .filter(|t| t.created_date > today && t.parent.is_none() && !t.done)
         .count();
-    if upcoming_count > 0 {
+
+    let streak = app
+        .stats_cache
+        .get_or_update(
+            app.data_revision,
+            app.today,
+            &app.todos,
+            app.config.stats.streak_rule,
+            app.config.week_start,
+        )
+        .current_streak;
+    let has_streak = app.config.stats.show_streak && streak >= 2;
+
+    let overdue_w = if overdue_count > 0 {
+        4 + format!("{overdue_count} overdue").chars().count()
+    } else {
+        0
+    };
+    let upcoming_w = if upcoming_count > 0 {
+        4 + format!("+{upcoming_count} upcoming").chars().count()
+    } else {
+        0
+    };
+    let streak_w = if has_streak {
+        4 + format!("{streak}-day streak").chars().count()
+    } else {
+        0
+    };
+
+    // When space is tight, drop in this order: overdue counter, upcoming counter, streak hint
+    let (show_overdue, show_upcoming, show_streak) = {
+        if used_w + overdue_w + upcoming_w + streak_w <= avail_w {
+            (overdue_count > 0, upcoming_count > 0, has_streak)
+        } else if used_w + upcoming_w + streak_w <= avail_w {
+            (false, upcoming_count > 0, has_streak)
+        } else if used_w + streak_w <= avail_w {
+            (false, false, has_streak)
+        } else {
+            (false, false, false)
+        }
+    };
+
+    if show_overdue {
+        title_spans.push(Span::raw("    "));
+        title_spans.push(Span::styled(
+            format!("{overdue_count} overdue"),
+            app.theme.warn_style(),
+        ));
+    }
+
+    if show_upcoming {
         title_spans.push(Span::raw("    "));
         title_spans.push(Span::styled(
             format!("+{upcoming_count} upcoming"),
+            app.theme.dim_style(),
+        ));
+    }
+
+    if show_streak {
+        title_spans.push(Span::raw("    "));
+        title_spans.push(Span::styled(
+            format!("{streak}-day streak"),
             app.theme.dim_style(),
         ));
     }
@@ -1464,6 +1519,9 @@ fn draw_summary_week(app: &mut App, frame: &mut Frame, area: Rect) {
         Span::styled(total_text, app.theme.dim_style()),
     ]));
 
+    // 5. Stats block (if terminal height >= 20)
+    draw_summary_stats_block(app, &mut lines, area);
+
     frame.render_widget(Paragraph::new(lines), area);
 }
 
@@ -1633,7 +1691,78 @@ fn draw_summary_month(app: &mut App, frame: &mut Frame, area: Rect) {
         Span::styled(total_text, app.theme.dim_style()),
     ]));
 
+    // 5. Stats block (if terminal height >= 20)
+    draw_summary_stats_block(app, &mut lines, area);
+
     frame.render_widget(Paragraph::new(lines), area);
+}
+
+fn draw_summary_stats_block(app: &mut App, lines: &mut Vec<Line>, area: Rect) {
+    if app.terminal_height < 20 {
+        return;
+    }
+
+    let stats = app
+        .stats_cache
+        .get_or_update(
+            app.data_revision,
+            app.today,
+            &app.todos,
+            app.config.stats.streak_rule,
+            app.config.week_start,
+        )
+        .clone();
+
+    // Divider line
+    let divider_width = (area.width as usize).saturating_sub(4);
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            app.symbols.h_rule.repeat(divider_width),
+            app.theme.divider_style(),
+        ),
+    ]));
+
+    // 1. streak: streak       4 days (longest: 12)
+    let day_word = if stats.current_streak == 1 {
+        "day"
+    } else {
+        "days"
+    };
+    let streak_text = format!(
+        "{} {} (longest: {})",
+        stats.current_streak, day_word, stats.longest_streak
+    );
+    lines.push(Line::from(vec![
+        Span::styled("  streak       ", app.theme.dim_style()),
+        Span::styled(streak_text, app.theme.subtext_style()),
+    ]));
+
+    // 2. this week: this week    7 of 10 · 70%
+    let this_week_text = format!(
+        "{} of {} {} {}%",
+        stats.this_week_summary.done,
+        stats.this_week_summary.total,
+        app.symbols.dot,
+        stats.this_week_summary.percent
+    );
+    lines.push(Line::from(vec![
+        Span::styled("  this week    ", app.theme.dim_style()),
+        Span::styled(this_week_text, app.theme.subtext_style()),
+    ]));
+
+    // 3. last 30 days: last 30 days 41 of 53 · 77%
+    let last_30_text = format!(
+        "{} of {} {} {}%",
+        stats.last_30_days_summary.done,
+        stats.last_30_days_summary.total,
+        app.symbols.dot,
+        stats.last_30_days_summary.percent
+    );
+    lines.push(Line::from(vec![
+        Span::styled("  last 30 days ", app.theme.dim_style()),
+        Span::styled(last_30_text, app.theme.subtext_style()),
+    ]));
 }
 
 pub fn build_highlighted_text_spans(
@@ -4633,5 +4762,173 @@ mod tests {
         let zero = TestBackend::new(0, 0);
         let mut t_zero = Terminal::new(zero).unwrap();
         t_zero.draw(|f| render(&mut app, f)).unwrap();
+    }
+
+    #[test]
+    fn test_render_header_streak_hint_and_drop_order() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let yesterday = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let overdue_date = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let future_date = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+
+        let todos = vec![
+            // Yesterday complete
+            Todo {
+                id: 1,
+                text: "Yest done".to_string(),
+                created_date: yesterday,
+                done: true,
+                ..Default::default()
+            },
+            // Today complete -> streak = 2
+            Todo {
+                id: 2,
+                text: "Today done".to_string(),
+                created_date: today,
+                done: true,
+                ..Default::default()
+            },
+            // Overdue task
+            Todo {
+                id: 3,
+                text: "Overdue task".to_string(),
+                created_date: overdue_date,
+                done: false,
+                ..Default::default()
+            },
+            // Upcoming task
+            Todo {
+                id: 4,
+                text: "Future task".to_string(),
+                created_date: future_date,
+                done: false,
+                ..Default::default()
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos, today);
+        app.current_view = View::Today;
+
+        // 1. Wide terminal (120 cols): all three elements (overdue, upcoming, streak) fit
+        let backend = TestBackend::new(120, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_wide: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content_wide.contains("1 overdue"));
+        assert!(content_wide.contains("+1 upcoming"));
+        assert!(content_wide.contains("2-day streak"));
+
+        // 2. Medium-width terminal (85 cols): overdue dropped first, upcoming and streak fit
+        let backend_med = TestBackend::new(85, 24);
+        let mut t_med = Terminal::new(backend_med).unwrap();
+        t_med.draw(|f| render(&mut app, f)).unwrap();
+        let content_med: String = t_med
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(!content_med.contains("1 overdue"));
+        assert!(content_med.contains("+1 upcoming"));
+        assert!(content_med.contains("2-day streak"));
+
+        // 3. Narrower terminal (70 cols): upcoming dropped second, streak remains
+        let backend_narrow = TestBackend::new(70, 24);
+        let mut t_narrow = Terminal::new(backend_narrow).unwrap();
+        t_narrow.draw(|f| render(&mut app, f)).unwrap();
+        let content_narrow: String = t_narrow
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(!content_narrow.contains("1 overdue"));
+        assert!(!content_narrow.contains("+1 upcoming"));
+        assert!(content_narrow.contains("2-day streak"));
+
+        // 4. Very narrow terminal (55 cols): streak dropped last
+        let backend_vn = TestBackend::new(55, 24);
+        let mut t_vn = Terminal::new(backend_vn).unwrap();
+        t_vn.draw(|f| render(&mut app, f)).unwrap();
+        let content_vn: String = t_vn
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(!content_vn.contains("2-day streak"));
+
+        // 5. When show_streak = false, streak hint is omitted
+        app.config.stats.show_streak = false;
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_no_streak: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!content_no_streak.contains("2-day streak"));
+    }
+
+    #[test]
+    fn test_render_summary_stats_block_height_threshold() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![Todo {
+                id: 1,
+                text: "Today task".to_string(),
+                created_date: today,
+                done: true,
+                ..Default::default()
+            }],
+            today,
+        );
+        app.current_view = View::Summary;
+
+        // Height 24: stats block rendered
+        app.terminal_height = 24;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_24: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content_24.contains("streak"));
+        assert!(content_24.contains("this week"));
+        assert!(content_24.contains("last 30 days"));
+
+        // Height 18 (< 20): stats block omitted
+        app.terminal_height = 18;
+        let backend_18 = TestBackend::new(80, 18);
+        let mut t_18 = Terminal::new(backend_18).unwrap();
+        t_18.draw(|f| render(&mut app, f)).unwrap();
+        let content_18: String = t_18
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(!content_18.contains("streak"));
+        assert!(!content_18.contains("this week"));
+        assert!(!content_18.contains("last 30 days"));
     }
 }

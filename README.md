@@ -25,9 +25,17 @@ Slate is designed in the spirit of modern, quiet developer tools like Claude Cod
   - **Multi-Select & Bulk Actions (`v`, `V`)**: Mark multiple tasks to toggle, delete, move to today, or reschedule in a single undo step.
   - **Dynamic Sorting (`s`)**: View projection cycling between `manual` and `priority` (high first) without altering stored order.
 - **Upcoming View**: Dedicated view listing future days with scheduled tasks in chronological order.
+- **Summary View (Week & Month ranges)**:
+  - **Week Range (`w`)**: Day-by-day progress bars showing completion rates and totals (`Week of Mon 26 Oct – Sun 1 Nov`).
+  - **Month Range (`w`)**: Quiet heatmap with week rows using glyph density (`░`, `▒`, `▓`, `█`, `·`) that works in both color and pure monochrome (`NO_COLOR`), with weekend spacing and period stats.
 - **Today & History Views**:
-  - **Today View**: See today's tasks with a friendly weekday header, block progress bar, and focus task pin.
+  - **Today View**: See today's tasks with a friendly weekday header, block progress bar, focus task pin, and header streak counter.
   - **History View**: Browse past days by date with task counts and completion timestamps (`done 14:32`).
+- **Global Search (`/`)**: Full-width interactive search overlay across all days (past, today, future) and subtasks with live highlighted results, deterministic ranking, `#tag` filtering, priority tokens (`!`, `!!`), and completion status (`is:done`, `is:open`).
+- **Jump to Date (`:`)**: Quickly jump to any date across Today, Upcoming, and History (or update Summary period) with flexible expressions (`today`, `yesterday`, `tomorrow`, `YYYY-MM-DD`, `+Nd`, `-Nd`, weekday names). Fallback to nearest date with tasks.
+- **Stats & Streaks**:
+  - **Header Streak Hint**: Dim `{streak}-day streak` on the Today header when streak is 2 or more.
+  - **Stats Block**: Detailed block under Summary rows showing current & longest streaks, this week progress, and last 30 days progress.
 - **Unified Quick-Add Syntax**: Natural whitespace-delimited tokens (`@tomorrow`, `!!`, `#work`, `@weekly`) shared seamlessly between TUI and CLI.
 - **Task Text Editing (`e`)**: Edit tasks with pre-serialized tokens in the inline prompt.
 - **Full Undo / Redo (`u`, `Ctrl+r`)**: In-memory snapshot stack supporting all mutations including bulk actions as single undo steps.
@@ -200,7 +208,9 @@ slate
 ### Global Navigation
 | Key | Action |
 | :--- | :--- |
-| `Tab` / `Shift+Tab` | Cycle between **Today**, **Upcoming**, and **History** views |
+| `Tab` / `Shift+Tab` | Cycle between **Today**, **Upcoming**, **History**, and **Summary** views |
+| `/` | Open global search across all days (`Esc` cancels) |
+| `:` | Jump to date prompt (`today`, `yesterday`, `+3d`, weekday names, etc.) |
 | `?` | Toggle help overlay (`Esc`, `?`, or `q` to close) |
 | `u` | Undo last action (bulk actions are a single step) |
 | `Ctrl+r` | Redo undone action |
@@ -211,7 +221,7 @@ slate
 | `v` | Toggle selection mark on current task |
 | `V` | Toggle mark all tasks in the current view |
 | `Esc` | Clear selection marks (first press) / clear active filter (second press) |
-| `g` | Jump to first item in focused list |
+| `g` | Jump to first item in focused list (in Summary: jump to current period) |
 | `G` | Jump to last item in focused list |
 | `Ctrl+d` | Move half a page down |
 | `Ctrl+u` | Move half a page up |
@@ -258,6 +268,29 @@ slate
 | **Tasks** | `d` / `Delete` | Delete selected task |
 | **Tasks** | `D` / `Shift+d` | Clear all completed tasks for selected date |
 
+### Summary View
+| Key | Action |
+| :--- | :--- |
+| `j` / `↓` | Move selection down (day row in Week range, week row in Month range) |
+| `k` / `↑` | Move selection up (day row in Week range, week row in Month range) |
+| `Enter` | Open selected day in Today/Upcoming/History (Week range) or drill into week (Month range) |
+| `w` | Toggle range between **Week** and **Month** |
+| `[` / `PageUp` | Go to previous period (bounded by earliest task) |
+| `]` / `PageDown` | Go to next period (bounded by latest task or today) |
+| `g` | Jump cursor to the current period / today |
+| `a` | Add new task to Today (displays `Added to Today`) |
+| `:` | Jump cursor to the period containing that date (stays in Summary) |
+
+### Search Screen (`/`)
+| Key | Action |
+| :--- | :--- |
+| `Up` / `Down` | Move selection between matching search hits |
+| `Ctrl+p` / `Ctrl+n` | Move selection between matching search hits |
+| `PageUp` / `PageDown` | Move selection by page |
+| `Enter` | Open selected hit in its date's view (Today, Upcoming, or History), selecting the task |
+| `Esc` | Cancel search and restore previous view, selection, filter, and scroll |
+| `Typing` | Query characters update matching live |
+
 ### Multi-Line Note Editor (`n`)
 | Key | Action |
 | :--- | :--- |
@@ -297,6 +330,67 @@ Slate features a shared, pure quick-add parser used identically in the TUI inlin
 - **Date + Recurrence conflicts**: A date token combined with recurrence is allowed only if the date matches the recurrence rule (e.g. `@fri @weekly` is valid; `@daily @fri` is rejected with a clear explanation).
 - **Subtask constraints**: Subtasks inherit their parent task's scheduled date and reject date and recurrence tokens.
 - **Edit Prompt Round-Trip**: Pressing `e` on an existing task re-serializes its metadata into quick-add tokens (e.g. `Buy groceries @2026-10-30 ! #food`) allowing in-place editing.
+
+---
+
+## Search Query Syntax (`/`)
+
+Pressing `/` opens an interactive, full-width search overlay across all days (past, today, future) in storage:
+
+| Token / Word | Meaning | Example | Notes |
+| :--- | :--- | :--- | :--- |
+| `word` | Plain substring match across task text, tags, and note | `report`, `groceries` | Case-insensitive and Unicode-safe. Every word must match (AND). |
+| `#tag` | Tag prefix match | `#work`, `#home` | Matches task tags starting with the given tag prefix. |
+| `!` | Priority filter: priority ≥ 1 | `!` | Lone exclamation mark filters to high or urgent priority tasks. |
+| `!!` | Priority filter: priority = 2 | `!!` | Two exclamation marks filter to urgent priority tasks only. |
+| `is:done` | Status filter: completed tasks | `is:done` | Matches only tasks that are marked completed. |
+| `is:open` | Status filter: uncompleted tasks | `is:open` | Matches only tasks that are not completed. |
+
+- **Deterministic Ranking**: Word-prefix matches rank ahead of other substring matches, followed by newest scheduled date first, then stored manual order within the day.
+- **Hit Cap**: Capped at 200 hits with a dim `+N more` line when exceeded.
+- **Opening a Hit (`Enter`)**: Switches to the view containing the task's date (Today, Upcoming, or History), focuses the task by its ID, clears any active filter that would hide it, and clears selection marks.
+- **History Visibility**: When `[ui] show_history = false`, past tasks are not offered and search scope covers Today and Upcoming only.
+
+---
+
+## Jump-to-Date Expressions (`:`)
+
+Pressing `:` opens an inline jump prompt allowing direct navigation to any date:
+
+| Expression | Target Date | Example |
+| :--- | :--- | :--- |
+| `today` | Current date | `today` |
+| `yesterday` | One day before today | `yesterday` |
+| `tomorrow` | One day after today | `tomorrow` |
+| `YYYY-MM-DD` | Exact ISO date | `2026-11-15` |
+| `MM-DD` | Date in current year | `11-15` |
+| `+Nd`, `-Nd` | Relative offset in days (N from 1 to 3650) | `+3d`, `-14d` |
+| `+Nw`, `-Nw` | Relative offset in weeks (N from 1 to 3650) | `+2w`, `-1w` |
+| `<weekday>` | Most recent **past** occurrence strictly before today | `mon`, `friday` |
+
+> **Difference between Jump and Reschedule:**
+> - In **jump** (`:`), bare weekday names (`mon`..`sun`) refer to the **most recent past occurrence** strictly before today.
+> - In **reschedule / quick-add** (`t` / `@weekday`), weekday names refer to the **next future occurrence** strictly after today.
+
+- **Target View**: Jumping to today switches to Today; future dates switch to Upcoming; past dates switch to History.
+- **Nearest Task Fallback**: If the target date has no tasks, Slate navigates to the nearest day with tasks (strictly before for past dates, strictly after for future dates) and displays a transient notice (e.g. `No tasks on Fri 30 Oct · showing Thu 29 Oct`). If none exist in that direction, Slate stays put and informs you.
+- **Summary View Integration**: In the Summary view, `:` moves the period cursor without switching views.
+- **Hidden History**: When `[ui] show_history = false`, jumping to past dates displays `History is hidden`.
+
+---
+
+## Statistics, Streaks & Counting Rules
+
+### Definitions
+- **Top-Level Counting Rule**: All statistics, completion rates, and streaks count **top-level tasks only** (subtasks are excluded), grouped by each task's scheduled `created_date`. Completion timestamps are not used for streak attribution.
+- **Day Completion**: Calculated as `done / total` over that day's top-level tasks. A day with `total == 0` has no completion rate, is shown as empty (`–`), and is excluded from averages.
+- **Complete Day**: A day having at least one top-level task where:
+  - Under `streak_rule = "all"` *(default)*: Every top-level task is done (`done == total`).
+  - Under `streak_rule = "any"`: At least one top-level task is done (`done > 0`).
+- **Current Streak**: The number of consecutive complete days ending today (if today is complete), or ending yesterday (if today is not yet complete). An unfinished today does **not** break an active streak, but a past day that was not complete (including any day with zero tasks) breaks the streak. Future days are ignored.
+- **Longest Streak**: The longest unbroken sequence of consecutive complete days in all historical data up to today.
+- **Period Completion**: `total_done / total_tasks` across the period (weighted, not an average of daily percentages), expressed as an integer percentage rounded down (`0` if zero tasks).
+- **Recurring Task Limitation**: Because recurring tasks are materialized on or after the day Slate is launched (not back-filled), a day on which Slate was never opened and that had no tasks will break a streak.
 
 ---
 
@@ -463,9 +557,15 @@ src/
    - **`storage/migrate.rs`**: Stepwise schema migrations (v0 -> v1 -> v2) creating `.v0.bak` and `.v1.bak` backups.
    - **`storage/backup.rs`**: Rolling backup system creating timestamped snapshots in `backups/`.
    - **`storage/lock.rs`**: Advisory file locking via `todos.json.lock` with a 3-second timeout loop.
-11. **[`src/app.rs`](src/app.rs)**:
-    Maintains interactive TUI memory, selection by task ID, undo/redo stacks, note editing buffer, filter state, and routes input events.
-12. **[`src/main.rs`](src/main.rs)**:
+11. **[`src/dates.rs`](src/dates.rs)**:
+    Pure date math helpers for week starts, 7-day ranges, month week layouts, and period bounds.
+12. **[`src/search.rs`](src/search.rs)**:
+    Pure Unicode-safe search engine with token parsing (`#tag`, `!`, `!!`, `is:done`, `is:open`), deterministic ranking, and highlighted match ranges.
+13. **[`src/stats.rs`](src/stats.rs)**:
+    Pure statistics, period completion rates, day summaries, current & longest streak tracking, and revision-keyed cache (`StatsCache`).
+14. **[`src/app.rs`](src/app.rs)**:
+    Maintains interactive TUI memory, selection by task ID or date, undo/redo stacks, search and jump prompts, note editing buffer, filter state, and routes input events.
+15. **[`src/main.rs`](src/main.rs)**:
     Thin dispatcher: validates TTY state, initializes terminal raw mode when running interactively, or routes directly to CLI subcommands without touching terminal state.
 
 ---
@@ -512,8 +612,14 @@ Slate is crash-proof: a missing file, invalid TOML syntax, unknown key, invalid 
 | `ui.symbols` | string | `"unicode"` | Symbol mode: `"unicode"` (`○`, `✓`, `█`) or `"ascii"` (`[ ]`, `[x]`, `#`). |
 | `ui.show_history` | boolean | `true` | When `false`, hides the History tab and view entirely. `Tab`/`Shift+Tab` do nothing, and History shortcuts are hidden. Historical data remains safely preserved on disk. |
 | `ui.show_upcoming` | boolean | `true` | When `false`, hides the Upcoming tab and view entirely. Future scheduled tasks remain safely preserved on disk. |
+| `ui.show_summary` | boolean | `true` | When `false` (or when `ui.show_history` is `false`), hides the Summary tab and view entirely. |
 | `ui.detail_pane` | boolean | `false` | When `true`, shows task details (full wrapped text, note, priority, tags, recurrence) beneath the list. Auto-hides when terminal height is below 20 rows. |
 | `ui.mouse` | boolean | `false` | When `true`, enables mouse interaction. When `false`, mouse capture is not enabled so terminal text selection remains uninterrupted. |
+| `[summary]` | table | | Summary view settings. |
+| `summary.default_range` | string | `"week"` | Default range for the Summary view: `"week"` or `"month"`. |
+| `[stats]` | table | | Statistics and streak tracking settings. |
+| `stats.show_streak` | boolean | `true` | When `true`, shows a dim `{streak}-day streak` hint on the Today header when streak is 2 or more. |
+| `stats.streak_rule` | string | `"all"` | Rule for considering a day complete for streaks: `"all"` (all top-level tasks done) or `"any"` (at least one top-level task done). |
 | `[tasks]` | table | | Task display and sorting settings. |
 | `tasks.sort` | string | `"manual"` | Task sort mode: `"manual"` (user-defined order) or `"priority"` (high priority first). Sorting is a view projection and never alters stored order. |
 | `tasks.show_tags` | boolean | `true` | Show or hide dim `#tag` labels inline in task rows (automatically hidden on terminals narrower than 60 columns). |

@@ -150,6 +150,24 @@ pub struct SummaryConfig {
     pub default_range: SummaryRange,
 }
 
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StatsConfig {
+    #[serde(default = "default_true")]
+    pub show_streak: bool,
+
+    #[serde(default)]
+    pub streak_rule: crate::stats::StreakRule,
+}
+
+impl Default for StatsConfig {
+    fn default() -> Self {
+        Self {
+            show_streak: true,
+            streak_rule: crate::stats::StreakRule::All,
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum ProgressStyle {
@@ -252,6 +270,9 @@ pub struct Config {
 
     #[serde(default)]
     pub summary: SummaryConfig,
+
+    #[serde(default)]
+    pub stats: StatsConfig,
 }
 
 impl Default for Config {
@@ -268,6 +289,7 @@ impl Default for Config {
             keys: KeysConfig::default(),
             tasks: TasksConfig::default(),
             summary: SummaryConfig::default(),
+            stats: StatsConfig::default(),
         }
     }
 }
@@ -357,6 +379,7 @@ impl Config {
             "keys",
             "tasks",
             "summary",
+            "stats",
         ];
 
         for k in table.keys() {
@@ -698,6 +721,45 @@ impl Config {
             }
         }
 
+        // 12. [stats]
+        if let Some(stats_val) = table.get("stats") {
+            if let Some(stats_table) = stats_val.as_table() {
+                let allowed_stats_keys = ["show_streak", "streak_rule"];
+                for k in stats_table.keys() {
+                    if !allowed_stats_keys.contains(&k.as_str()) {
+                        warnings.push(format!("Unknown stats config key: '{k}'"));
+                    }
+                }
+
+                if let Some(ss_val) = stats_table.get("show_streak") {
+                    if let Some(b) = ss_val.as_bool() {
+                        config.stats.show_streak = b;
+                    } else {
+                        warnings
+                            .push("stats.show_streak must be a boolean · using true".to_string());
+                    }
+                }
+
+                if let Some(sr_val) = stats_table.get("streak_rule") {
+                    if let Some(s) = sr_val.as_str() {
+                        match s.to_ascii_lowercase().as_str() {
+                            "all" => config.stats.streak_rule = crate::stats::StreakRule::All,
+                            "any" => config.stats.streak_rule = crate::stats::StreakRule::Any,
+                            _ => {
+                                warnings.push(format!(
+                                    "Invalid stats.streak_rule '{s}': expected all or any · using all"
+                                ));
+                            }
+                        }
+                    } else {
+                        warnings.push("stats.streak_rule must be a string".to_string());
+                    }
+                }
+            } else {
+                warnings.push("[stats] must be a table".to_string());
+            }
+        }
+
         (config, warnings)
     }
 
@@ -867,5 +929,35 @@ mod tests {
         assert_eq!(config.progress.width, 10);
         assert!(config.progress.show_count);
         assert_eq!(config.keys.mode, KeyMode::Default);
+    }
+
+    #[test]
+    fn test_config_summary_and_stats_parsing() {
+        let toml_str = r#"
+            [summary]
+            default_range = "month"
+
+            [stats]
+            show_streak = false
+            streak_rule = "any"
+        "#;
+        let (config, warnings) = Config::from_str(toml_str);
+        assert!(warnings.is_empty());
+        assert_eq!(config.summary.default_range, SummaryRange::Month);
+        assert!(!config.stats.show_streak);
+        assert_eq!(config.stats.streak_rule, crate::stats::StreakRule::Any);
+
+        // Invalid options fall back with warnings
+        let toml_invalid = r#"
+            [summary]
+            default_range = "year"
+
+            [stats]
+            streak_rule = "custom"
+        "#;
+        let (config_inv, warnings_inv) = Config::from_str(toml_invalid);
+        assert_eq!(warnings_inv.len(), 2);
+        assert_eq!(config_inv.summary.default_range, SummaryRange::Week);
+        assert_eq!(config_inv.stats.streak_rule, crate::stats::StreakRule::All);
     }
 }

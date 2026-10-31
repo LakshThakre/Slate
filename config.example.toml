@@ -61,6 +61,11 @@ show_history = true
 # Default: true
 show_upcoming = true
 
+# Show or hide the Summary view and tab
+# Default: true
+# When false (or when show_history is false), the Summary tab is skipped during view cycling.
+show_summary = true
+
 # Show or hide the task detail pane
 # Default: false
 # When true, shows full wrapped text, notes, and metadata below the list.
@@ -152,3 +157,24 @@ mode = "default"
 # switch_view = ["tab", "backtab"]
 # focus_tasks = ["l", "right", "enter"]
 # focus_dates = ["h", "left"]
+# search = ["/"]
+# jump_to_date = [":"]
+# toggle_summary_range = ["w"]
+# prev_period = ["["]
+# next_period = ["]"]
+
+[summary]
+# Default range for the Summary view
+# Options: "week", "month"
+# Default: "week"
+default_range = "week"
+
+[stats]
+# Show streak counter hint on the Today view header (when streak >= 2)
+# Default: true
+show_streak = true
+
+# Rule for considering a day complete for streaks
+# Options: "all" (all top-level tasks must be done), "any" (at least one done)
+# Default: "all"
+streak_rule = "all"
