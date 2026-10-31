@@ -15,6 +15,26 @@ pub struct Snapshot {
     pub focus: Option<u64>,
 }
 
+#[derive(Debug, Clone)]
+pub struct SearchStateSnapshot {
+    pub current_view: View,
+    pub history_pane: HistoryPane,
+    pub upcoming_pane: HistoryPane,
+    pub today_selected_index: usize,
+    pub today_selected_id: Option<u64>,
+    pub history_date_index: usize,
+    pub history_todo_index: usize,
+    pub history_todo_id: Option<u64>,
+    pub selected_history_date: Option<NaiveDate>,
+    pub upcoming_date_index: usize,
+    pub upcoming_todo_index: usize,
+    pub upcoming_todo_id: Option<u64>,
+    pub selected_upcoming_date: Option<NaiveDate>,
+    pub today_filter: crate::model::Filter,
+    pub upcoming_filter: crate::model::Filter,
+    pub history_filter: crate::model::Filter,
+}
+
 pub struct App {
     pub data_path: PathBuf,
     pub today: NaiveDate,
@@ -68,6 +88,9 @@ pub struct App {
     pub hit_areas: Vec<crate::ui::HitArea>,
     pub data_revision: u64,
     pub stats_cache: crate::stats::StatsCache,
+    pub search_selected_index: usize,
+    pub search_results: crate::search::SearchResults,
+    pub search_snapshot: Option<SearchStateSnapshot>,
 }
 
 impl Default for App {
@@ -196,6 +219,12 @@ impl App {
             hit_areas: Vec::new(),
             data_revision: 1,
             stats_cache: crate::stats::StatsCache::default(),
+            search_selected_index: 0,
+            search_results: crate::search::SearchResults {
+                hits: Vec::new(),
+                total_hits: 0,
+            },
+            search_snapshot: None,
         };
 
         if !all_warnings.is_empty() {
@@ -281,6 +310,12 @@ impl App {
             hit_areas: Vec::new(),
             data_revision: 1,
             stats_cache: crate::stats::StatsCache::default(),
+            search_selected_index: 0,
+            search_results: crate::search::SearchResults {
+                hits: Vec::new(),
+                total_hits: 0,
+            },
+            search_snapshot: None,
         };
         app.clamp_selections();
         app
@@ -1634,6 +1669,8 @@ impl App {
             InputMode::ConfirmDeleteRecurring(id) => {
                 self.handle_confirm_delete_recurring_key(id, key)
             }
+            InputMode::Searching => self.handle_searching_key(key),
+            InputMode::JumpToDate => false,
             InputMode::Normal => self.handle_normal_key(key),
         }
     }
@@ -1644,7 +1681,7 @@ impl App {
         if !self.config.ui.mouse
             || self.is_too_small()
             || self.show_help
-            || self.input_mode != InputMode::Normal
+            || (self.input_mode != InputMode::Normal && self.input_mode != InputMode::Searching)
         {
             return false;
         }
@@ -1653,6 +1690,19 @@ impl App {
             MouseEventKind::Down(MouseButton::Left) => {
                 let col = event.column;
                 let row = event.row;
+
+                if self.input_mode == InputMode::Searching {
+                    for area in &self.hit_areas {
+                        if area.contains(col, row) {
+                            if let crate::ui::HitTarget::SearchResult { index } = area.target {
+                                self.search_selected_index = index;
+                                self.open_selected_search_hit();
+                                return true;
+                            }
+                        }
+                    }
+                    return false;
+                }
 
                 // Check checkbox targets first (they are smaller, specific sub-areas of task rows)
                 for area in &self.hit_areas {
@@ -1750,6 +1800,15 @@ impl App {
             MouseEventKind::ScrollDown => {
                 let col = event.column;
                 let row = event.row;
+                if self.input_mode == InputMode::Searching {
+                    if !self.search_results.hits.is_empty()
+                        && self.search_selected_index + 1 < self.search_results.hits.len()
+                    {
+                        self.search_selected_index += 1;
+                        return true;
+                    }
+                    return false;
+                }
                 match self.current_view {
                     View::Today => {
                         let count = self.visible_rows_today().len();
@@ -1840,6 +1899,13 @@ impl App {
             MouseEventKind::ScrollUp => {
                 let col = event.column;
                 let row = event.row;
+                if self.input_mode == InputMode::Searching {
+                    if self.search_selected_index > 0 {
+                        self.search_selected_index -= 1;
+                        return true;
+                    }
+                    return false;
+                }
                 match self.current_view {
                     View::Today => {
                         if self.today_selected_index > 0 {
@@ -2628,6 +2694,214 @@ impl App {
         false
     }
 
+    pub fn start_search(&mut self) {
+        self.search_snapshot = Some(SearchStateSnapshot {
+            current_view: self.current_view,
+            history_pane: self.history_pane,
+            upcoming_pane: self.upcoming_pane,
+            today_selected_index: self.today_selected_index,
+            today_selected_id: self.today_selected_id,
+            history_date_index: self.history_date_index,
+            history_todo_index: self.history_todo_index,
+            history_todo_id: self.history_todo_id,
+            selected_history_date: self.selected_history_date,
+            upcoming_date_index: self.upcoming_date_index,
+            upcoming_todo_index: self.upcoming_todo_index,
+            upcoming_todo_id: self.upcoming_todo_id,
+            selected_upcoming_date: self.selected_upcoming_date,
+            today_filter: self.today_filter.clone(),
+            upcoming_filter: self.upcoming_filter.clone(),
+            history_filter: self.history_filter.clone(),
+        });
+        self.input_mode = InputMode::Searching;
+        self.input_buffer.clear();
+        self.cursor_position = 0;
+        self.prompt_error = None;
+        self.search_selected_index = 0;
+        self.search_results = crate::search::SearchResults {
+            hits: Vec::new(),
+            total_hits: 0,
+        };
+    }
+
+    pub fn cancel_search(&mut self) {
+        if let Some(snapshot) = self.search_snapshot.take() {
+            self.current_view = snapshot.current_view;
+            self.history_pane = snapshot.history_pane;
+            self.upcoming_pane = snapshot.upcoming_pane;
+            self.today_selected_index = snapshot.today_selected_index;
+            self.today_selected_id = snapshot.today_selected_id;
+            self.history_date_index = snapshot.history_date_index;
+            self.history_todo_index = snapshot.history_todo_index;
+            self.history_todo_id = snapshot.history_todo_id;
+            self.selected_history_date = snapshot.selected_history_date;
+            self.upcoming_date_index = snapshot.upcoming_date_index;
+            self.upcoming_todo_index = snapshot.upcoming_todo_index;
+            self.upcoming_todo_id = snapshot.upcoming_todo_id;
+            self.selected_upcoming_date = snapshot.selected_upcoming_date;
+            self.today_filter = snapshot.today_filter;
+            self.upcoming_filter = snapshot.upcoming_filter;
+            self.history_filter = snapshot.history_filter;
+        }
+        self.input_mode = InputMode::Normal;
+        self.input_buffer.clear();
+        self.cursor_position = 0;
+        self.prompt_error = None;
+        self.search_selected_index = 0;
+        self.search_results.hits.clear();
+        self.search_results.total_hits = 0;
+        self.clamp_selections();
+    }
+
+    pub fn update_search(&mut self) {
+        self.search_results = crate::search::search_tasks(
+            &self.todos,
+            &self.input_buffer,
+            self.today,
+            self.config.ui.show_history,
+            self.symbols.is_ascii,
+        );
+        self.search_selected_index = 0;
+    }
+
+    pub fn open_selected_search_hit(&mut self) {
+        if self.search_results.hits.is_empty() {
+            return;
+        }
+        let hit = self.search_results.hits[self.search_selected_index].clone();
+        let task_id = hit.task_id;
+        let date = hit.date;
+
+        self.input_mode = InputMode::Normal;
+        self.input_buffer.clear();
+        self.cursor_position = 0;
+        self.search_snapshot = None;
+        self.marks.clear();
+
+        if date == self.today {
+            self.current_view = View::Today;
+            if !self.visible_rows_today().iter().any(|r| r.id == task_id) {
+                self.today_filter = crate::model::Filter::default();
+                self.set_transient_message("Filter cleared to show this task");
+            }
+            self.today_selected_id = Some(task_id);
+            self.re_resolve_selections();
+        } else if date > self.today {
+            self.current_view = View::Upcoming;
+            self.upcoming_pane = HistoryPane::Todos;
+            if let Some(pos) = self.upcoming_dates_list().iter().position(|&d| d == date) {
+                self.upcoming_date_index = pos;
+                self.selected_upcoming_date = Some(date);
+            }
+            if !self.visible_rows_upcoming().iter().any(|r| r.id == task_id) {
+                self.upcoming_filter = crate::model::Filter::default();
+                self.set_transient_message("Filter cleared to show this task");
+            }
+            self.upcoming_todo_id = Some(task_id);
+            self.re_resolve_selections();
+        } else {
+            self.current_view = View::History;
+            self.history_pane = HistoryPane::Todos;
+            if let Some(pos) = self.dates_list().iter().position(|&d| d == date) {
+                self.history_date_index = pos;
+                self.selected_history_date = Some(date);
+            }
+            if !self.visible_rows_history().iter().any(|r| r.id == task_id) {
+                self.history_filter = crate::model::Filter::default();
+                self.set_transient_message("Filter cleared to show this task");
+            }
+            self.history_todo_id = Some(task_id);
+            self.re_resolve_selections();
+        }
+    }
+
+    fn handle_searching_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.cancel_search();
+            }
+            KeyCode::Enter => {
+                self.open_selected_search_hit();
+            }
+            KeyCode::Up => {
+                self.search_selected_index = self.search_selected_index.saturating_sub(1);
+            }
+            KeyCode::Down => {
+                if !self.search_results.hits.is_empty()
+                    && self.search_selected_index + 1 < self.search_results.hits.len()
+                {
+                    self.search_selected_index += 1;
+                }
+            }
+            KeyCode::Char('p') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                self.search_selected_index = self.search_selected_index.saturating_sub(1);
+            }
+            KeyCode::Char('n') if key.modifiers.contains(KeyModifiers::CONTROL) => {
+                if !self.search_results.hits.is_empty()
+                    && self.search_selected_index + 1 < self.search_results.hits.len()
+                {
+                    self.search_selected_index += 1;
+                }
+            }
+            KeyCode::PageUp => {
+                self.search_selected_index = self
+                    .search_selected_index
+                    .saturating_sub(self.visible_list_height.max(1));
+            }
+            KeyCode::PageDown => {
+                if !self.search_results.hits.is_empty() {
+                    let max_idx = self.search_results.hits.len().saturating_sub(1);
+                    self.search_selected_index =
+                        (self.search_selected_index + self.visible_list_height.max(1)).min(max_idx);
+                }
+            }
+            KeyCode::Left => {
+                self.cursor_position = self.cursor_position.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_len = self.input_buffer.chars().count();
+                if self.cursor_position < char_len {
+                    self.cursor_position += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor_position = 0;
+            }
+            KeyCode::End => {
+                self.cursor_position = self.input_buffer.chars().count();
+            }
+            KeyCode::Backspace => {
+                if self.cursor_position > 0 {
+                    let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                    chars.remove(self.cursor_position - 1);
+                    self.input_buffer = chars.into_iter().collect();
+                    self.cursor_position -= 1;
+                    self.update_search();
+                }
+            }
+            KeyCode::Delete => {
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                if self.cursor_position < chars.len() {
+                    chars.remove(self.cursor_position);
+                    self.input_buffer = chars.into_iter().collect();
+                    self.update_search();
+                }
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                chars.insert(self.cursor_position, c);
+                self.input_buffer = chars.into_iter().collect();
+                self.cursor_position += 1;
+                self.update_search();
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn note_cursor_up(text: &str, cursor: usize) -> usize {
         let chars: Vec<char> = text.chars().collect();
         let clamped_cursor = cursor.min(chars.len());
@@ -2950,6 +3224,9 @@ impl App {
             crate::keymap::Action::Redo => {
                 self.redo();
             }
+            crate::keymap::Action::Search => {
+                self.start_search();
+            }
             crate::keymap::Action::JumpTop => {
                 self.jump_top();
             }
@@ -3197,6 +3474,10 @@ mod tests {
 
     fn key_press(code: KeyCode) -> KeyEvent {
         KeyEvent::new(code, KeyModifiers::NONE)
+    }
+
+    fn key_press_with_mod(code: KeyCode, modifiers: KeyModifiers) -> KeyEvent {
+        KeyEvent::new(code, modifiers)
     }
 
     #[test]
@@ -5835,5 +6116,286 @@ mod tests {
         app.marks.insert(3);
         app.handle_key(key_press(KeyCode::Tab));
         assert!(app.marks.is_empty());
+    }
+
+    #[test]
+    fn test_search_flow_navigation_and_cancel() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Apple pie recipe".to_string(),
+                created_date: today,
+                done: false,
+                ..Default::default()
+            },
+            Todo {
+                id: 2,
+                text: "Banana bread".to_string(),
+                created_date: today,
+                done: false,
+                ..Default::default()
+            },
+            Todo {
+                id: 3,
+                text: "Apple cider".to_string(),
+                created_date: today,
+                done: false,
+                ..Default::default()
+            },
+        ];
+        let mut app = App::new_for_test_with_date(todos, today);
+        app.today_selected_index = 1;
+        app.today_selected_id = Some(2);
+
+        // 1. Press / to start search
+        app.handle_key(key_press(KeyCode::Char('/')));
+        assert_eq!(app.input_mode, InputMode::Searching);
+        assert_eq!(app.search_results.hits.len(), 0);
+
+        // 2. Type "apple"
+        for c in "apple".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        assert_eq!(app.input_buffer, "apple");
+        assert_eq!(app.search_results.hits.len(), 2);
+        assert_eq!(app.search_selected_index, 0);
+        assert_eq!(app.search_results.hits[0].task_id, 1);
+        assert_eq!(app.search_results.hits[1].task_id, 3);
+
+        // 3. Navigate down and up
+        app.handle_key(key_press(KeyCode::Down));
+        assert_eq!(app.search_selected_index, 1);
+        app.handle_key(key_press(KeyCode::Up));
+        assert_eq!(app.search_selected_index, 0);
+
+        // Ctrl+n and Ctrl+p
+        app.handle_key(key_press_with_mod(
+            KeyCode::Char('n'),
+            KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.search_selected_index, 1);
+        app.handle_key(key_press_with_mod(
+            KeyCode::Char('p'),
+            KeyModifiers::CONTROL,
+        ));
+        assert_eq!(app.search_selected_index, 0);
+
+        // 4. Backspace query
+        app.handle_key(key_press(KeyCode::Backspace));
+        assert_eq!(app.input_buffer, "appl");
+        assert_eq!(app.search_results.hits.len(), 2);
+
+        // 5. Esc cancels and restores exact previous state
+        app.handle_key(key_press(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.current_view, View::Today);
+        assert_eq!(app.today_selected_index, 1);
+        assert_eq!(app.today_selected_id, Some(2));
+    }
+
+    #[test]
+    fn test_search_open_hit_across_views_and_filters() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+        let past = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
+        let future = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Past secret plan".to_string(),
+                created_date: past,
+                tags: vec!["work".to_string()],
+                ..Default::default()
+            },
+            Todo {
+                id: 2,
+                text: "Today simple task".to_string(),
+                created_date: today,
+                ..Default::default()
+            },
+            Todo {
+                id: 3,
+                text: "Future launch project".to_string(),
+                created_date: future,
+                tags: vec!["launch".to_string()],
+                ..Default::default()
+            },
+        ];
+        let mut app = App::new_for_test_with_date(todos, today);
+
+        // Open future hit
+        app.handle_key(key_press(KeyCode::Char('/')));
+        for c in "launch".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        assert_eq!(app.search_results.hits.len(), 1);
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.current_view, View::Upcoming);
+        assert_eq!(app.upcoming_pane, HistoryPane::Todos);
+        assert_eq!(app.selected_upcoming_date, Some(future));
+        assert_eq!(app.upcoming_todo_id, Some(3));
+
+        // Open past hit while a filter is set that hides it
+        app.history_filter = crate::model::Filter {
+            tags: vec!["personal".to_string()],
+            min_priority: 0,
+        };
+        app.marks.insert(3);
+
+        app.handle_key(key_press(KeyCode::Char('/')));
+        for c in "secret".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        assert_eq!(app.search_results.hits.len(), 1);
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::History);
+        assert_eq!(app.history_pane, HistoryPane::Todos);
+        assert_eq!(app.selected_history_date, Some(past));
+        assert_eq!(app.history_todo_id, Some(1));
+        assert!(app.marks.is_empty(), "Marks should be cleared");
+        assert!(
+            app.history_filter.is_empty(),
+            "Filter should be cleared to show task"
+        );
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Filter cleared to show this task")
+        );
+    }
+
+    #[test]
+    fn test_search_read_only_invariants() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Searchable task one".to_string(),
+                created_date: today,
+                ..Default::default()
+            },
+            Todo {
+                id: 2,
+                text: "Searchable task two".to_string(),
+                created_date: today,
+                ..Default::default()
+            },
+        ];
+        let mut app = App::new_for_test_with_date(todos.clone(), today);
+        let initial_undo_len = app.undo_stack.len();
+        let initial_revision = app.data_revision;
+
+        // Perform search, typing, navigation, and cancellation
+        app.handle_key(key_press(KeyCode::Char('/')));
+        for c in "task".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Down));
+        app.handle_key(key_press(KeyCode::Esc));
+
+        assert_eq!(
+            app.undo_stack.len(),
+            initial_undo_len,
+            "Undo stack must remain unchanged"
+        );
+        assert_eq!(
+            app.data_revision, initial_revision,
+            "Data revision must remain unchanged"
+        );
+        assert_eq!(app.todos, todos, "Todos must remain unchanged");
+
+        // Perform search and open hit
+        app.handle_key(key_press(KeyCode::Char('/')));
+        for c in "two".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+
+        assert_eq!(
+            app.undo_stack.len(),
+            initial_undo_len,
+            "Undo stack must remain unchanged after opening hit"
+        );
+        assert_eq!(
+            app.data_revision, initial_revision,
+            "Data revision must remain unchanged after opening hit"
+        );
+        assert_eq!(
+            app.todos, todos,
+            "Todos must remain unchanged after opening hit"
+        );
+    }
+
+    #[test]
+    fn test_search_mouse_interactions() {
+        use ratatui::backend::TestBackend;
+        use ratatui::crossterm::event::{MouseButton, MouseEvent, MouseEventKind};
+        use ratatui::Terminal;
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Alpha".to_string(),
+                created_date: today,
+                ..Default::default()
+            },
+            Todo {
+                id: 2,
+                text: "Beta".to_string(),
+                created_date: today,
+                ..Default::default()
+            },
+        ];
+        let mut app = App::new_for_test_with_date(todos, today);
+        app.config.ui.mouse = true;
+
+        app.handle_key(key_press(KeyCode::Char('/')));
+        for c in "a".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        assert_eq!(app.search_results.hits.len(), 2);
+
+        // Render to generate hit areas
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| crate::ui::render(&mut app, f)).unwrap();
+
+        // Mouse wheel scroll down moves selection
+        let scroll_down = MouseEvent {
+            kind: MouseEventKind::ScrollDown,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(scroll_down));
+        assert_eq!(app.search_selected_index, 1);
+
+        // Mouse wheel scroll up moves selection back
+        let scroll_up = MouseEvent {
+            kind: MouseEventKind::ScrollUp,
+            column: 10,
+            row: 5,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(scroll_up));
+        assert_eq!(app.search_selected_index, 0);
+
+        // Find hit area for result 1 and click it
+        let hit_area = *app
+            .hit_areas
+            .iter()
+            .find(|a| matches!(a.target, crate::ui::HitTarget::SearchResult { index: 1 }))
+            .unwrap();
+
+        let click = MouseEvent {
+            kind: MouseEventKind::Down(MouseButton::Left),
+            column: hit_area.rect.x + 2,
+            row: hit_area.rect.y,
+            modifiers: KeyModifiers::NONE,
+        };
+        assert!(app.handle_mouse(click));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert_eq!(app.today_selected_id, Some(2));
     }
 }

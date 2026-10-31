@@ -157,4 +157,6 @@ pub enum InputMode {
     SettingRecurrence(u64),
     ConfirmDeleteRecurring(u64),
     ReschedulingBulk,
+    Searching,
+    JumpToDate,
 }

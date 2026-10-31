@@ -7,6 +7,7 @@ pub mod keymap;
 pub mod model;
 pub mod output;
 pub mod parser;
+pub mod search;
 pub mod stats;
 pub mod storage;
 pub mod store;

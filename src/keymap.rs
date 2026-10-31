@@ -38,10 +38,15 @@ pub enum Action {
     Recurrence,
     ToggleMark,
     ToggleMarkAll,
+    Search,
+    JumpToDate,
+    ToggleSummaryRange,
+    PrevPeriod,
+    NextPeriod,
 }
 
 impl Action {
-    pub const ALL: [Action; 33] = [
+    pub const ALL: [Action; 38] = [
         Action::Quit,
         Action::Add,
         Action::AddSubtask,
@@ -75,6 +80,11 @@ impl Action {
         Action::Recurrence,
         Action::ToggleMark,
         Action::ToggleMarkAll,
+        Action::Search,
+        Action::JumpToDate,
+        Action::ToggleSummaryRange,
+        Action::PrevPeriod,
+        Action::NextPeriod,
     ];
 
     pub fn from_name(name: &str) -> Option<Self> {
@@ -112,6 +122,11 @@ impl Action {
             "recurrence" | "recur" => Some(Action::Recurrence),
             "toggle_mark" | "mark" => Some(Action::ToggleMark),
             "toggle_mark_all" | "mark_all" => Some(Action::ToggleMarkAll),
+            "search" => Some(Action::Search),
+            "jump_to_date" | "jump" => Some(Action::JumpToDate),
+            "toggle_summary_range" | "summary_range" => Some(Action::ToggleSummaryRange),
+            "prev_period" => Some(Action::PrevPeriod),
+            "next_period" => Some(Action::NextPeriod),
             _ => None,
         }
     }
@@ -151,6 +166,11 @@ impl Action {
             Action::Recurrence => "recurrence",
             Action::ToggleMark => "toggle_mark",
             Action::ToggleMarkAll => "toggle_mark_all",
+            Action::Search => "search",
+            Action::JumpToDate => "jump_to_date",
+            Action::ToggleSummaryRange => "toggle_summary_range",
+            Action::PrevPeriod => "prev_period",
+            Action::NextPeriod => "next_period",
         }
     }
 }
@@ -700,6 +720,41 @@ impl Keymap {
                         modifiers: KeyModifiers::SHIFT,
                     }],
                 ),
+                (
+                    Action::Search,
+                    vec![KeyChord {
+                        code: KeyCode::Char('/'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::JumpToDate,
+                    vec![KeyChord {
+                        code: KeyCode::Char(':'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::ToggleSummaryRange,
+                    vec![KeyChord {
+                        code: KeyCode::Char('w'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::PrevPeriod,
+                    vec![KeyChord {
+                        code: KeyCode::Char('['),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::NextPeriod,
+                    vec![KeyChord {
+                        code: KeyCode::Char(']'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
             KeyMode::Arrows => vec![
                 (
@@ -951,6 +1006,41 @@ impl Keymap {
                         modifiers: KeyModifiers::SHIFT,
                     }],
                 ),
+                (
+                    Action::Search,
+                    vec![KeyChord {
+                        code: KeyCode::Char('/'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::JumpToDate,
+                    vec![KeyChord {
+                        code: KeyCode::Char(':'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::ToggleSummaryRange,
+                    vec![KeyChord {
+                        code: KeyCode::Char('w'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::PrevPeriod,
+                    vec![KeyChord {
+                        code: KeyCode::Char('['),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
+                (
+                    Action::NextPeriod,
+                    vec![KeyChord {
+                        code: KeyCode::Char(']'),
+                        modifiers: KeyModifiers::NONE,
+                    }],
+                ),
             ],
         }
     }
@@ -1135,6 +1225,11 @@ impl Keymap {
             Action::Recurrence => "r".to_string(),
             Action::ToggleMark => "v".to_string(),
             Action::ToggleMarkAll => "V".to_string(),
+            Action::Search => "/".to_string(),
+            Action::JumpToDate => ":".to_string(),
+            Action::ToggleSummaryRange => "w".to_string(),
+            Action::PrevPeriod => "[".to_string(),
+            Action::NextPeriod => "]".to_string(),
         }
     }
 }

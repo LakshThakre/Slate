@@ -192,6 +192,56 @@ impl Theme {
             Style::default().fg(self.warn)
         }
     }
+
+    pub fn search_match_style(&self) -> Style {
+        if self.is_mono {
+            Style::default()
+                .fg(Color::Reset)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        } else {
+            Style::default()
+                .fg(self.accent)
+                .add_modifier(Modifier::BOLD | Modifier::UNDERLINED)
+        }
+    }
+
+    pub fn today_style(&self) -> Style {
+        if self.is_mono {
+            Style::default()
+                .fg(Color::Reset)
+                .add_modifier(Modifier::BOLD)
+        } else {
+            Style::default()
+                .fg(self.accent)
+                .add_modifier(Modifier::BOLD)
+        }
+    }
+
+    pub fn heatmap_style(&self, level: usize) -> Style {
+        if self.is_mono {
+            if level == 4 {
+                Style::default()
+                    .fg(Color::Reset)
+                    .add_modifier(Modifier::BOLD)
+            } else if level == 0 {
+                Style::default()
+                    .fg(Color::Reset)
+                    .add_modifier(Modifier::DIM)
+            } else {
+                Style::default().fg(Color::Reset)
+            }
+        } else {
+            match level {
+                4 => Style::default()
+                    .fg(self.accent)
+                    .add_modifier(Modifier::BOLD),
+                3 => Style::default().fg(self.text),
+                2 => Style::default().fg(self.subtext),
+                1 => Style::default().fg(self.dim),
+                _ => Style::default().fg(self.dim),
+            }
+        }
+    }
 }
 
 pub fn supports_truecolor(env: &impl EnvLookup) -> bool {

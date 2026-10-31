@@ -23,6 +23,8 @@ pub struct Symbols {
     pub prompt_reschedule: &'static str,
     pub prompt_filter: &'static str,
     pub prompt_recurrence: &'static str,
+    pub prompt_search: &'static str,
+    pub prompt_jump: &'static str,
     pub note: &'static str,
     pub repeat: &'static str,
     pub subtask_connector: &'static str,
@@ -36,6 +38,11 @@ pub struct Symbols {
     pub multiply: &'static str,
     pub progress_filled: &'static str,
     pub progress_empty: &'static str,
+    pub heat_empty: &'static str,
+    pub heat_1: &'static str,
+    pub heat_2: &'static str,
+    pub heat_3: &'static str,
+    pub heat_4: &'static str,
     pub is_ascii: bool,
 }
 
@@ -59,6 +66,8 @@ impl Symbols {
             prompt_reschedule: "› Reschedule: ",
             prompt_filter: "› filter ",
             prompt_recurrence: "› recurrence: ",
+            prompt_search: "› search ",
+            prompt_jump: "› go to date ",
             note: "≡",
             repeat: "↻ ",
             subtask_connector: "└ ",
@@ -72,6 +81,11 @@ impl Symbols {
             multiply: "×",
             progress_filled: "█",
             progress_empty: "░",
+            heat_empty: "·",
+            heat_1: "░",
+            heat_2: "▒",
+            heat_3: "▓",
+            heat_4: "█",
             is_ascii: false,
         }
     }
@@ -89,6 +103,8 @@ impl Symbols {
             prompt_reschedule: "> Reschedule: ",
             prompt_filter: "> filter ",
             prompt_recurrence: "> recurrence: ",
+            prompt_search: "> search ",
+            prompt_jump: "> go to date ",
             note: "=",
             repeat: "~ ",
             subtask_connector: "` ",
@@ -102,7 +118,22 @@ impl Symbols {
             multiply: "x",
             progress_filled: "#",
             progress_empty: "-",
+            heat_empty: ".",
+            heat_1: "-",
+            heat_2: "+",
+            heat_3: "*",
+            heat_4: "#",
             is_ascii: true,
+        }
+    }
+
+    pub fn heat(&self, level: usize) -> &'static str {
+        match level {
+            1 => self.heat_1,
+            2 => self.heat_2,
+            3 => self.heat_3,
+            4 => self.heat_4,
+            _ => self.heat_empty,
         }
     }
 
@@ -135,6 +166,7 @@ pub enum HitTarget {
     TabToday,
     TabUpcoming,
     TabHistory,
+    TabSummary,
     TodayTask { index: usize },
     TodayCheckbox { index: usize },
     HistoryDate { index: usize },
@@ -145,6 +177,9 @@ pub enum HitTarget {
     UpcomingCheckbox { index: usize },
     DateArea,
     TodoArea,
+    SearchResult { index: usize },
+    SummaryDay { date: NaiveDate },
+    SummaryWeek { index: usize },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -262,12 +297,16 @@ pub fn render(app: &mut App, frame: &mut Frame) {
         header_divider_area,
     );
 
-    // 2. Draw Main View (Today, Upcoming, or History)
+    // 2. Draw Main View (Today, Upcoming, or History, or Search)
     app.visible_list_height = (main_area.height.saturating_sub(2) as usize).max(1);
-    match app.current_view {
-        View::Today => draw_today(app, frame, main_area),
-        View::Upcoming => draw_upcoming(app, frame, main_area),
-        View::History => draw_history(app, frame, main_area),
+    if app.input_mode == crate::model::InputMode::Searching {
+        draw_search_results(app, frame, main_area);
+    } else {
+        match app.current_view {
+            View::Today => draw_today(app, frame, main_area),
+            View::Upcoming => draw_upcoming(app, frame, main_area),
+            View::History => draw_history(app, frame, main_area),
+        }
     }
 
     // 3. Draw Bottom Area (Inline prompt when adding, editing, or rescheduling, otherwise subtle key hints)
@@ -1279,6 +1318,248 @@ fn draw_upcoming(app: &mut App, frame: &mut Frame, area: Rect) {
     }
 }
 
+pub fn build_highlighted_text_spans(
+    display_text: &str,
+    highlight_ranges: &[(usize, usize)],
+    is_done: bool,
+    avail_width: usize,
+    ellipsis: &str,
+    theme: &Theme,
+) -> Vec<Span<'static>> {
+    if avail_width == 0 {
+        return Vec::new();
+    }
+    let chars: Vec<char> = display_text.chars().collect();
+    let ellipsis_chars: Vec<char> = ellipsis.chars().collect();
+    let ellipsis_len = ellipsis_chars.len();
+
+    let (visible_chars, show_ellipsis) = if chars.len() > avail_width {
+        let keep_len = avail_width.saturating_sub(ellipsis_len);
+        (&chars[..keep_len], true)
+    } else {
+        (&chars[..], false)
+    };
+
+    let base_style = if is_done {
+        theme.dim_style().add_modifier(Modifier::CROSSED_OUT)
+    } else {
+        theme.text_style()
+    };
+    let match_style = if is_done {
+        theme
+            .search_match_style()
+            .add_modifier(Modifier::CROSSED_OUT)
+    } else {
+        theme.search_match_style()
+    };
+
+    let mut spans = Vec::new();
+    let mut current_segment = String::new();
+    let mut current_is_match: Option<bool> = None;
+
+    for (i, &ch) in visible_chars.iter().enumerate() {
+        let is_match = highlight_ranges
+            .iter()
+            .any(|&(start, end)| i >= start && i < end);
+
+        match current_is_match {
+            Some(cur) if cur == is_match => {
+                current_segment.push(ch);
+            }
+            Some(cur) => {
+                if !current_segment.is_empty() {
+                    spans.push(Span::styled(
+                        current_segment,
+                        if cur { match_style } else { base_style },
+                    ));
+                    current_segment = String::new();
+                }
+                current_segment.push(ch);
+                current_is_match = Some(is_match);
+            }
+            None => {
+                current_segment.push(ch);
+                current_is_match = Some(is_match);
+            }
+        }
+    }
+
+    if !current_segment.is_empty() {
+        let is_match = current_is_match.unwrap_or(false);
+        spans.push(Span::styled(
+            current_segment,
+            if is_match { match_style } else { base_style },
+        ));
+    }
+
+    if show_ellipsis && ellipsis_len > 0 {
+        spans.push(Span::styled(ellipsis.to_string(), base_style));
+    }
+
+    spans
+}
+
+fn draw_search_results(app: &mut App, frame: &mut Frame, area: Rect) {
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    if app.input_buffer.is_empty() {
+        let (task_count, day_count) =
+            crate::search::search_stats(&app.todos, app.today, app.config.ui.show_history);
+        let hint = if app.config.ui.show_history {
+            format!(
+                "type to search {} {task_count} tasks across {day_count} days",
+                app.symbols.dot
+            )
+        } else {
+            format!(
+                "type to search {} {task_count} tasks across {day_count} days (history hidden)",
+                app.symbols.dot
+            )
+        };
+        let p = Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled(hint, app.theme.dim_style()),
+        ]));
+        frame.render_widget(p, area);
+        return;
+    }
+
+    if app.search_results.hits.is_empty() {
+        let p = Paragraph::new(Line::from(vec![
+            Span::raw("  "),
+            Span::styled("No matching tasks", app.theme.dim_style()),
+        ]));
+        frame.render_widget(p, area);
+        return;
+    }
+
+    let hits = &app.search_results.hits;
+    let total_hits = app.search_results.total_hits;
+    let marker_len = app.symbols.marker.chars().count();
+    let max_width = area.width as usize;
+
+    let mut items: Vec<ListItem> = Vec::with_capacity(hits.len() + 1);
+
+    for (idx, hit) in hits.iter().enumerate() {
+        let is_selected = idx == app.search_selected_index;
+        let marker = if is_selected {
+            Span::styled(
+                app.symbols.marker,
+                app.theme.accent_style().add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw(" ".repeat(marker_len))
+        };
+
+        let date_str = format_friendly_date(hit.date, app.today, &app.config.short_date_format);
+        let date_col_width = 11;
+        let date_padded = format!("{:<width$}", date_str, width = date_col_width);
+        let date_span = Span::styled(format!("{date_padded} "), app.theme.dim_style());
+        let date_total_len = date_col_width + 1;
+
+        let checkbox = if hit.done {
+            Span::styled(
+                app.symbols.check_done,
+                Style::default().fg(app.theme.accent),
+            )
+        } else {
+            Span::styled(app.symbols.check_todo, app.theme.dim_style())
+        };
+        let check_space = Span::raw(" ");
+        let checkbox_total_len = app.symbols.check_done.chars().count() + 1;
+
+        let note_span = if hit.match_in_note_only {
+            Some(Span::styled(
+                format!(" {}", app.symbols.note),
+                app.theme.dim_style(),
+            ))
+        } else {
+            None
+        };
+        let note_len = if note_span.is_some() {
+            app.symbols.note.chars().count() + 1
+        } else {
+            0
+        };
+
+        let can_show_tags =
+            app.config.tasks.show_tags && app.terminal_width >= 60 && !hit.tags.is_empty();
+        let (tags_str, tags_len) = if can_show_tags {
+            let s = format!(
+                " {}",
+                hit.tags
+                    .iter()
+                    .map(|t| format!("#{t}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            let len = s.chars().count();
+            (s, len)
+        } else {
+            (String::new(), 0)
+        };
+
+        let fixed_len = marker_len + date_total_len + checkbox_total_len + note_len;
+        let avail_total = max_width.saturating_sub(fixed_len);
+
+        let (avail_text, show_tags) = if tags_len > 0 && avail_total > tags_len + 4 {
+            (avail_total.saturating_sub(tags_len), true)
+        } else {
+            (avail_total, false)
+        };
+
+        let mut spans = vec![marker, date_span, checkbox, check_space];
+        let text_spans = build_highlighted_text_spans(
+            &hit.display_text,
+            &hit.highlight_ranges,
+            hit.done,
+            avail_text,
+            app.symbols.ellipsis,
+            &app.theme,
+        );
+        spans.extend(text_spans);
+
+        if let Some(note_s) = note_span {
+            spans.push(note_s);
+        }
+
+        if show_tags && !tags_str.is_empty() {
+            spans.push(Span::styled(tags_str, app.theme.dim_style()));
+        }
+
+        items.push(ListItem::new(Line::from(spans)));
+    }
+
+    if total_hits > hits.len() {
+        let more_count = total_hits - hits.len();
+        let indent = marker_len + 12;
+        let more_spans = vec![
+            Span::raw(" ".repeat(indent)),
+            Span::styled(format!("+{more_count} more"), app.theme.dim_style()),
+        ];
+        items.push(ListItem::new(Line::from(more_spans)));
+    }
+
+    let list = List::new(items);
+    let mut list_state = ListState::default();
+    list_state.select(Some(app.search_selected_index));
+    frame.render_stateful_widget(list, area, &mut list_state);
+
+    let offset = list_state.offset();
+    let visible_count = hits.len().saturating_sub(offset).min(area.height as usize);
+    for i in 0..visible_count {
+        let item_idx = offset + i;
+        if item_idx < hits.len() {
+            app.hit_areas.push(crate::ui::HitArea {
+                target: crate::ui::HitTarget::SearchResult { index: item_idx },
+                rect: Rect::new(area.x, area.y + i as u16, area.width, 1),
+            });
+        }
+    }
+}
+
 /// Single line modern prompt at the bottom: "› Text typed...       enter save · esc cancel"
 fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
     if area.width == 0 || area.height == 0 {
@@ -1311,6 +1592,8 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
         }
         crate::model::InputMode::Filtering => app.symbols.prompt_filter,
         crate::model::InputMode::SettingRecurrence(_) => app.symbols.prompt_recurrence,
+        crate::model::InputMode::Searching => app.symbols.prompt_search,
+        crate::model::InputMode::JumpToDate => app.symbols.prompt_jump,
         _ => app.symbols.prompt_default,
     };
 
@@ -1321,6 +1604,16 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
 
     let (right_text, right_style) = if let Some(ref err) = app.prompt_error {
         (err.clone(), app.theme.dim_style())
+    } else if app.input_mode == crate::model::InputMode::Searching {
+        (
+            format!("enter open  {}  esc cancel", app.symbols.dot),
+            app.theme.dim_style(),
+        )
+    } else if app.input_mode == crate::model::InputMode::JumpToDate {
+        (
+            format!("enter jump  {}  esc cancel", app.symbols.dot),
+            app.theme.dim_style(),
+        )
     } else {
         (
             format!("enter save  {}  esc cancel", app.symbols.dot),
@@ -1356,6 +1649,8 @@ fn draw_input(app: &App, frame: &mut Frame, area: Rect) {
             | crate::model::InputMode::ReschedulingBulk => "tomorrow, fri, +3d, YYYY-MM-DD",
             crate::model::InputMode::Filtering => "#tag, ! (empty clears)",
             crate::model::InputMode::SettingRecurrence(_) => "daily, weekdays, weekly, off",
+            crate::model::InputMode::Searching => "",
+            crate::model::InputMode::JumpToDate => "today, +3d, fri, YYYY-MM-DD",
             _ => "What needs doing today?",
         };
         spans.push(Span::styled(placeholder, app.theme.dim_style()));
@@ -3726,5 +4021,70 @@ mod tests {
 
         assert!(content_ascii.contains('*'));
         assert!(content_ascii.contains('>'));
+    }
+
+    #[test]
+    fn test_render_search_screen_empty_results_and_narrow() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+        let mut app = App::new_for_test_with_date(
+            vec![
+                Todo {
+                    id: 1,
+                    text: "Important report".to_string(),
+                    created_date: today,
+                    done: false,
+                    tags: vec!["work".to_string()],
+                    ..Default::default()
+                },
+                Todo {
+                    id: 2,
+                    text: "Groceries".to_string(),
+                    created_date: today,
+                    done: true,
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        // 1. Search screen with empty query shows hint
+        app.start_search();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content.contains("type to search"));
+        assert!(content.contains("2 tasks across 1 days"));
+
+        // 2. Search screen with match shows highlighted results
+        for c in "report".chars() {
+            app.input_buffer.push(c);
+            app.cursor_position += 1;
+        }
+        app.update_search();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_res: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        assert!(content_res.contains("Important report"));
+        assert!(content_res.contains("#work"));
+
+        // 3. Render at narrow width (40x8) and ASCII mode without panic
+        app.symbols = Symbols::ascii();
+        let backend_narrow = TestBackend::new(40, 8);
+        let mut terminal_narrow = Terminal::new(backend_narrow).unwrap();
+        terminal_narrow.draw(|f| render(&mut app, f)).unwrap();
     }
 }
