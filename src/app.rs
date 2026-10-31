@@ -1670,7 +1670,7 @@ impl App {
                 self.handle_confirm_delete_recurring_key(id, key)
             }
             InputMode::Searching => self.handle_searching_key(key),
-            InputMode::JumpToDate => false,
+            InputMode::JumpToDate => self.handle_jump_to_date_key(key),
             InputMode::Normal => self.handle_normal_key(key),
         }
     }
@@ -2902,6 +2902,201 @@ impl App {
         false
     }
 
+    pub fn start_jump_to_date(&mut self) {
+        self.input_mode = InputMode::JumpToDate;
+        self.input_buffer.clear();
+        self.cursor_position = 0;
+        self.prompt_error = None;
+    }
+
+    pub fn jump_to_date(&mut self, target_date: NaiveDate) {
+        if target_date < self.today && !self.config.ui.show_history {
+            self.set_transient_message("History is hidden");
+            return;
+        }
+
+        if target_date == self.today {
+            self.current_view = View::Today;
+            self.marks.clear();
+            self.clamp_selections();
+            return;
+        }
+
+        if target_date > self.today {
+            let mut future_task_dates: Vec<NaiveDate> = self
+                .todos
+                .iter()
+                .map(|t| t.created_date)
+                .filter(|&d| d > self.today)
+                .collect();
+            future_task_dates.sort_unstable();
+            future_task_dates.dedup();
+
+            if future_task_dates.contains(&target_date) {
+                self.current_view = View::Upcoming;
+                if let Some(pos) = self
+                    .upcoming_dates_list()
+                    .iter()
+                    .position(|&d| d == target_date)
+                {
+                    self.upcoming_date_index = pos;
+                    self.selected_upcoming_date = Some(target_date);
+                    self.upcoming_todo_index = 0;
+                }
+                self.marks.clear();
+                self.clamp_selections();
+            } else {
+                let nearest = future_task_dates
+                    .iter()
+                    .find(|&&d| d > target_date)
+                    .copied();
+                if let Some(nearest_date) = nearest {
+                    self.current_view = View::Upcoming;
+                    if let Some(pos) = self
+                        .upcoming_dates_list()
+                        .iter()
+                        .position(|&d| d == nearest_date)
+                    {
+                        self.upcoming_date_index = pos;
+                        self.selected_upcoming_date = Some(nearest_date);
+                        self.upcoming_todo_index = 0;
+                    }
+                    self.marks.clear();
+                    self.clamp_selections();
+                    self.set_transient_message(format!(
+                        "No tasks on {} {} showing {}",
+                        target_date.format(&self.config.short_date_format),
+                        self.symbols.dot,
+                        nearest_date.format(&self.config.short_date_format)
+                    ));
+                } else {
+                    self.set_transient_message(format!(
+                        "No tasks on or after {}",
+                        target_date.format(&self.config.short_date_format)
+                    ));
+                }
+            }
+        } else {
+            let mut past_task_dates: Vec<NaiveDate> = self
+                .todos
+                .iter()
+                .map(|t| t.created_date)
+                .filter(|&d| d < self.today)
+                .collect();
+            past_task_dates.sort_unstable();
+            past_task_dates.dedup();
+
+            if past_task_dates.contains(&target_date) {
+                self.current_view = View::History;
+                if let Some(pos) = self.dates_list().iter().position(|&d| d == target_date) {
+                    self.history_date_index = pos;
+                    self.selected_history_date = Some(target_date);
+                    self.history_todo_index = 0;
+                }
+                self.marks.clear();
+                self.clamp_selections();
+            } else {
+                let nearest = past_task_dates
+                    .iter()
+                    .rev()
+                    .find(|&&d| d < target_date)
+                    .copied();
+                if let Some(nearest_date) = nearest {
+                    self.current_view = View::History;
+                    if let Some(pos) = self.dates_list().iter().position(|&d| d == nearest_date) {
+                        self.history_date_index = pos;
+                        self.selected_history_date = Some(nearest_date);
+                        self.history_todo_index = 0;
+                    }
+                    self.marks.clear();
+                    self.clamp_selections();
+                    self.set_transient_message(format!(
+                        "No tasks on {} {} showing {}",
+                        target_date.format(&self.config.short_date_format),
+                        self.symbols.dot,
+                        nearest_date.format(&self.config.short_date_format)
+                    ));
+                } else {
+                    self.set_transient_message(format!(
+                        "No tasks on or before {}",
+                        target_date.format(&self.config.short_date_format)
+                    ));
+                }
+            }
+        }
+    }
+
+    fn handle_jump_to_date_key(&mut self, key: KeyEvent) -> bool {
+        match key.code {
+            KeyCode::Esc => {
+                self.input_mode = InputMode::Normal;
+                self.input_buffer.clear();
+                self.cursor_position = 0;
+                self.prompt_error = None;
+            }
+            KeyCode::Enter => {
+                let parsed =
+                    crate::parser::parse_date_expression_ext(&self.input_buffer, self.today, true);
+                match parsed {
+                    Ok(target_date) => {
+                        self.input_mode = InputMode::Normal;
+                        self.input_buffer.clear();
+                        self.cursor_position = 0;
+                        self.prompt_error = None;
+                        self.jump_to_date(target_date);
+                    }
+                    Err(err) => {
+                        self.prompt_error = Some(err);
+                    }
+                }
+            }
+            KeyCode::Left => {
+                self.cursor_position = self.cursor_position.saturating_sub(1);
+            }
+            KeyCode::Right => {
+                let char_len = self.input_buffer.chars().count();
+                if self.cursor_position < char_len {
+                    self.cursor_position += 1;
+                }
+            }
+            KeyCode::Home => {
+                self.cursor_position = 0;
+            }
+            KeyCode::End => {
+                self.cursor_position = self.input_buffer.chars().count();
+            }
+            KeyCode::Backspace => {
+                self.prompt_error = None;
+                if self.cursor_position > 0 {
+                    let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                    chars.remove(self.cursor_position - 1);
+                    self.input_buffer = chars.into_iter().collect();
+                    self.cursor_position -= 1;
+                }
+            }
+            KeyCode::Delete => {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                if self.cursor_position < chars.len() {
+                    chars.remove(self.cursor_position);
+                    self.input_buffer = chars.into_iter().collect();
+                }
+            }
+            KeyCode::Char(c)
+                if !key.modifiers.contains(KeyModifiers::CONTROL)
+                    && !key.modifiers.contains(KeyModifiers::ALT) =>
+            {
+                self.prompt_error = None;
+                let mut chars: Vec<char> = self.input_buffer.chars().collect();
+                chars.insert(self.cursor_position, c);
+                self.input_buffer = chars.into_iter().collect();
+                self.cursor_position += 1;
+            }
+            _ => {}
+        }
+        false
+    }
+
     fn note_cursor_up(text: &str, cursor: usize) -> usize {
         let chars: Vec<char> = text.chars().collect();
         let clamped_cursor = cursor.min(chars.len());
@@ -3226,6 +3421,9 @@ impl App {
             }
             crate::keymap::Action::Search => {
                 self.start_search();
+            }
+            crate::keymap::Action::JumpToDate => {
+                self.start_jump_to_date();
             }
             crate::keymap::Action::JumpTop => {
                 self.jump_top();
@@ -6397,5 +6595,166 @@ mod tests {
         assert!(app.handle_mouse(click));
         assert_eq!(app.input_mode, InputMode::Normal);
         assert_eq!(app.today_selected_id, Some(2));
+    }
+
+    #[test]
+    fn test_jump_to_date_full_flow() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+        let past1 = NaiveDate::from_ymd_opt(2026, 10, 10).unwrap();
+        let past2 = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
+        let future1 = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+        let future2 = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
+
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Old task 1".to_string(),
+                created_date: past1,
+                ..Default::default()
+            },
+            Todo {
+                id: 2,
+                text: "Old task 2".to_string(),
+                created_date: past2,
+                ..Default::default()
+            },
+            Todo {
+                id: 3,
+                text: "Today task".to_string(),
+                created_date: today,
+                ..Default::default()
+            },
+            Todo {
+                id: 4,
+                text: "Future task 1".to_string(),
+                created_date: future1,
+                ..Default::default()
+            },
+            Todo {
+                id: 5,
+                text: "Future task 2".to_string(),
+                created_date: future2,
+                ..Default::default()
+            },
+        ];
+        let mut app = App::new_for_test_with_date(todos.clone(), today);
+
+        // 1. Invalid expression keeps prompt open with error
+        app.handle_key(key_press(KeyCode::Char(':')));
+        assert_eq!(app.input_mode, InputMode::JumpToDate);
+        for c in "invalid".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.input_mode, InputMode::JumpToDate);
+        assert!(app.prompt_error.is_some());
+
+        // Esc cancels prompt
+        app.handle_key(key_press(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(app.prompt_error.is_none());
+
+        // 2. Jump to future exact date
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in "+5d".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Upcoming);
+        assert_eq!(app.selected_upcoming_date, Some(future1));
+
+        // 3. Jump to future date without tasks -> nearest after it
+        let no_task_future = NaiveDate::from_ymd_opt(2026, 10, 22).unwrap();
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in format!("{no_task_future}").chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Upcoming);
+        assert_eq!(app.selected_upcoming_date, Some(future1));
+        assert!(app
+            .transient_message
+            .as_deref()
+            .unwrap()
+            .contains("No tasks on"));
+        assert!(app
+            .transient_message
+            .as_deref()
+            .unwrap()
+            .contains("showing"));
+
+        // 4. Jump beyond all future tasks -> stay put, No tasks on or after
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in "+20d".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert!(app
+            .transient_message
+            .as_deref()
+            .unwrap()
+            .contains("No tasks on or after"));
+
+        // 5. Jump to today
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in "today".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Today);
+
+        // 6. Jump to past exact date
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in "-5d".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::History);
+        assert_eq!(app.selected_history_date, Some(past2));
+
+        // 7. Jump to past date without tasks -> nearest before it
+        let no_task_past = NaiveDate::from_ymd_opt(2026, 10, 13).unwrap();
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in format!("{no_task_past}").chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::History);
+        assert_eq!(app.selected_history_date, Some(past1));
+        assert!(app
+            .transient_message
+            .as_deref()
+            .unwrap()
+            .contains("No tasks on"));
+        assert!(app
+            .transient_message
+            .as_deref()
+            .unwrap()
+            .contains("showing"));
+
+        // 8. Jump before all past tasks -> stay put, No tasks on or before
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in "-20d".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert!(app
+            .transient_message
+            .as_deref()
+            .unwrap()
+            .contains("No tasks on or before"));
+
+        // 9. When show_history is false, jumping to past shows "History is hidden"
+        app.config.ui.show_history = false;
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in "-5d".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.transient_message.as_deref(), Some("History is hidden"));
+
+        // 10. Read-only invariant: undo stack and todos unchanged
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(app.todos, todos);
     }
 }
