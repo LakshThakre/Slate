@@ -818,6 +818,28 @@ impl App {
         }
     }
 
+    pub fn check_and_apply_pending_reload(&mut self) -> bool {
+        if self.pending_external_change {
+            self.pending_external_change = false;
+            match crate::storage::load_todos(&self.data_path) {
+                Ok(load_res) => self.apply_external_data(load_res, true),
+                Err(_e) => {
+                    if let Ok(Some(fp)) = crate::watch::stat_fingerprint(&self.data_path) {
+                        if self.detector.record_failed(fp) {
+                            self.set_transient_message(
+                                "Data file changed but can't be read · keeping current view",
+                            );
+                            return true;
+                        }
+                    }
+                    false
+                }
+            }
+        } else {
+            false
+        }
+    }
+
     pub fn on_resize(&mut self, width: u16, height: u16) {
         self.terminal_width = width;
         self.terminal_height = height;
@@ -2231,6 +2253,7 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.prompt_error = None;
+                self.check_and_apply_pending_reload();
             }
             KeyCode::Enter => {
                 let input = self.input_buffer.clone();
@@ -2426,6 +2449,7 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.prompt_error = None;
+                self.check_and_apply_pending_reload();
             }
             KeyCode::Enter => {
                 let input = self.input_buffer.clone();
@@ -2549,6 +2573,7 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.prompt_error = None;
+                self.check_and_apply_pending_reload();
             }
             KeyCode::Enter => {
                 let input = self.input_buffer.clone();
@@ -2627,6 +2652,7 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.prompt_error = None;
+                self.check_and_apply_pending_reload();
             }
             KeyCode::Enter => {
                 let input = self.input_buffer.trim().to_string();
@@ -2700,6 +2726,7 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.prompt_error = None;
+                self.check_and_apply_pending_reload();
             }
             KeyCode::Enter => {
                 let input = self.input_buffer.trim().to_string();
@@ -2784,6 +2811,7 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.prompt_error = None;
+                self.check_and_apply_pending_reload();
             }
             KeyCode::Enter => {
                 let input = self.input_buffer.trim().to_lowercase();
@@ -2858,6 +2886,7 @@ impl App {
         match key.code {
             KeyCode::Esc => {
                 self.input_mode = InputMode::Normal;
+                self.check_and_apply_pending_reload();
             }
             KeyCode::Char('t') | KeyCode::Char('T') => {
                 self.input_mode = InputMode::Normal;
@@ -2879,6 +2908,7 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.prompt_error = None;
+                self.check_and_apply_pending_reload();
             }
             KeyCode::Enter => {
                 let filter = crate::parser::parse_filter(&self.input_buffer);
@@ -3459,6 +3489,7 @@ impl App {
                 self.input_buffer.clear();
                 self.cursor_position = 0;
                 self.prompt_error = None;
+                self.check_and_apply_pending_reload();
             }
             KeyCode::Enter => {
                 let parsed =
@@ -3625,6 +3656,7 @@ impl App {
                 self.input_mode = InputMode::Normal;
                 self.note_buffer.clear();
                 self.note_cursor = 0;
+                self.check_and_apply_pending_reload();
             }
             KeyCode::Enter => {
                 let clean = self.note_buffer.trim().to_string();
@@ -8145,5 +8177,117 @@ mod tests {
         app.apply_external_data(load_res, true);
         assert_eq!(app.input_buffer, "groceries");
         assert_eq!(app.search_results.hits.len(), 2);
+    }
+
+    #[test]
+    fn test_prompt_deferral_mutating_prompts_defer_typed_text_survives() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let mut app = App::new_for_test_with_date(vec![], today);
+        app.data_path = path.clone();
+        app.auto_save = false;
+
+        // User is adding and typed some text
+        app.input_mode = InputMode::Adding;
+        app.input_buffer = "Buying ingredients".to_string();
+        app.cursor_position = 18;
+
+        // Write an external file
+        let external_json = r#"{
+            "version": 2,
+            "next_id": 2,
+            "todos": [{"id": 1, "text": "External add", "created_date": "2026-10-31", "done": false}]
+        }"#;
+        std::fs::write(&path, external_json).unwrap();
+
+        let now = std::time::Instant::now();
+        // Settle observation 1
+        app.check_for_external_changes(now);
+        // Settle observation 2
+        let triggered = app.check_for_external_changes(now);
+
+        assert!(!triggered);
+        assert!(app.pending_external_change);
+        // Typed text and cursor are untouched
+        assert_eq!(app.input_buffer, "Buying ingredients");
+        assert_eq!(app.cursor_position, 18);
+        assert_eq!(app.todos.len(), 0);
+    }
+
+    #[test]
+    fn test_prompt_deferral_applies_on_esc() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let mut app = App::new_for_test_with_date(vec![], today);
+        app.data_path = path.clone();
+        app.auto_save = false;
+
+        // User is adding
+        app.input_mode = InputMode::Adding;
+        app.input_buffer = "Work in progress".to_string();
+        app.cursor_position = 16;
+
+        let external_json = r#"{
+            "version": 2,
+            "next_id": 2,
+            "todos": [{"id": 1, "text": "External add", "created_date": "2026-10-31", "done": false}]
+        }"#;
+        std::fs::write(&path, external_json).unwrap();
+
+        let now = std::time::Instant::now();
+        app.check_for_external_changes(now);
+        app.check_for_external_changes(now);
+        assert!(app.pending_external_change);
+
+        // Cancel with Esc
+        app.handle_key(key_press(KeyCode::Esc));
+        assert_eq!(app.input_mode, InputMode::Normal);
+        assert!(!app.pending_external_change);
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].text, "External add");
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Reloaded · data changed on disk")
+        );
+    }
+
+    #[test]
+    fn test_prompt_deferral_read_only_prompts_and_help_reload_immediately() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let mut app = App::new_for_test_with_date(vec![], today);
+        app.data_path = path.clone();
+        app.auto_save = false;
+
+        // In read-only Search prompt
+        app.input_mode = InputMode::Searching;
+        app.input_buffer = "External".to_string();
+
+        let external_json = r#"{
+            "version": 2,
+            "next_id": 2,
+            "todos": [{"id": 1, "text": "External add", "created_date": "2026-10-31", "done": false}]
+        }"#;
+        std::fs::write(&path, external_json).unwrap();
+
+        let now = std::time::Instant::now();
+        app.check_for_external_changes(now);
+        let reloaded = app.check_for_external_changes(now);
+
+        assert!(reloaded);
+        assert!(!app.pending_external_change);
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].text, "External add");
+        // Search results re-ran
+        assert_eq!(app.search_results.hits.len(), 1);
     }
 }
