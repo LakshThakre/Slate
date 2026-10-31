@@ -2832,40 +2832,44 @@ impl App {
         self.search_snapshot = None;
         self.marks.clear();
 
-        if date == self.today {
-            self.current_view = View::Today;
-            if !self.visible_rows_today().iter().any(|r| r.id == task_id) {
-                self.today_filter = crate::model::Filter::default();
-                self.set_transient_message("Filter cleared to show this task");
+        match date.cmp(&self.today) {
+            std::cmp::Ordering::Equal => {
+                self.current_view = View::Today;
+                if !self.visible_rows_today().iter().any(|r| r.id == task_id) {
+                    self.today_filter = crate::model::Filter::default();
+                    self.set_transient_message("Filter cleared to show this task");
+                }
+                self.today_selected_id = Some(task_id);
+                self.re_resolve_selections();
             }
-            self.today_selected_id = Some(task_id);
-            self.re_resolve_selections();
-        } else if date > self.today {
-            self.current_view = View::Upcoming;
-            self.upcoming_pane = HistoryPane::Todos;
-            if let Some(pos) = self.upcoming_dates_list().iter().position(|&d| d == date) {
-                self.upcoming_date_index = pos;
-                self.selected_upcoming_date = Some(date);
+            std::cmp::Ordering::Greater => {
+                self.current_view = View::Upcoming;
+                self.upcoming_pane = HistoryPane::Todos;
+                if let Some(pos) = self.upcoming_dates_list().iter().position(|&d| d == date) {
+                    self.upcoming_date_index = pos;
+                    self.selected_upcoming_date = Some(date);
+                }
+                if !self.visible_rows_upcoming().iter().any(|r| r.id == task_id) {
+                    self.upcoming_filter = crate::model::Filter::default();
+                    self.set_transient_message("Filter cleared to show this task");
+                }
+                self.upcoming_todo_id = Some(task_id);
+                self.re_resolve_selections();
             }
-            if !self.visible_rows_upcoming().iter().any(|r| r.id == task_id) {
-                self.upcoming_filter = crate::model::Filter::default();
-                self.set_transient_message("Filter cleared to show this task");
+            std::cmp::Ordering::Less => {
+                self.current_view = View::History;
+                self.history_pane = HistoryPane::Todos;
+                if let Some(pos) = self.dates_list().iter().position(|&d| d == date) {
+                    self.history_date_index = pos;
+                    self.selected_history_date = Some(date);
+                }
+                if !self.visible_rows_history().iter().any(|r| r.id == task_id) {
+                    self.history_filter = crate::model::Filter::default();
+                    self.set_transient_message("Filter cleared to show this task");
+                }
+                self.history_todo_id = Some(task_id);
+                self.re_resolve_selections();
             }
-            self.upcoming_todo_id = Some(task_id);
-            self.re_resolve_selections();
-        } else {
-            self.current_view = View::History;
-            self.history_pane = HistoryPane::Todos;
-            if let Some(pos) = self.dates_list().iter().position(|&d| d == date) {
-                self.history_date_index = pos;
-                self.selected_history_date = Some(date);
-            }
-            if !self.visible_rows_history().iter().any(|r| r.id == task_id) {
-                self.history_filter = crate::model::Filter::default();
-                self.set_transient_message("Filter cleared to show this task");
-            }
-            self.history_todo_id = Some(task_id);
-            self.re_resolve_selections();
         }
     }
 
