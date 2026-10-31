@@ -45,6 +45,7 @@ Slate is designed in the spirit of modern, quiet developer tools like Claude Cod
 - **Jump Navigation (`g`, `G`, `Ctrl+d`, `Ctrl+u`)**: Quick jumps to the top, bottom, or half-page scroll in any focused list.
 - **Help Overlay (`?`)**: Minimal modal overlay displaying all grouped keybindings from the active keymap.
 - **Crash-Proof Hardened Storage (Schema v2)**: Saves automatically with atomic rename, rolling timestamped backups, and exclusive sidecar locking (`todos.json.lock`).
+- **Live Reload & External Change Detection**: Changes made to the data file by CLI commands (`slate add`, etc.), second windows, or hand edits appear in the open TUI within about a second without a restart and without losing what the user is typing.
 - **Stepwise Migrations & In-Memory Repairs**: Automatic migration from legacy v0 and v1 formats, creating a safety backup (`todos.v1.bak`). Automatic memory repair for orphan subtasks, invalid depths, or dangling focus IDs.
 - **Midnight Daily Rollover**: Automatically advances `today` at local midnight with zero idle CPU spin.
 
@@ -501,7 +502,7 @@ Slate uses standard, predictable exit codes for scripting:
 ### Concurrency & Advisory Locking
 
 - **Sidecar Advisory Lock**: Every mutating CLI command wraps its load-modify-save sequence in an exclusive lock on `<datafile>.lock` using `fs2`. If another process holds the lock, Slate retries for up to 3 seconds before failing with exit code `1`. The lock is released on all exit paths, including errors.
-- **Important Limitation (TUI Memory Model)**: The interactive TUI holds its task dataset in memory and writes back to disk on save. If tasks are added or modified via the CLI while the interactive TUI is actively running, the next write from the TUI will overwrite the CLI's changes (live reloading is planned for a future phase). **Avoid running mutating CLI commands while the interactive TUI is actively open.**
+- **Seamless TUI & CLI Concurrency**: Mutating CLI commands (e.g. `slate add`, `slate done`) can be executed safely while the interactive TUI is actively running. The TUI detects file fingerprint changes via stat polling and reloads within about a second. When a mutation occurs in the TUI, it also refreshes from disk under lock before writing, preventing any clobbering.
 
 ---
 
@@ -528,7 +529,8 @@ src/
 │   ├── backup.rs   # Rolling backups engine, snapshot rotation, and pruning
 │   └── lock.rs     # Sidecar advisory file locking (3-second timeout retry loop)
 ├── theme.rs        # Runtime Theme struct, presets (teal, orange, lavender, mono), and 256-color fallback
-└── ui.rs           # Ratatui rendering, Symbols (Unicode/ASCII), HitArea tracking, detail pane
+├── ui.rs           # Ratatui rendering, Symbols (Unicode/ASCII), HitArea tracking, detail pane
+└── watch.rs        # ChangeDetector state machine, stat fingerprinting, next_timeout calculation
 ```
 
 ### Module Responsibilities
@@ -567,6 +569,8 @@ src/
     Maintains interactive TUI memory, selection by task ID or date, undo/redo stacks, search and jump prompts, note editing buffer, filter state, and routes input events.
 15. **[`src/main.rs`](src/main.rs)**:
     Thin dispatcher: validates TTY state, initializes terminal raw mode when running interactively, or routes directly to CLI subcommands without touching terminal state.
+16. **[`src/watch.rs`](src/watch.rs)**:
+    Pure `ChangeDetector` state machine (settling, failure tracking, known fingerprint recording) and `next_timeout` event loop computation for live reload without CPU spin or new dependencies.
 
 ---
 
@@ -630,6 +634,24 @@ Slate is crash-proof: a missing file, invalid TOML syntax, unknown key, invalid 
 | `[keys]` | table | | Keybinding settings. |
 | `keys.mode` | string | `"default"` | Navigation mode: `"default"` (vim-style `j`/`k`/`h`/`l` + arrows) or `"arrows"` (arrows, PageUp/PageDown, Home/End only). |
 | `keys.<action>` | array | *(varies)* | Per-action key overrides. Replaces the default keys for that action. |
+| `[storage]` | table | | Storage and live reload settings. |
+| `storage.live_reload` | boolean | `true` | When `true`, automatically polls for external changes to the data file and updates the TUI in real time. |
+| `storage.reload_interval_ms` | integer | `500` | Polling interval in milliseconds for detecting external changes (clamped to `250..=5000`). |
+
+### Storage & Live Reload
+
+To configure data file polling and live reload behavior:
+
+```toml
+[storage]
+# Automatically detect external changes to the data file and reload without restarting
+# Default: true
+live_reload = true
+
+# Polling interval in milliseconds for detecting external changes (clamped to 250..=5000)
+# Default: 500
+reload_interval_ms = 500
+```
 
 ### Keybinding Customization
 
@@ -796,10 +818,16 @@ Slate uses an explicit versioned JSON schema on disk:
 - **Recurring Tasks in Upcoming**: Recurring tasks are template rules rather than infinite pre-expanded items; they are not previewed in the Upcoming view until materialized on or after their scheduled day.
 - **Single-Level Subtasks**: Subtasks are strictly one level deep. Subtasks cannot have their own child subtasks.
 - **Top-Level Counting**: The progress bar, completion counter (`2 of 4 done`), and overdue indicators count top-level tasks only. Completing all subtasks does not auto-complete the parent.
-- **TUI Memory Model**: The interactive TUI holds its task dataset in memory. Avoid running mutating CLI commands while the interactive TUI is actively open.
+- **No Merging**: Slate does not perform multi-master conflict merging. The file on disk wins when not mid-edit.
 
 ### Concurrency & External Changes
 
 - **Advisory Sidecar Locking**: Slate locks `todos.json.lock` only for the duration of a write operation, preventing simultaneous processes from corrupting data. Unique task IDs are allocated under this lock.
-- **External Changes**: Before saving, Slate checks the file's fingerprint (mtime + size). If the file changed on disk, Slate automatically creates a safety snapshot in `backups/` before writing and displays a transient footer notice: `Data changed on disk · previous version backed up`.
+- **Live Reload**: Changes made to the data file by external CLI commands (`slate add`, `slate done`, etc.), other Slate instances, or text editors appear in the open TUI within about a second, without restarting.
+- **Refresh-Before-Mutate Guarantee**: Every mutation, undo, or redo in the TUI acquires the sidecar lock and checks for external changes first. If the file changed on disk, it refreshes from the fresh file before applying the mutation on top, ensuring Slate never overwrites changes it hasn't seen.
+- **Undo History Cleared on Reload**: When an external change is applied, the undo and redo stacks are cleared so you never silently revert another writer's changes (`Reloaded · data changed on disk · undo history cleared`).
+- **Deferred Prompts**: Open mutating prompts (add, edit, subtask, note editor, reschedule, recurrence) defer external reloads until the prompt is closed (Enter or Esc). Typed text and cursor position are never lost. When committed with Enter, the fresh data is loaded first and the mutation is applied on top. Read-only prompts (search, jump to date, filter) and the help overlay reload immediately.
+- **Unreadable Files Never Overwritten**: If an external change introduces invalid JSON, a newer unsupported schema version, or duplicate IDs, Slate keeps its in-memory view intact and displays a dim warning (`Data file changed but can't be read · keeping current view`). The unreadable file is never overwritten. When the file becomes valid again, Slate reloads normally.
+- **Missing File Recovery**: Deleting `todos.json` while Slate is open does not clear the in-memory list. Slate displays `Data file missing · it will be recreated on next change` and recreates the file from memory on the next mutation.
+- **Target Re-resolution**: If a targeted task was deleted externally, single-task mutations abort with `Task no longer exists` without writing anything, and bulk actions apply to remaining IDs while reporting skipped tasks (`Deleted 2 of 3 · 1 no longer exists`).
 
