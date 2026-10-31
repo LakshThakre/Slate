@@ -1,4 +1,4 @@
-use chrono::{NaiveDate, Timelike};
+use chrono::{Datelike, NaiveDate, Timelike};
 use ratatui::layout::{Constraint, Direction, Layout, Position, Rect};
 use ratatui::style::{Modifier, Style};
 use ratatui::text::{Line, Span};
@@ -120,7 +120,7 @@ impl Symbols {
             progress_empty: "-",
             heat_empty: ".",
             heat_1: "-",
-            heat_2: "+",
+            heat_2: "=",
             heat_3: "*",
             heat_4: "#",
             is_ascii: true,
@@ -179,7 +179,7 @@ pub enum HitTarget {
     TodoArea,
     SearchResult { index: usize },
     SummaryDay { date: NaiveDate },
-    SummaryWeek { index: usize },
+    SummaryWeek { date: NaiveDate },
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1468,7 +1468,172 @@ fn draw_summary_week(app: &mut App, frame: &mut Frame, area: Rect) {
 }
 
 fn draw_summary_month(app: &mut App, frame: &mut Frame, area: Rect) {
-    draw_summary_week(app, frame, area);
+    if area.width == 0 || area.height == 0 {
+        return;
+    }
+
+    let header_text = app.summary_date.format("%B %Y").to_string();
+
+    let mut lines = Vec::new();
+
+    // 1. Header line
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            header_text,
+            app.theme.subtext_style().add_modifier(Modifier::BOLD),
+        ),
+    ]));
+
+    // 2. Divider line
+    let divider_width = (area.width as usize).saturating_sub(4);
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(
+            app.symbols.h_rule.repeat(divider_width),
+            app.theme.divider_style(),
+        ),
+    ]));
+
+    // 3. Week rows
+    let year = app.summary_date.year();
+    let month = app.summary_date.month();
+    let weeks = crate::dates::month_weeks(year, month, app.config.week_start);
+    let cur_w_start = crate::dates::week_start_of(app.summary_date, app.config.week_start);
+
+    for (i, week_row) in weeks.iter().enumerate() {
+        let first_date = week_row
+            .iter()
+            .flatten()
+            .next()
+            .copied()
+            .unwrap_or(app.summary_date);
+        let w_start = crate::dates::week_start_of(first_date, app.config.week_start);
+        let all_week_days = crate::dates::week_days(w_start);
+        let is_selected = w_start == cur_w_start;
+
+        let marker = if is_selected {
+            Span::styled(
+                app.symbols.marker,
+                app.theme.accent_style().add_modifier(Modifier::BOLD),
+            )
+        } else {
+            Span::raw("  ")
+        };
+
+        let label_str = format!("Week of {}", w_start.format("%-d %b"));
+        let label_padded = format!("{:<14}", label_str);
+        let label_span = Span::styled(
+            label_padded,
+            if is_selected {
+                app.theme.today_style()
+            } else {
+                app.theme.dim_style()
+            },
+        );
+
+        let week_day_sums = crate::stats::day_summaries(&app.todos, all_week_days);
+
+        let mut day_spans = Vec::new();
+        for (col, &opt_d) in week_row.iter().enumerate() {
+            match opt_d {
+                None => {
+                    day_spans.push(Span::raw(" "));
+                }
+                Some(d) => {
+                    let sum = week_day_sums.iter().find(|s| s.date == d);
+                    let done = sum.map(|s| s.done).unwrap_or(0);
+                    let total = sum.map(|s| s.total).unwrap_or(0);
+
+                    if d > app.today {
+                        if total == 0 {
+                            day_spans
+                                .push(Span::styled(app.symbols.heat_empty, app.theme.dim_style()));
+                        } else {
+                            let count_str = if total > 9 {
+                                "+".to_string()
+                            } else {
+                                total.to_string()
+                            };
+                            day_spans.push(Span::styled(count_str, app.theme.dim_style()));
+                        }
+                    } else if total == 0 {
+                        day_spans.push(Span::styled(app.symbols.heat_empty, app.theme.dim_style()));
+                    } else {
+                        let pct = (done * 100).checked_div(total).unwrap_or(0);
+                        let level = if pct == 100 {
+                            4
+                        } else if pct >= 50 {
+                            3
+                        } else if pct >= 1 {
+                            2
+                        } else {
+                            1
+                        };
+                        let glyph = app.symbols.heat(level);
+                        let style = app.theme.heatmap_style(level);
+                        day_spans.push(Span::styled(glyph, style));
+                    }
+                }
+            }
+
+            if col < 6 {
+                let is_before_weekend = match app.config.week_start {
+                    crate::config::WeekStart::Monday => col == 4,
+                    crate::config::WeekStart::Sunday => col == 5,
+                    crate::config::WeekStart::Saturday => col == 6,
+                };
+                if is_before_weekend {
+                    day_spans.push(Span::raw("  "));
+                } else {
+                    day_spans.push(Span::raw(" "));
+                }
+            }
+        }
+
+        let w_sum = crate::stats::period_summary(&week_day_sums);
+        let stats_str = if w_sum.total == 0 {
+            format!("    {:>7}", if app.symbols.is_ascii { "-" } else { "–" })
+        } else {
+            format!(
+                "    {:>5}  {:>3}%",
+                format!("{}/{}", w_sum.done, w_sum.total),
+                w_sum.percent
+            )
+        };
+        let stats_span = Span::styled(stats_str, app.theme.dim_style());
+
+        let mut row_spans = vec![marker, label_span, Span::raw("   ")];
+        row_spans.extend(day_spans);
+        row_spans.push(stats_span);
+        lines.push(Line::from(row_spans));
+
+        let row_y = area.y + 2 + i as u16;
+        if row_y < area.bottom() {
+            app.hit_areas.push(HitArea {
+                rect: Rect::new(area.x, row_y, area.width, 1),
+                target: HitTarget::SummaryWeek { date: first_date },
+            });
+        }
+    }
+
+    // 4. Month total line
+    let all_month_days: Vec<NaiveDate> = weeks
+        .iter()
+        .flat_map(|w| w.iter().copied().flatten())
+        .collect();
+    let m_sums = crate::stats::day_summaries(&app.todos, all_month_days);
+    let m_sum = crate::stats::period_summary(&m_sums);
+    let total_text = format!(
+        "Month  {} of {} done {} {}%",
+        m_sum.done, m_sum.total, app.symbols.dot, m_sum.percent
+    );
+    lines.push(Line::from(vec![
+        Span::raw("  "),
+        Span::styled(total_text, app.theme.dim_style()),
+    ]));
+
+    frame.render_widget(Paragraph::new(lines), area);
 }
 
 pub fn build_highlighted_text_spans(
@@ -4314,6 +4479,153 @@ mod tests {
         terminal.draw(|f| render(&mut app, f)).unwrap();
 
         // Narrow size (40x8) and 0x0
+        let narrow = TestBackend::new(40, 8);
+        let mut t_narrow = Terminal::new(narrow).unwrap();
+        t_narrow.draw(|f| render(&mut app, f)).unwrap();
+
+        let zero = TestBackend::new(0, 0);
+        let mut t_zero = Terminal::new(zero).unwrap();
+        t_zero.draw(|f| render(&mut app, f)).unwrap();
+    }
+
+    #[test]
+    fn test_render_summary_month() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap(); // Thu
+        let d1 = NaiveDate::from_ymd_opt(2026, 10, 1).unwrap();
+        let d2 = NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        let d3 = NaiveDate::from_ymd_opt(2026, 10, 3).unwrap();
+        let d4 = NaiveDate::from_ymd_opt(2026, 10, 4).unwrap();
+        let future_d = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+
+        let mut app = App::new_for_test_with_date(
+            vec![
+                // 100% complete
+                Todo {
+                    id: 1,
+                    text: "Done task".to_string(),
+                    created_date: d1,
+                    done: true,
+                    ..Default::default()
+                },
+                // 50..99% complete (2 of 3 done = 66%)
+                Todo {
+                    id: 2,
+                    text: "Task 2a".to_string(),
+                    created_date: d2,
+                    done: true,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 3,
+                    text: "Task 2b".to_string(),
+                    created_date: d2,
+                    done: true,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 4,
+                    text: "Task 2c".to_string(),
+                    created_date: d2,
+                    done: false,
+                    ..Default::default()
+                },
+                // 1..49% complete (1 of 3 done = 33%)
+                Todo {
+                    id: 5,
+                    text: "Task 3a".to_string(),
+                    created_date: d3,
+                    done: true,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 6,
+                    text: "Task 3b".to_string(),
+                    created_date: d3,
+                    done: false,
+                    ..Default::default()
+                },
+                Todo {
+                    id: 7,
+                    text: "Task 3c".to_string(),
+                    created_date: d3,
+                    done: false,
+                    ..Default::default()
+                },
+                // 0% complete (0 of 2 done)
+                Todo {
+                    id: 8,
+                    text: "Task 4a".to_string(),
+                    created_date: d4,
+                    done: false,
+                    ..Default::default()
+                },
+                // Future task
+                Todo {
+                    id: 9,
+                    text: "Future task".to_string(),
+                    created_date: future_d,
+                    done: false,
+                    ..Default::default()
+                },
+            ],
+            today,
+        );
+
+        app.current_view = View::Summary;
+        app.summary_range = crate::config::SummaryRange::Month;
+        app.summary_date = today;
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        let content: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+
+        // 1. Header: October 2026
+        assert!(content.contains("October 2026"));
+        // 2. Month total line
+        assert!(content.contains("Month"));
+        assert!(content.contains("done"));
+        // 3. Glyphs present: █, ▓, ▒, ░, ·
+        assert!(content.contains('█'));
+        assert!(content.contains('▓'));
+        assert!(content.contains('▒'));
+        assert!(content.contains('░'));
+        assert!(content.contains('·'));
+        // 4. Hit areas contain SummaryWeek
+        let has_week_hits = app
+            .hit_areas
+            .iter()
+            .any(|h| matches!(h.target, HitTarget::SummaryWeek { .. }));
+        assert!(has_week_hits);
+
+        // 5. Render in ASCII mode: #, *, =, -, .
+        app.symbols = Symbols::ascii();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+        let content_ascii: String = terminal
+            .backend()
+            .buffer()
+            .content()
+            .iter()
+            .map(|c| c.symbol())
+            .collect();
+        assert!(content_ascii.contains('#'));
+        assert!(content_ascii.contains('*'));
+        assert!(content_ascii.contains('='));
+        assert!(content_ascii.contains('-'));
+        assert!(content_ascii.contains('.'));
+
+        // 6. Mono mode
+        app.theme = Theme::preset_mono();
+        terminal.draw(|f| render(&mut app, f)).unwrap();
+
+        // 7. Small sizes
         let narrow = TestBackend::new(40, 8);
         let mut t_narrow = Terminal::new(narrow).unwrap();
         t_narrow.draw(|f| render(&mut app, f)).unwrap();

@@ -1794,7 +1794,8 @@ impl App {
                                 self.open_summary_day();
                                 return true;
                             }
-                            crate::ui::HitTarget::SummaryWeek { index: _ } => {
+                            crate::ui::HitTarget::SummaryWeek { date } => {
+                                self.summary_date = date;
                                 self.summary_range = crate::config::SummaryRange::Week;
                                 return true;
                             }
@@ -3091,8 +3092,29 @@ impl App {
         }
     }
 
+    fn clamp_date_to_month(year: i32, month: u32, preferred_day: u32) -> NaiveDate {
+        let next_month_first = if month == 12 {
+            NaiveDate::from_ymd_opt(year + 1, 1, 1)
+        } else {
+            NaiveDate::from_ymd_opt(year, month + 1, 1)
+        };
+        let last_day = next_month_first
+            .and_then(|d| d.pred_opt())
+            .map(|d| d.day())
+            .unwrap_or(28);
+        let day = preferred_day.min(last_day).max(1);
+        NaiveDate::from_ymd_opt(year, month, day).unwrap()
+    }
+
     pub fn open_summary_day(&mut self) {
-        self.jump_to_date_internal(self.summary_date);
+        match self.summary_range {
+            crate::config::SummaryRange::Week => {
+                self.jump_to_date_internal(self.summary_date);
+            }
+            crate::config::SummaryRange::Month => {
+                self.summary_range = crate::config::SummaryRange::Week;
+            }
+        }
     }
 
     pub fn summary_nav_down(&mut self) {
@@ -3106,13 +3128,27 @@ impl App {
                 }
             }
             crate::config::SummaryRange::Month => {
-                let cur_m = self.summary_date.month();
-                if let Some(next_d) = self
-                    .summary_date
-                    .checked_add_signed(chrono::Duration::days(7))
-                {
-                    if next_d.month() == cur_m {
-                        self.summary_date = next_d;
+                let year = self.summary_date.year();
+                let month = self.summary_date.month();
+                let weeks = crate::dates::month_weeks(year, month, self.config.week_start);
+                let cur_w_start =
+                    crate::dates::week_start_of(self.summary_date, self.config.week_start);
+                if let Some(cur_row_idx) = weeks.iter().position(|row| {
+                    row.iter().flatten().any(|&d| {
+                        crate::dates::week_start_of(d, self.config.week_start) == cur_w_start
+                    })
+                }) {
+                    if cur_row_idx + 1 < weeks.len() {
+                        let next_row = &weeks[cur_row_idx + 1];
+                        let target = next_row
+                            .iter()
+                            .flatten()
+                            .find(|d| d.weekday() == self.summary_date.weekday())
+                            .or_else(|| next_row.iter().flatten().next())
+                            .copied();
+                        if let Some(d) = target {
+                            self.summary_date = d;
+                        }
                     }
                 }
             }
@@ -3130,13 +3166,27 @@ impl App {
                 }
             }
             crate::config::SummaryRange::Month => {
-                let cur_m = self.summary_date.month();
-                if let Some(prev_d) = self
-                    .summary_date
-                    .checked_sub_signed(chrono::Duration::days(7))
-                {
-                    if prev_d.month() == cur_m {
-                        self.summary_date = prev_d;
+                let year = self.summary_date.year();
+                let month = self.summary_date.month();
+                let weeks = crate::dates::month_weeks(year, month, self.config.week_start);
+                let cur_w_start =
+                    crate::dates::week_start_of(self.summary_date, self.config.week_start);
+                if let Some(cur_row_idx) = weeks.iter().position(|row| {
+                    row.iter().flatten().any(|&d| {
+                        crate::dates::week_start_of(d, self.config.week_start) == cur_w_start
+                    })
+                }) {
+                    if cur_row_idx > 0 {
+                        let prev_row = &weeks[cur_row_idx - 1];
+                        let target = prev_row
+                            .iter()
+                            .flatten()
+                            .find(|d| d.weekday() == self.summary_date.weekday())
+                            .or_else(|| prev_row.iter().flatten().next())
+                            .copied();
+                        if let Some(d) = target {
+                            self.summary_date = d;
+                        }
                     }
                 }
             }
@@ -3171,10 +3221,8 @@ impl App {
                     } else {
                         (cur_y, cur_m - 1)
                     };
-                    let day = self.summary_date.day().min(28);
-                    if let Some(d) = NaiveDate::from_ymd_opt(prev_y, prev_m, day) {
-                        self.summary_date = d;
-                    }
+                    self.summary_date =
+                        Self::clamp_date_to_month(prev_y, prev_m, self.summary_date.day());
                 }
             }
         }
@@ -3208,10 +3256,8 @@ impl App {
                     } else {
                         (cur_y, cur_m + 1)
                     };
-                    let day = self.summary_date.day().min(28);
-                    if let Some(d) = NaiveDate::from_ymd_opt(next_y, next_m, day) {
-                        self.summary_date = d;
-                    }
+                    self.summary_date =
+                        Self::clamp_date_to_month(next_y, next_m, self.summary_date.day());
                 }
             }
         }
@@ -7276,5 +7322,166 @@ mod tests {
         assert_eq!(app.todos.len(), 2);
         assert_eq!(app.todos[1].text, "Summary added task");
         assert_eq!(app.todos[1].created_date, today);
+    }
+
+    #[test]
+    fn test_summary_month_navigation_bounds_and_dec_jan_boundary() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 15).unwrap();
+        let past_dec = NaiveDate::from_ymd_opt(2025, 12, 10).unwrap();
+        let next_jan = NaiveDate::from_ymd_opt(2027, 1, 5).unwrap();
+
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "2025 Dec task".to_string(),
+                created_date: past_dec,
+                done: true,
+                ..Default::default()
+            },
+            Todo {
+                id: 2,
+                text: "Today task".to_string(),
+                created_date: today,
+                done: false,
+                ..Default::default()
+            },
+            Todo {
+                id: 3,
+                text: "2027 Jan task".to_string(),
+                created_date: next_jan,
+                done: false,
+                ..Default::default()
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos.clone(), today);
+        app.current_view = View::Summary;
+        app.summary_range = crate::config::SummaryRange::Month;
+
+        let weeks = crate::dates::month_weeks(2026, 10, app.config.week_start);
+        assert_eq!(weeks.len(), 5);
+
+        // j moves down week rows
+        let initial_week_start =
+            crate::dates::week_start_of(app.summary_date, app.config.week_start);
+        app.handle_key(key_press(KeyCode::Char('j')));
+        let next_week_start = crate::dates::week_start_of(app.summary_date, app.config.week_start);
+        assert!(next_week_start > initial_week_start);
+
+        // Move to the bottom week row
+        for _ in 0..10 {
+            app.handle_key(key_press(KeyCode::Char('j')));
+        }
+        let bottom_week_start =
+            crate::dates::week_start_of(app.summary_date, app.config.week_start);
+        // Further j is clamped to bottom week
+        app.handle_key(key_press(KeyCode::Char('j')));
+        assert_eq!(
+            crate::dates::week_start_of(app.summary_date, app.config.week_start),
+            bottom_week_start
+        );
+
+        // k moves up week rows
+        app.handle_key(key_press(KeyCode::Char('k')));
+        let up_week_start = crate::dates::week_start_of(app.summary_date, app.config.week_start);
+        assert!(up_week_start < bottom_week_start);
+
+        // Move to the top week row
+        for _ in 0..10 {
+            app.handle_key(key_press(KeyCode::Char('k')));
+        }
+        let top_week_start = crate::dates::week_start_of(app.summary_date, app.config.week_start);
+        // Further k is clamped to top week
+        app.handle_key(key_press(KeyCode::Char('k')));
+        assert_eq!(
+            crate::dates::week_start_of(app.summary_date, app.config.week_start),
+            top_week_start
+        );
+
+        // Enter drills into that week in Week range
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.summary_range, crate::config::SummaryRange::Week);
+        assert_eq!(
+            crate::dates::week_start_of(app.summary_date, app.config.week_start),
+            top_week_start
+        );
+
+        // Toggle back to Month
+        app.handle_key(key_press(KeyCode::Char('w')));
+        assert_eq!(app.summary_range, crate::config::SummaryRange::Month);
+
+        // Mouse click on a week row drills into it
+        let sample_date = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+        app.handle_mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Down(
+                ratatui::crossterm::event::MouseButton::Left,
+            ),
+            column: 10,
+            row: 4,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        // Simulate hit area trigger
+        let _ = app.handle_mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Down(
+                ratatui::crossterm::event::MouseButton::Left,
+            ),
+            column: 0,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        // Direct target test with mouse enabled
+        app.config.ui.mouse = true;
+        app.summary_range = crate::config::SummaryRange::Month;
+        let area = crate::ui::HitArea {
+            rect: ratatui::layout::Rect::new(0, 0, 80, 1),
+            target: crate::ui::HitTarget::SummaryWeek { date: sample_date },
+        };
+        app.hit_areas = vec![area];
+        app.handle_mouse(ratatui::crossterm::event::MouseEvent {
+            kind: ratatui::crossterm::event::MouseEventKind::Down(
+                ratatui::crossterm::event::MouseButton::Left,
+            ),
+            column: 10,
+            row: 0,
+            modifiers: ratatui::crossterm::event::KeyModifiers::NONE,
+        });
+        assert_eq!(app.summary_range, crate::config::SummaryRange::Week);
+        assert_eq!(app.summary_date, sample_date);
+
+        // Back to Month
+        app.summary_range = crate::config::SummaryRange::Month;
+
+        // g jumps cursor to current week in current month
+        app.summary_date = NaiveDate::from_ymd_opt(2026, 10, 2).unwrap();
+        app.handle_key(key_press(KeyCode::Char('g')));
+        assert_eq!(app.summary_date, today);
+
+        // Test month navigation with '[' across year boundary to Dec 2025
+        for _ in 0..10 {
+            app.handle_key(key_press(KeyCode::Char('[')));
+        }
+        assert_eq!(app.summary_date.year(), 2025);
+        assert_eq!(app.summary_date.month(), 12);
+
+        // '[' at min bound is no-op
+        let at_min = app.summary_date;
+        app.handle_key(key_press(KeyCode::Char('[')));
+        assert_eq!(app.summary_date, at_min);
+
+        // Test month navigation with ']' across year boundary to Jan 2027
+        for _ in 0..20 {
+            app.handle_key(key_press(KeyCode::Char(']')));
+        }
+        assert_eq!(app.summary_date.year(), 2027);
+        assert_eq!(app.summary_date.month(), 1);
+
+        // ']' at max bound is no-op
+        let at_max = app.summary_date;
+        app.handle_key(key_press(KeyCode::Char(']')));
+        assert_eq!(app.summary_date, at_max);
+
+        // Read-only invariant
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(app.todos, todos);
     }
 }
