@@ -97,11 +97,8 @@ fn parse_relative_offset_ext(s: &str, today: NaiveDate, allow_past: bool) -> Opt
     let (is_negative, rest) = if let Some(stripped) = s.strip_prefix('+') {
         (false, stripped)
     } else if allow_past {
-        if let Some(stripped) = s.strip_prefix('-') {
-            (true, stripped)
-        } else {
-            return None;
-        }
+        let stripped = s.strip_prefix('-')?;
+        (true, stripped)
     } else {
         return None;
     };
