@@ -25,19 +25,40 @@ pub struct StorageData {
     pub focus: Option<u64>,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[cfg(unix)]
+use std::os::unix::fs::MetadataExt;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct FileFingerprint {
     pub mtime: SystemTime,
     pub len: u64,
+    #[cfg(unix)]
+    pub ino: u64,
 }
 
 impl FileFingerprint {
     pub fn of(path: &Path) -> Option<Self> {
         let meta = fs::metadata(path).ok()?;
-        Some(Self {
+        Some(Self::from_meta(&meta))
+    }
+
+    pub fn from_meta(meta: &fs::Metadata) -> Self {
+        Self {
             mtime: meta.modified().unwrap_or(SystemTime::UNIX_EPOCH),
             len: meta.len(),
-        })
+            #[cfg(unix)]
+            ino: meta.ino(),
+        }
+    }
+
+    #[cfg(test)]
+    pub fn new_test(mtime: SystemTime, len: u64, _ino: u64) -> Self {
+        Self {
+            mtime,
+            len,
+            #[cfg(unix)]
+            ino: _ino,
+        }
     }
 }
 
