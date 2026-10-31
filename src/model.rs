@@ -136,6 +136,7 @@ pub enum View {
     Today,
     Upcoming,
     History,
+    Summary,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

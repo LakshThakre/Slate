@@ -109,6 +109,9 @@ pub struct UiConfig {
     #[serde(default = "default_true")]
     pub show_upcoming: bool,
 
+    #[serde(default = "default_true")]
+    pub show_summary: bool,
+
     #[serde(default)]
     pub detail_pane: bool,
 
@@ -126,10 +129,25 @@ impl Default for UiConfig {
             symbols: SymbolsMode::Unicode,
             show_history: true,
             show_upcoming: true,
+            show_summary: true,
             detail_pane: false,
             mouse: false,
         }
     }
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum SummaryRange {
+    #[default]
+    Week,
+    Month,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq, Default)]
+pub struct SummaryConfig {
+    #[serde(default)]
+    pub default_range: SummaryRange,
 }
 
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
@@ -231,6 +249,9 @@ pub struct Config {
 
     #[serde(default)]
     pub tasks: TasksConfig,
+
+    #[serde(default)]
+    pub summary: SummaryConfig,
 }
 
 impl Default for Config {
@@ -246,6 +267,7 @@ impl Default for Config {
             progress: ProgressConfig::default(),
             keys: KeysConfig::default(),
             tasks: TasksConfig::default(),
+            summary: SummaryConfig::default(),
         }
     }
 }
@@ -334,6 +356,7 @@ impl Config {
             "progress",
             "keys",
             "tasks",
+            "summary",
         ];
 
         for k in table.keys() {
@@ -446,6 +469,7 @@ impl Config {
                     "symbols",
                     "show_history",
                     "show_upcoming",
+                    "show_summary",
                     "detail_pane",
                     "mouse",
                 ];
@@ -485,6 +509,14 @@ impl Config {
                     } else {
                         warnings
                             .push("ui.show_upcoming must be a boolean · using true".to_string());
+                    }
+                }
+
+                if let Some(ss_val) = ui_table.get("show_summary") {
+                    if let Some(b) = ss_val.as_bool() {
+                        config.ui.show_summary = b;
+                    } else {
+                        warnings.push("ui.show_summary must be a boolean · using true".to_string());
                     }
                 }
 
@@ -633,6 +665,36 @@ impl Config {
                 }
             } else {
                 warnings.push("[tasks] must be a table".to_string());
+            }
+        }
+
+        // 11. [summary]
+        if let Some(summary_val) = table.get("summary") {
+            if let Some(summary_table) = summary_val.as_table() {
+                let allowed_summary_keys = ["default_range"];
+                for k in summary_table.keys() {
+                    if !allowed_summary_keys.contains(&k.as_str()) {
+                        warnings.push(format!("Unknown summary config key: '{k}'"));
+                    }
+                }
+
+                if let Some(dr_val) = summary_table.get("default_range") {
+                    if let Some(s) = dr_val.as_str() {
+                        match s.to_ascii_lowercase().as_str() {
+                            "week" => config.summary.default_range = SummaryRange::Week,
+                            "month" => config.summary.default_range = SummaryRange::Month,
+                            _ => {
+                                warnings.push(format!(
+                                    "Invalid summary.default_range '{s}': expected week or month · using week"
+                                ));
+                            }
+                        }
+                    } else {
+                        warnings.push("summary.default_range must be a string".to_string());
+                    }
+                }
+            } else {
+                warnings.push("[summary] must be a table".to_string());
             }
         }
 

@@ -91,6 +91,8 @@ pub struct App {
     pub search_selected_index: usize,
     pub search_results: crate::search::SearchResults,
     pub search_snapshot: Option<SearchStateSnapshot>,
+    pub summary_date: NaiveDate,
+    pub summary_range: crate::config::SummaryRange,
 }
 
 impl Default for App {
@@ -212,6 +214,7 @@ impl App {
             last_backup_time: None,
             terminal_width: 80,
             terminal_height: 24,
+            summary_range: config.summary.default_range,
             config,
             theme,
             symbols,
@@ -225,6 +228,7 @@ impl App {
                 total_hits: 0,
             },
             search_snapshot: None,
+            summary_date: today,
         };
 
         if !all_warnings.is_empty() {
@@ -316,6 +320,8 @@ impl App {
                 total_hits: 0,
             },
             search_snapshot: None,
+            summary_date: today,
+            summary_range: crate::config::SummaryRange::Week,
         };
         app.clamp_selections();
         app
@@ -377,7 +383,7 @@ impl App {
 
     pub fn current_filter(&self) -> &crate::model::Filter {
         match self.current_view {
-            View::Today => &self.today_filter,
+            View::Today | View::Summary => &self.today_filter,
             View::Upcoming => &self.upcoming_filter,
             View::History => &self.history_filter,
         }
@@ -385,7 +391,7 @@ impl App {
 
     pub fn current_filter_mut(&mut self) -> &mut crate::model::Filter {
         match self.current_view {
-            View::Today => &mut self.today_filter,
+            View::Today | View::Summary => &mut self.today_filter,
             View::Upcoming => &mut self.upcoming_filter,
             View::History => &mut self.history_filter,
         }
@@ -576,6 +582,12 @@ impl App {
                 }
                 self.upcoming_todo_id = rows_up.get(self.upcoming_todo_index).map(|r| r.id);
             }
+        }
+
+        if self.current_view == View::Summary
+            && (!self.config.ui.show_history || !self.config.ui.show_summary)
+        {
+            self.current_view = View::Today;
         }
     }
 
@@ -927,6 +939,9 @@ impl App {
                     self.history_todo_id = self.visible_rows_history().first().map(|r| r.id);
                 }
             },
+            View::Summary => {
+                self.summary_date = self.today;
+            }
         }
     }
 
@@ -963,6 +978,7 @@ impl App {
                     self.history_todo_id = rows.get(self.history_todo_index).map(|r| r.id);
                 }
             },
+            View::Summary => {}
         }
     }
 
@@ -1025,6 +1041,9 @@ impl App {
                     self.history_todo_id = rows.get(self.history_todo_index).map(|r| r.id);
                 }
             },
+            View::Summary => {
+                self.summary_next_period();
+            }
         }
     }
 
@@ -1066,6 +1085,9 @@ impl App {
                         .map(|r| r.id);
                 }
             },
+            View::Summary => {
+                self.summary_prev_period();
+            }
         }
     }
 
@@ -1305,6 +1327,7 @@ impl App {
                     None
                 }
             }
+            View::Summary => None,
         }
     }
 
@@ -1372,6 +1395,7 @@ impl App {
                     Vec::new()
                 }
             }
+            View::Summary => Vec::new(),
         };
 
         if visible_ids.is_empty() {
@@ -1641,6 +1665,7 @@ impl App {
                     self.set_transient_message("Moved to Today");
                 }
             }
+            View::Summary => {}
         }
     }
 
@@ -1755,6 +1780,23 @@ impl App {
                                     self.clamp_selections();
                                     return true;
                                 }
+                            }
+                            crate::ui::HitTarget::TabSummary => {
+                                if self.config.ui.show_history && self.config.ui.show_summary {
+                                    self.current_view = View::Summary;
+                                    self.marks.clear();
+                                    self.clamp_selections();
+                                    return true;
+                                }
+                            }
+                            crate::ui::HitTarget::SummaryDay { date } => {
+                                self.summary_date = date;
+                                self.open_summary_day();
+                                return true;
+                            }
+                            crate::ui::HitTarget::SummaryWeek { index: _ } => {
+                                self.summary_range = crate::config::SummaryRange::Week;
+                                return true;
                             }
                             crate::ui::HitTarget::TodayTask { index } => {
                                 self.today_selected_index = index;
@@ -1893,6 +1935,10 @@ impl App {
                             }
                         }
                     }
+                    View::Summary => {
+                        self.summary_nav_down();
+                        return true;
+                    }
                 }
                 false
             }
@@ -1981,6 +2027,10 @@ impl App {
                             return true;
                         }
                     }
+                    View::Summary => {
+                        self.summary_nav_up();
+                        return true;
+                    }
                 }
                 false
             }
@@ -2003,7 +2053,7 @@ impl App {
                     Ok(parsed) => {
                         let cur_view = self.current_view;
                         let target_date = parsed.date.unwrap_or_else(|| match cur_view {
-                            View::Today => today,
+                            View::Today | View::Summary => today,
                             View::History => self.selected_history_date.unwrap_or(today),
                             View::Upcoming => self
                                 .selected_upcoming_date
@@ -2108,6 +2158,9 @@ impl App {
                                 }
                                 View::History => {
                                     self.history_todo_id = Some(id);
+                                }
+                                View::Summary => {
+                                    self.set_transient_message("Added to Today");
                                 }
                             }
                         }
@@ -2243,7 +2296,7 @@ impl App {
                             self.set_transient_message("Added (hidden by filter)");
                         } else {
                             match self.current_view {
-                                View::Today => self.today_selected_id = Some(id),
+                                View::Today | View::Summary => self.today_selected_id = Some(id),
                                 View::Upcoming => self.upcoming_todo_id = Some(id),
                                 View::History => self.history_todo_id = Some(id),
                             }
@@ -2910,6 +2963,18 @@ impl App {
     }
 
     pub fn jump_to_date(&mut self, target_date: NaiveDate) {
+        if self.current_view == View::Summary {
+            if target_date < self.today && !self.config.ui.show_history {
+                self.set_transient_message("History is hidden");
+            } else {
+                self.summary_date = target_date;
+            }
+            return;
+        }
+        self.jump_to_date_internal(target_date);
+    }
+
+    pub fn jump_to_date_internal(&mut self, target_date: NaiveDate) {
         if target_date < self.today && !self.config.ui.show_history {
             self.set_transient_message("History is hidden");
             return;
@@ -3021,6 +3086,132 @@ impl App {
                         "No tasks on or before {}",
                         target_date.format(&self.config.short_date_format)
                     ));
+                }
+            }
+        }
+    }
+
+    pub fn open_summary_day(&mut self) {
+        self.jump_to_date_internal(self.summary_date);
+    }
+
+    pub fn summary_nav_down(&mut self) {
+        match self.summary_range {
+            crate::config::SummaryRange::Week => {
+                let week_start =
+                    crate::dates::week_start_of(self.summary_date, self.config.week_start);
+                let days = crate::dates::week_days(week_start);
+                if self.summary_date < days[6] {
+                    self.summary_date = self.summary_date.succ_opt().unwrap_or(self.summary_date);
+                }
+            }
+            crate::config::SummaryRange::Month => {
+                let cur_m = self.summary_date.month();
+                if let Some(next_d) = self
+                    .summary_date
+                    .checked_add_signed(chrono::Duration::days(7))
+                {
+                    if next_d.month() == cur_m {
+                        self.summary_date = next_d;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn summary_nav_up(&mut self) {
+        match self.summary_range {
+            crate::config::SummaryRange::Week => {
+                let week_start =
+                    crate::dates::week_start_of(self.summary_date, self.config.week_start);
+                let days = crate::dates::week_days(week_start);
+                if self.summary_date > days[0] {
+                    self.summary_date = self.summary_date.pred_opt().unwrap_or(self.summary_date);
+                }
+            }
+            crate::config::SummaryRange::Month => {
+                let cur_m = self.summary_date.month();
+                if let Some(prev_d) = self
+                    .summary_date
+                    .checked_sub_signed(chrono::Duration::days(7))
+                {
+                    if prev_d.month() == cur_m {
+                        self.summary_date = prev_d;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn summary_prev_period(&mut self) {
+        match self.summary_range {
+            crate::config::SummaryRange::Week => {
+                let (min_week, _) = crate::dates::week_period_bounds(
+                    self.todos.iter().map(|t| t.created_date),
+                    self.today,
+                    self.config.week_start,
+                );
+                let cur_week =
+                    crate::dates::week_start_of(self.summary_date, self.config.week_start);
+                if cur_week > min_week {
+                    let day_offset = (self.summary_date - cur_week).num_days();
+                    let prev_week = (cur_week - chrono::Duration::days(7)).max(min_week);
+                    self.summary_date = prev_week + chrono::Duration::days(day_offset);
+                }
+            }
+            crate::config::SummaryRange::Month => {
+                let (min_month, _) = crate::dates::month_period_bounds(
+                    self.todos.iter().map(|t| t.created_date),
+                    self.today,
+                );
+                let (cur_y, cur_m) = (self.summary_date.year(), self.summary_date.month());
+                if (cur_y, cur_m) > min_month {
+                    let (prev_y, prev_m) = if cur_m == 1 {
+                        (cur_y - 1, 12)
+                    } else {
+                        (cur_y, cur_m - 1)
+                    };
+                    let day = self.summary_date.day().min(28);
+                    if let Some(d) = NaiveDate::from_ymd_opt(prev_y, prev_m, day) {
+                        self.summary_date = d;
+                    }
+                }
+            }
+        }
+    }
+
+    pub fn summary_next_period(&mut self) {
+        match self.summary_range {
+            crate::config::SummaryRange::Week => {
+                let (_, max_week) = crate::dates::week_period_bounds(
+                    self.todos.iter().map(|t| t.created_date),
+                    self.today,
+                    self.config.week_start,
+                );
+                let cur_week =
+                    crate::dates::week_start_of(self.summary_date, self.config.week_start);
+                if cur_week < max_week {
+                    let day_offset = (self.summary_date - cur_week).num_days();
+                    let next_week = (cur_week + chrono::Duration::days(7)).min(max_week);
+                    self.summary_date = next_week + chrono::Duration::days(day_offset);
+                }
+            }
+            crate::config::SummaryRange::Month => {
+                let (_, max_month) = crate::dates::month_period_bounds(
+                    self.todos.iter().map(|t| t.created_date),
+                    self.today,
+                );
+                let (cur_y, cur_m) = (self.summary_date.year(), self.summary_date.month());
+                if (cur_y, cur_m) < max_month {
+                    let (next_y, next_m) = if cur_m == 12 {
+                        (cur_y + 1, 1)
+                    } else {
+                        (cur_y, cur_m + 1)
+                    };
+                    let day = self.summary_date.day().min(28);
+                    if let Some(d) = NaiveDate::from_ymd_opt(next_y, next_m, day) {
+                        self.summary_date = d;
+                    }
                 }
             }
         }
@@ -3301,12 +3492,15 @@ impl App {
                 self.marks.clear();
                 let show_up = self.config.ui.show_upcoming;
                 let show_hist = self.config.ui.show_history;
+                let show_summary = show_hist && self.config.ui.show_summary;
                 self.current_view = match self.current_view {
                     View::Today => {
                         if show_up {
                             View::Upcoming
                         } else if show_hist {
                             View::History
+                        } else if show_summary {
+                            View::Summary
                         } else {
                             View::Today
                         }
@@ -3314,11 +3508,20 @@ impl App {
                     View::Upcoming => {
                         if show_hist {
                             View::History
+                        } else if show_summary {
+                            View::Summary
                         } else {
                             View::Today
                         }
                     }
-                    View::History => View::Today,
+                    View::History => {
+                        if show_summary {
+                            View::Summary
+                        } else {
+                            View::Today
+                        }
+                    }
+                    View::Summary => View::Today,
                 };
                 self.clamp_selections();
             }
@@ -3332,83 +3535,111 @@ impl App {
                 self.prompt_error = None;
             }
             crate::keymap::Action::AddSubtask => {
-                self.start_adding_subtask();
+                if self.current_view != View::Summary {
+                    self.start_adding_subtask();
+                }
             }
             crate::keymap::Action::Reschedule => {
-                if !self.marks.is_empty() {
-                    self.input_mode = InputMode::ReschedulingBulk;
-                    self.input_buffer.clear();
-                    self.cursor_position = 0;
-                    self.prompt_error = None;
-                } else {
-                    let target_id = self.selected_task_id();
-                    if let Some(id) = target_id {
-                        self.input_mode = InputMode::Rescheduling(id);
+                if self.current_view != View::Summary {
+                    if !self.marks.is_empty() {
+                        self.input_mode = InputMode::ReschedulingBulk;
                         self.input_buffer.clear();
                         self.cursor_position = 0;
                         self.prompt_error = None;
+                    } else {
+                        let target_id = self.selected_task_id();
+                        if let Some(id) = target_id {
+                            self.input_mode = InputMode::Rescheduling(id);
+                            self.input_buffer.clear();
+                            self.cursor_position = 0;
+                            self.prompt_error = None;
+                        }
                     }
                 }
             }
             crate::keymap::Action::ToggleMark => {
-                self.toggle_mark_selected();
+                if self.current_view != View::Summary {
+                    self.toggle_mark_selected();
+                }
             }
             crate::keymap::Action::ToggleMarkAll => {
-                self.toggle_mark_all_visible();
+                if self.current_view != View::Summary {
+                    self.toggle_mark_all_visible();
+                }
             }
             crate::keymap::Action::Toggle if !self.marks.is_empty() => {
-                self.bulk_toggle();
+                if self.current_view != View::Summary {
+                    self.bulk_toggle();
+                }
             }
             crate::keymap::Action::Delete if !self.marks.is_empty() => {
-                self.bulk_delete();
+                if self.current_view != View::Summary {
+                    self.bulk_delete();
+                }
             }
             crate::keymap::Action::MoveToToday if !self.marks.is_empty() => {
-                self.bulk_move_to_today();
+                if self.current_view != View::Summary {
+                    self.bulk_move_to_today();
+                }
             }
             crate::keymap::Action::CyclePriority => {
-                self.cycle_selected_priority();
+                if self.current_view != View::Summary {
+                    self.cycle_selected_priority();
+                }
             }
             crate::keymap::Action::CycleSort => {
-                self.sort_mode = self.sort_mode.next();
-                self.re_resolve_selections();
+                if self.current_view != View::Summary {
+                    self.sort_mode = self.sort_mode.next();
+                    self.re_resolve_selections();
+                }
             }
             crate::keymap::Action::Filter => {
-                self.input_mode = InputMode::Filtering;
-                self.input_buffer.clear();
-                self.cursor_position = 0;
-                self.prompt_error = None;
+                if self.current_view != View::Summary {
+                    self.input_mode = InputMode::Filtering;
+                    self.input_buffer.clear();
+                    self.cursor_position = 0;
+                    self.prompt_error = None;
+                }
             }
             crate::keymap::Action::ToggleDetail => {
-                self.show_detail_pane = !self.show_detail_pane;
+                if self.current_view != View::Summary {
+                    self.show_detail_pane = !self.show_detail_pane;
+                }
             }
             crate::keymap::Action::EditNote => {
-                if self.terminal_height < 20 {
-                    self.set_transient_message("Terminal too small for note editor");
-                } else if let Some(id) = self.selected_task_id() {
-                    let existing_note = self
-                        .todos
-                        .iter()
-                        .find(|t| t.id == id)
-                        .and_then(|t| t.note.clone())
-                        .unwrap_or_default();
-                    self.note_cursor = existing_note.chars().count();
-                    self.note_buffer = existing_note;
-                    self.input_mode = InputMode::EditingNote(id);
+                if self.current_view != View::Summary {
+                    if self.terminal_height < 20 {
+                        self.set_transient_message("Terminal too small for note editor");
+                    } else if let Some(id) = self.selected_task_id() {
+                        let existing_note = self
+                            .todos
+                            .iter()
+                            .find(|t| t.id == id)
+                            .and_then(|t| t.note.clone())
+                            .unwrap_or_default();
+                        self.note_cursor = existing_note.chars().count();
+                        self.note_buffer = existing_note;
+                        self.input_mode = InputMode::EditingNote(id);
+                    }
                 }
             }
             crate::keymap::Action::ToggleFocus => {
-                self.toggle_focus();
+                if self.current_view != View::Summary {
+                    self.toggle_focus();
+                }
             }
             crate::keymap::Action::Recurrence => {
-                if let Some(id) = self.selected_task_id() {
-                    if let Some(todo) = self.todos.iter().find(|t| t.id == id) {
-                        if todo.parent.is_some() {
-                            self.set_transient_message("Subtasks cannot be recurring");
-                        } else {
-                            self.input_mode = InputMode::SettingRecurrence(id);
-                            self.input_buffer.clear();
-                            self.cursor_position = 0;
-                            self.prompt_error = None;
+                if self.current_view != View::Summary {
+                    if let Some(id) = self.selected_task_id() {
+                        if let Some(todo) = self.todos.iter().find(|t| t.id == id) {
+                            if todo.parent.is_some() {
+                                self.set_transient_message("Subtasks cannot be recurring");
+                            } else {
+                                self.input_mode = InputMode::SettingRecurrence(id);
+                                self.input_buffer.clear();
+                                self.cursor_position = 0;
+                                self.prompt_error = None;
+                            }
                         }
                     }
                 }
@@ -3437,14 +3668,56 @@ impl App {
             crate::keymap::Action::HalfPageUp => {
                 self.jump_half_page_up();
             }
+            crate::keymap::Action::ToggleSummaryRange => {
+                if self.current_view == View::Summary {
+                    self.summary_range = match self.summary_range {
+                        crate::config::SummaryRange::Week => crate::config::SummaryRange::Month,
+                        crate::config::SummaryRange::Month => crate::config::SummaryRange::Week,
+                    };
+                }
+            }
+            crate::keymap::Action::PrevPeriod => {
+                if self.current_view == View::Summary {
+                    self.summary_prev_period();
+                }
+            }
+            crate::keymap::Action::NextPeriod => {
+                if self.current_view == View::Summary {
+                    self.summary_next_period();
+                }
+            }
             _ => match self.current_view {
                 View::Today => self.handle_today_action(action),
                 View::Upcoming => self.handle_upcoming_action(action),
                 View::History => self.handle_history_action(action),
+                View::Summary => self.handle_summary_action(action, &key),
             },
         }
 
         false
+    }
+
+    fn handle_summary_action(&mut self, action: crate::keymap::Action, key: &KeyEvent) {
+        match action {
+            crate::keymap::Action::MoveSelectionDown => {
+                self.summary_nav_down();
+            }
+            crate::keymap::Action::MoveSelectionUp => {
+                self.summary_nav_up();
+            }
+            crate::keymap::Action::Toggle => {
+                if key.code == KeyCode::Enter {
+                    self.open_summary_day();
+                }
+            }
+            crate::keymap::Action::PrevPeriod => {
+                self.summary_prev_period();
+            }
+            crate::keymap::Action::NextPeriod => {
+                self.summary_next_period();
+            }
+            _ => {}
+        }
     }
 
     fn handle_today_action(&mut self, action: crate::keymap::Action) {
@@ -4531,12 +4804,14 @@ mod tests {
         let dates = app.dates_list();
         assert_eq!(dates, vec![today, yesterday, older]);
 
-        // View switching with Tab: Today -> Upcoming -> History -> Today
+        // View switching with Tab: Today -> Upcoming -> History -> Summary -> Today
         assert_eq!(app.current_view, View::Today);
         app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::Upcoming);
         app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::History);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Summary);
         app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::Today);
 
@@ -5165,27 +5440,41 @@ mod tests {
         let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap();
         let mut app = App::new_for_test_with_date(Vec::new(), today);
 
-        // Default: Today -> Upcoming -> History -> Today
+        // Default: Today -> Upcoming -> History -> Summary -> Today
         assert_eq!(app.current_view, View::Today);
         app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::Upcoming);
         app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::History);
         app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Summary);
+        app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::Today);
 
-        // With show_upcoming = false: Today -> History -> Today
+        // With show_upcoming = false: Today -> History -> Summary -> Today
         app.config.ui.show_upcoming = false;
         app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::History);
         app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Summary);
+        app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::Today);
 
-        // With show_history = false: Today -> Upcoming -> Today
+        // With show_history = false: Today -> Upcoming -> Today (Summary skipped too)
         app.config.ui.show_upcoming = true;
         app.config.ui.show_history = false;
         app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::Upcoming);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Today);
+
+        // With show_summary = false: Today -> Upcoming -> History -> Today
+        app.config.ui.show_history = true;
+        app.config.ui.show_summary = false;
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::Upcoming);
+        app.handle_key(key_press(KeyCode::Tab));
+        assert_eq!(app.current_view, View::History);
         app.handle_key(key_press(KeyCode::Tab));
         assert_eq!(app.current_view, View::Today);
     }
@@ -6756,5 +7045,236 @@ mod tests {
         // 10. Read-only invariant: undo stack and todos unchanged
         assert!(app.undo_stack.is_empty());
         assert_eq!(app.todos, todos);
+    }
+
+    #[test]
+    fn test_summary_week_navigation_and_bounds() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap(); // Wed
+        let past_week_date = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap(); // Tue previous week
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Past task".to_string(),
+                created_date: past_week_date,
+                done: true,
+                ..Default::default()
+            },
+            Todo {
+                id: 2,
+                text: "Today task".to_string(),
+                created_date: today,
+                done: false,
+                ..Default::default()
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos.clone(), today);
+        // Switch to Summary
+        app.current_view = View::Summary;
+        assert_eq!(app.summary_date, today);
+        assert_eq!(app.summary_range, crate::config::SummaryRange::Week);
+
+        let week_start = crate::dates::week_start_of(today, app.config.week_start);
+        let week_days = crate::dates::week_days(week_start);
+
+        // j moves down within the week
+        app.handle_key(key_press(KeyCode::Char('j')));
+        assert_eq!(app.summary_date, today.succ_opt().unwrap());
+
+        // Move to the end of the week (Sunday)
+        for _ in 0..10 {
+            app.handle_key(key_press(KeyCode::Char('j')));
+        }
+        assert_eq!(app.summary_date, week_days[6]);
+
+        // Further j is clamped to Sunday
+        app.handle_key(key_press(KeyCode::Char('j')));
+        assert_eq!(app.summary_date, week_days[6]);
+
+        // k moves up
+        app.handle_key(key_press(KeyCode::Char('k')));
+        assert_eq!(app.summary_date, week_days[5]);
+
+        // Move to start of the week (Monday)
+        for _ in 0..10 {
+            app.handle_key(key_press(KeyCode::Char('k')));
+        }
+        assert_eq!(app.summary_date, week_days[0]);
+
+        // Further k is clamped to Monday
+        app.handle_key(key_press(KeyCode::Char('k')));
+        assert_eq!(app.summary_date, week_days[0]);
+
+        // g jumps back to today
+        app.handle_key(key_press(KeyCode::Char('g')));
+        assert_eq!(app.summary_date, today);
+
+        // [ moves to previous week period
+        app.handle_key(key_press(KeyCode::Char('[')));
+        let prev_week_start = crate::dates::week_start_of(past_week_date, app.config.week_start);
+        assert_eq!(
+            crate::dates::week_start_of(app.summary_date, app.config.week_start),
+            prev_week_start
+        );
+
+        // [ again at min bound is no-op
+        let before_date = app.summary_date;
+        app.handle_key(key_press(KeyCode::Char('[')));
+        assert_eq!(app.summary_date, before_date);
+
+        // ] moves to next week period
+        app.handle_key(key_press(KeyCode::Char(']')));
+        assert_eq!(
+            crate::dates::week_start_of(app.summary_date, app.config.week_start),
+            week_start
+        );
+
+        // ] again at max bound (today's week) is no-op
+        let at_max = app.summary_date;
+        app.handle_key(key_press(KeyCode::Char(']')));
+        assert_eq!(app.summary_date, at_max);
+
+        // PageUp and PageDown also move periods
+        app.handle_key(key_press(KeyCode::PageUp));
+        assert_eq!(
+            crate::dates::week_start_of(app.summary_date, app.config.week_start),
+            prev_week_start
+        );
+        app.handle_key(key_press(KeyCode::PageDown));
+        assert_eq!(
+            crate::dates::week_start_of(app.summary_date, app.config.week_start),
+            week_start
+        );
+
+        // Toggle range with 'w'
+        app.handle_key(key_press(KeyCode::Char('w')));
+        assert_eq!(app.summary_range, crate::config::SummaryRange::Month);
+        app.handle_key(key_press(KeyCode::Char('w')));
+        assert_eq!(app.summary_range, crate::config::SummaryRange::Week);
+
+        // Read-only invariant
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(app.todos, todos);
+    }
+
+    #[test]
+    fn test_summary_enter_and_colon_jump() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap(); // Wed
+        let yesterday = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+        let tomorrow = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+        let todos = vec![
+            Todo {
+                id: 1,
+                text: "Yesterday task".to_string(),
+                created_date: yesterday,
+                ..Default::default()
+            },
+            Todo {
+                id: 2,
+                text: "Today task".to_string(),
+                created_date: today,
+                ..Default::default()
+            },
+            Todo {
+                id: 3,
+                text: "Tomorrow task".to_string(),
+                created_date: tomorrow,
+                ..Default::default()
+            },
+        ];
+
+        let mut app = App::new_for_test_with_date(todos.clone(), today);
+        app.current_view = View::Summary;
+
+        // 1. Enter on today opens Today view
+        app.summary_date = today;
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Today);
+
+        // 2. Enter on yesterday opens History view
+        app.current_view = View::Summary;
+        app.summary_date = yesterday;
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::History);
+        assert_eq!(app.selected_history_date, Some(yesterday));
+
+        // 3. Enter on tomorrow opens Upcoming view
+        app.current_view = View::Summary;
+        app.summary_date = tomorrow;
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Upcoming);
+        assert_eq!(app.selected_upcoming_date, Some(tomorrow));
+
+        // 4. In Summary, ':' updates summary_date without switching view
+        app.current_view = View::Summary;
+        app.handle_key(key_press(KeyCode::Char(':')));
+        assert_eq!(app.input_mode, InputMode::JumpToDate);
+        for c in "yesterday".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Summary);
+        assert_eq!(app.summary_date, yesterday);
+
+        // 5. In Summary, when show_history = false, jumping to past shows message
+        app.config.ui.show_history = false;
+        app.handle_key(key_press(KeyCode::Char(':')));
+        for c in "yesterday".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+        assert_eq!(app.current_view, View::Summary);
+        assert_eq!(app.transient_message.as_deref(), Some("History is hidden"));
+
+        // Read-only invariant
+        assert!(app.undo_stack.is_empty());
+        assert_eq!(app.todos, todos);
+    }
+
+    #[test]
+    fn test_summary_add_task_and_no_op_actions() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 28).unwrap();
+        let todos = vec![Todo {
+            id: 1,
+            text: "Task 1".to_string(),
+            created_date: today,
+            ..Default::default()
+        }];
+
+        let mut app = App::new_for_test_with_date(todos.clone(), today);
+        app.current_view = View::Summary;
+
+        // Task-changing keys are no-ops
+        let initial_todos = app.todos.clone();
+        app.handle_key(key_press(KeyCode::Char(' '))); // toggle
+        assert_eq!(app.todos, initial_todos);
+        app.handle_key(key_press(KeyCode::Char('d'))); // delete
+        assert_eq!(app.todos, initial_todos);
+        app.handle_key(key_press(KeyCode::Char('p'))); // priority
+        assert_eq!(app.todos, initial_todos);
+        app.handle_key(key_press(KeyCode::Char('t'))); // reschedule
+        assert_eq!(app.todos, initial_todos);
+        app.handle_key(key_press(KeyCode::Char('v'))); // mark
+        assert_eq!(app.todos, initial_todos);
+        app.handle_key(key_press(KeyCode::Char('s'))); // sort
+        assert_eq!(app.todos, initial_todos);
+        app.handle_key(key_press(KeyCode::Char('f'))); // filter
+        assert_eq!(app.input_mode, InputMode::Normal);
+
+        // 'a' in Summary adds to Today with transient message "Added to Today"
+        app.handle_key(key_press(KeyCode::Char('a')));
+        assert_eq!(app.input_mode, InputMode::Adding);
+        assert_eq!(app.current_view, View::Summary);
+
+        for c in "Summary added task".chars() {
+            app.handle_key(key_press(KeyCode::Char(c)));
+        }
+        app.handle_key(key_press(KeyCode::Enter));
+
+        assert_eq!(app.current_view, View::Summary);
+        assert_eq!(app.transient_message.as_deref(), Some("Added to Today"));
+        assert_eq!(app.todos.len(), 2);
+        assert_eq!(app.todos[1].text, "Summary added task");
+        assert_eq!(app.todos[1].created_date, today);
     }
 }
