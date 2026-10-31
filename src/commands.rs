@@ -183,18 +183,20 @@ pub fn resolve_target_task_ids(
     resolve_target_task_ids_str(todos, date, &str_indices, match_query)
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn handle_add_with_reader<R: BufRead>(
     text: Vec<String>,
     date_str: Option<String>,
+    parent_str: Option<String>,
     quiet: bool,
     data_path: &Path,
     today: NaiveDate,
     out: &mut dyn Write,
     reader: R,
 ) -> Result<(), CmdError> {
-    let date = match date_str {
-        Some(s) => parse_date(&s, today)?,
-        None => today,
+    let cli_date = match date_str {
+        Some(s) => Some(parse_date(&s, today)?),
+        None => None,
     };
 
     let tasks_to_add: Vec<String> = if text.len() == 1 && text[0] == "-" {
@@ -224,60 +226,131 @@ pub fn handle_add_with_reader<R: BufRead>(
     for raw in &tasks_to_add {
         let parsed = crate::parser::parse_quick_add(raw, today)
             .map_err(|e| CmdError::Usage(e.to_string()))?;
-        let task_date = parsed.date.unwrap_or(date);
+
+        if parent_str.is_some() {
+            if parsed.date.is_some() || parsed.recurrence.is_some() {
+                return Err(CmdError::Usage(
+                    "Subtasks inherit parent date; date/recurrence tokens not allowed".to_string(),
+                ));
+            }
+        } else if let Some(cli_d) = cli_date {
+            if let Some(token_d) = parsed.date {
+                if token_d != cli_d {
+                    return Err(CmdError::Usage(format!(
+                        "conflicting dates: --date specifies '{cli_d}' but task text specifies '{token_d}'"
+                    )));
+                }
+            }
+        }
+
+        let task_date = parsed.date.or(cli_date).unwrap_or(today);
         parsed_tasks.push((parsed, task_date));
     }
 
     crate::storage::try_load_modify_save(data_path, |data| {
-        for (parsed, target_date) in &parsed_tasks {
-            let id = data.next_id;
-            data.next_id += 1;
-            let (recurring_id, actual_date) = if let Some(rule) = parsed.recurrence {
-                let tpl_id = data.next_id;
-                data.next_id += 1;
-                let anchor = match rule {
-                    crate::model::RecurrenceRule::Weekdays => {
-                        let wd = target_date.weekday();
-                        if wd == chrono::Weekday::Sat {
-                            target_date
-                                .succ_opt()
-                                .and_then(|d| d.succ_opt())
-                                .unwrap_or(*target_date)
-                        } else if wd == chrono::Weekday::Sun {
-                            target_date.succ_opt().unwrap_or(*target_date)
-                        } else {
-                            *target_date
-                        }
-                    }
-                    _ => *target_date,
-                };
-                data.recurring.push(crate::model::Recurring {
-                    id: tpl_id,
-                    text: parsed.text.clone(),
-                    tags: parsed.tags.clone(),
-                    priority: parsed.priority,
-                    rule,
-                    anchor,
-                    last_materialized: Some(anchor),
-                });
-                (Some(tpl_id), anchor)
-            } else {
-                (None, *target_date)
-            };
+        crate::store::materialize_recurring(
+            &mut data.todos,
+            &mut data.recurring,
+            &mut data.next_id,
+            today,
+        );
 
-            data.todos.push(Todo {
-                id,
-                text: parsed.text.clone(),
-                created_date: actual_date,
-                done: false,
-                done_at: None,
-                priority: parsed.priority,
-                tags: parsed.tags.clone(),
-                note: None,
-                parent: None,
-                recurring_id,
-            });
+        if let Some(ref p_str) = parent_str {
+            let target_date = cli_date.unwrap_or(today);
+            let parent_ids = resolve_target_task_ids_str(
+                &data.todos,
+                target_date,
+                std::slice::from_ref(p_str),
+                None,
+            )?;
+            let parent_id = parent_ids[0];
+            let parent_task = data
+                .todos
+                .iter()
+                .find(|t| t.id == parent_id)
+                .ok_or_else(|| CmdError::NotFound(format!("parent task {p_str} not found")))?;
+            if parent_task.parent.is_some() {
+                return Err(CmdError::Usage(
+                    "subtasks cannot be nested under another subtask (one level only)".to_string(),
+                ));
+            }
+            let parent_date = parent_task.created_date;
+
+            for (parsed, _) in &parsed_tasks {
+                let id = data.next_id;
+                data.next_id += 1;
+                let subtask = Todo {
+                    id,
+                    text: parsed.text.clone(),
+                    created_date: parent_date,
+                    done: false,
+                    done_at: None,
+                    priority: parsed.priority,
+                    tags: parsed.tags.clone(),
+                    note: None,
+                    parent: Some(parent_id),
+                    recurring_id: None,
+                };
+                let insert_pos = data
+                    .todos
+                    .iter()
+                    .rposition(|t| t.id == parent_id || t.parent == Some(parent_id))
+                    .map(|p| p + 1)
+                    .unwrap_or(data.todos.len());
+                data.todos.insert(insert_pos, subtask);
+            }
+        } else {
+            for (parsed, target_date) in &parsed_tasks {
+                let id = data.next_id;
+                data.next_id += 1;
+                let (recurring_id, actual_date) = if let Some(rule) = parsed.recurrence {
+                    let tpl_id = data.next_id;
+                    data.next_id += 1;
+                    let anchor = match rule {
+                        crate::model::RecurrenceRule::Weekdays => {
+                            let wd = target_date.weekday();
+                            if wd == chrono::Weekday::Sat {
+                                target_date
+                                    .succ_opt()
+                                    .and_then(|d| d.succ_opt())
+                                    .unwrap_or(*target_date)
+                            } else if wd == chrono::Weekday::Sun {
+                                target_date.succ_opt().unwrap_or(*target_date)
+                            } else {
+                                *target_date
+                            }
+                        }
+                        _ => *target_date,
+                    };
+                    data.recurring.push(crate::model::Recurring {
+                        id: tpl_id,
+                        text: parsed.text.clone(),
+                        tags: parsed.tags.clone(),
+                        priority: parsed.priority,
+                        rule,
+                        anchor,
+                        last_materialized: Some(anchor),
+                    });
+                    (Some(tpl_id), anchor)
+                } else {
+                    (None, *target_date)
+                };
+
+                data.todos.push(Todo {
+                    id,
+                    text: parsed.text.clone(),
+                    created_date: actual_date,
+                    done: false,
+                    done_at: None,
+                    priority: parsed.priority,
+                    tags: parsed.tags.clone(),
+                    note: None,
+                    parent: None,
+                    recurring_id,
+                });
+            }
         }
+
         crate::store::materialize_recurring(
             &mut data.todos,
             &mut data.recurring,
@@ -301,6 +374,7 @@ pub fn handle_add_with_reader<R: BufRead>(
 pub fn handle_add(
     text: Vec<String>,
     date_str: Option<String>,
+    parent: Option<String>,
     quiet: bool,
     data_path: &Path,
     today: NaiveDate,
@@ -309,6 +383,7 @@ pub fn handle_add(
     handle_add_with_reader(
         text,
         date_str,
+        parent,
         quiet,
         data_path,
         today,
@@ -451,27 +526,65 @@ pub fn handle_list(
     all: bool,
     pending: bool,
     limit: Option<usize>,
+    tag: Option<String>,
+    min_priority: Option<u8>,
+    upcoming: bool,
     data_path: &Path,
     today: NaiveDate,
     config: &crate::config::Config,
     out: &mut dyn Write,
 ) -> Result<(), CmdError> {
-    if data_path.exists() {
-        let _ = crate::storage::try_load_modify_save(data_path, |data| {
-            crate::store::materialize_recurring(
-                &mut data.todos,
-                &mut data.recurring,
-                &mut data.next_id,
-                today,
-            );
-            Ok::<(), std::convert::Infallible>(())
-        });
+    if upcoming && all {
+        return Err(CmdError::Usage(
+            "cannot specify both --upcoming and --all".to_string(),
+        ));
+    }
+    if upcoming && date_str.is_some() {
+        return Err(CmdError::Usage(
+            "cannot specify both --upcoming and --date".to_string(),
+        ));
+    }
+    if all && date_str.is_some() {
+        return Err(CmdError::Usage(
+            "cannot specify both --all and --date".to_string(),
+        ));
+    }
+    if let Some(p) = min_priority {
+        if p != 1 && p != 2 {
+            return Err(CmdError::Usage("--min-priority must be 1 or 2".to_string()));
+        }
     }
 
-    let load_res =
+    let mut load_res =
         crate::storage::load_todos(data_path).map_err(|e| CmdError::Runtime(e.to_string()))?;
+    crate::store::materialize_recurring(
+        &mut load_res.todos,
+        &mut load_res.recurring,
+        &mut load_res.next_id,
+        today,
+    );
     let todos = load_res.todos;
 
+    let clean_tag = tag.map(|t| t.strip_prefix('#').unwrap_or(&t).to_lowercase());
+
+    let task_matches = |t: &Todo| -> bool {
+        if pending && t.done {
+            return false;
+        }
+        if let Some(min_p) = min_priority {
+            if t.priority < min_p {
+                return false;
+            }
+        }
+        if let Some(ref req_tag) = clean_tag {
+            if !t.tags.iter().any(|tg| tg.to_lowercase() == *req_tag) {
+                return false;
+            }
+        }
+        true
+    };
+
+    let is_multi_day = all || upcoming;
     let days_and_tasks: Vec<(NaiveDate, Vec<(String, usize, &Todo)>)> = if all {
         let mut dates: std::collections::BTreeSet<NaiveDate> =
             todos.iter().map(|t| t.created_date).collect();
@@ -486,7 +599,43 @@ pub fn handle_list(
             let hierarchical = build_hierarchical_tasks(&day_tasks);
             let mut matching = Vec::new();
             for (idx_str, depth, task) in hierarchical {
-                if pending && task.done {
+                if !task_matches(task) {
+                    continue;
+                }
+                if let Some(lim) = limit {
+                    if total_count >= lim {
+                        break;
+                    }
+                }
+                matching.push((idx_str, depth, task));
+                total_count += 1;
+            }
+            if !matching.is_empty() {
+                result.push((d, matching));
+            }
+            if let Some(lim) = limit {
+                if total_count >= lim {
+                    break;
+                }
+            }
+        }
+        result
+    } else if upcoming {
+        let dates: std::collections::BTreeSet<NaiveDate> = todos
+            .iter()
+            .map(|t| t.created_date)
+            .filter(|&d| d > today)
+            .collect();
+        let dates_list: Vec<NaiveDate> = dates.into_iter().collect();
+
+        let mut result = Vec::new();
+        let mut total_count = 0;
+        for d in dates_list {
+            let day_tasks = crate::store::tasks_for_date(&todos, d);
+            let hierarchical = build_hierarchical_tasks(&day_tasks);
+            let mut matching = Vec::new();
+            for (idx_str, depth, task) in hierarchical {
+                if !task_matches(task) {
                     continue;
                 }
                 if let Some(lim) = limit {
@@ -516,7 +665,7 @@ pub fn handle_list(
         let hierarchical = build_hierarchical_tasks(&day_tasks);
         let mut matching = Vec::new();
         for (idx_str, depth, task) in hierarchical {
-            if pending && task.done {
+            if !task_matches(task) {
                 continue;
             }
             if let Some(lim) = limit {
@@ -529,7 +678,7 @@ pub fn handle_list(
         vec![(date, matching)]
     };
 
-    crate::output::write_list_human(&days_and_tasks, all, config, out)
+    crate::output::write_list_human(&days_and_tasks, &todos, is_multi_day, config, out)
         .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
 
     Ok(())
@@ -541,20 +690,14 @@ pub fn handle_today(
     config: &crate::config::Config,
     out: &mut dyn Write,
 ) -> Result<(), CmdError> {
-    if data_path.exists() {
-        let _ = crate::storage::try_load_modify_save(data_path, |data| {
-            crate::store::materialize_recurring(
-                &mut data.todos,
-                &mut data.recurring,
-                &mut data.next_id,
-                today,
-            );
-            Ok::<(), std::convert::Infallible>(())
-        });
-    }
-
-    let load_res =
+    let mut load_res =
         crate::storage::load_todos(data_path).map_err(|e| CmdError::Runtime(e.to_string()))?;
+    crate::store::materialize_recurring(
+        &mut load_res.todos,
+        &mut load_res.recurring,
+        &mut load_res.next_id,
+        today,
+    );
     let todos = load_res.todos;
     let day_tasks = crate::store::tasks_for_date(&todos, today);
     // Phase 5: Header progress and summary count top-level tasks only
@@ -565,7 +708,7 @@ pub fn handle_today(
         .count();
     let indexed_tasks = build_hierarchical_tasks(&day_tasks);
 
-    crate::output::write_today_human(today, done, total, &indexed_tasks, config, out)
+    crate::output::write_today_human(today, done, total, &indexed_tasks, &todos, config, out)
         .map_err(|e| CmdError::Runtime(format!("write error: {e}")))?;
 
     Ok(())
@@ -580,7 +723,12 @@ pub fn run(
     out: &mut dyn Write,
 ) -> Result<(), CmdError> {
     match cmd {
-        Commands::Add { text, date, quiet } => handle_add(text, date, quiet, data_path, today, out),
+        Commands::Add {
+            text,
+            date,
+            parent,
+            quiet,
+        } => handle_add(text, date, parent, quiet, data_path, today, out),
         Commands::Done {
             indices,
             date,
@@ -601,7 +749,22 @@ pub fn run(
             all,
             pending,
             limit,
-        } => handle_list(date, all, pending, limit, data_path, today, config, out),
+            tag,
+            min_priority,
+            upcoming,
+        } => handle_list(
+            date,
+            all,
+            pending,
+            limit,
+            tag,
+            min_priority,
+            upcoming,
+            data_path,
+            today,
+            config,
+            out,
+        ),
         Commands::Today => handle_today(data_path, today, config, out),
     }
 }
@@ -726,6 +889,7 @@ mod tests {
         handle_add_with_reader(
             vec!["Buy".to_string(), "milk".to_string()],
             None,
+            None,
             false,
             path,
             today,
@@ -740,6 +904,7 @@ mod tests {
         let stdin_input = b"Task two\nTask three\n";
         handle_add_with_reader(
             vec!["-".to_string()],
+            None,
             None,
             false,
             path,
@@ -784,6 +949,7 @@ mod tests {
         handle_add_with_reader(
             vec!["Task 1".to_string()],
             None,
+            None,
             true,
             path,
             today,
@@ -819,6 +985,7 @@ mod tests {
         handle_add_with_reader(
             vec!["Task 1".to_string()],
             None,
+            None,
             true,
             path,
             today,
@@ -828,6 +995,7 @@ mod tests {
         .unwrap();
         handle_add_with_reader(
             vec!["Task 2".to_string()],
+            None,
             None,
             true,
             path,
@@ -849,21 +1017,30 @@ mod tests {
         out.clear();
 
         // list gives human-readable tasks
-        handle_list(None, false, false, None, path, today, &config, &mut out).unwrap();
+        handle_list(
+            None, false, false, None, None, None, false, path, today, &config, &mut out,
+        )
+        .unwrap();
         let list_out = String::from_utf8_lossy(&out);
         assert!(list_out.contains("Task 1"));
         assert!(list_out.contains("Task 2"));
         out.clear();
 
         // list pending gives only unfinished
-        handle_list(None, false, true, None, path, today, &config, &mut out).unwrap();
+        handle_list(
+            None, false, true, None, None, None, false, path, today, &config, &mut out,
+        )
+        .unwrap();
         let pending_out = String::from_utf8_lossy(&out);
         assert!(!pending_out.contains("Task 1"));
         assert!(pending_out.contains("Task 2"));
         out.clear();
 
         // list all prefixes ISO date
-        handle_list(None, true, false, None, path, today, &config, &mut out).unwrap();
+        handle_list(
+            None, true, false, None, None, None, false, path, today, &config, &mut out,
+        )
+        .unwrap();
         let all_out = String::from_utf8_lossy(&out);
         assert!(all_out.contains("2026-10-29"));
         assert!(all_out.contains("Task 1"));
@@ -880,6 +1057,7 @@ mod tests {
 
         handle_add_with_reader(
             vec!["Buy fresh bread @tomorrow ! #groceries".to_string()],
+            None,
             None,
             false,
             path,

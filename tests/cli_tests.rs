@@ -88,6 +88,7 @@ fn test_handler_add_list_done_rm_flow() {
     handle_add(
         vec!["Buy fresh milk".to_string()],
         None,
+        None,
         false,
         &data_file,
         today,
@@ -101,6 +102,7 @@ fn test_handler_add_list_done_rm_flow() {
     handle_add(
         vec!["Review PR".to_string()],
         None,
+        None,
         true,
         &data_file,
         today,
@@ -111,7 +113,7 @@ fn test_handler_add_list_done_rm_flow() {
 
     // 3. List shows both tasks
     handle_list(
-        None, false, false, None, &data_file, today, &config, &mut out,
+        None, false, false, None, None, None, false, &data_file, today, &config, &mut out,
     )
     .unwrap();
     let list_str = String::from_utf8_lossy(&out);
@@ -124,7 +126,7 @@ fn test_handler_add_list_done_rm_flow() {
 
     // 5. List shows task 1 is done
     handle_list(
-        None, false, false, None, &data_file, today, &config, &mut out,
+        None, false, false, None, None, None, false, &data_file, today, &config, &mut out,
     )
     .unwrap();
     let list_str = String::from_utf8_lossy(&out);
@@ -149,7 +151,7 @@ fn test_handler_add_list_done_rm_flow() {
 
     // 8. List shows only task 2 remains
     handle_list(
-        None, false, false, None, &data_file, today, &config, &mut out,
+        None, false, false, None, None, None, false, &data_file, today, &config, &mut out,
     )
     .unwrap();
     let list_str = String::from_utf8_lossy(&out);
@@ -167,7 +169,7 @@ fn test_handler_corrupted_json_exit_code_1() {
     let mut out = Vec::new();
 
     let res = handle_list(
-        None, false, false, None, &bad_file, today, &config, &mut out,
+        None, false, false, None, None, None, false, &bad_file, today, &config, &mut out,
     );
     match res {
         Err(err) => {
@@ -229,6 +231,7 @@ fn test_handler_ambiguous_match_lists_candidates_exit_code_3() {
     handle_add(
         vec!["Feed cat".to_string()],
         None,
+        None,
         true,
         &data_file,
         today,
@@ -237,6 +240,7 @@ fn test_handler_ambiguous_match_lists_candidates_exit_code_3() {
     .unwrap();
     handle_add(
         vec!["Buy cat food".to_string()],
+        None,
         None,
         true,
         &data_file,
@@ -269,6 +273,9 @@ fn test_handler_list_nonexistent_file_returns_no_tasks_and_exit_0() {
         false,
         false,
         None,
+        None,
+        None,
+        false,
         &missing_file,
         today,
         &config,
@@ -305,6 +312,7 @@ fn test_handler_piped_output_contains_no_ansi_escapes() {
     handle_add(
         vec!["Test task".to_string()],
         None,
+        None,
         true,
         &data_file,
         today,
@@ -313,7 +321,7 @@ fn test_handler_piped_output_contains_no_ansi_escapes() {
     .unwrap();
 
     handle_list(
-        None, false, false, None, &data_file, today, &config, &mut out,
+        None, false, false, None, None, None, false, &data_file, today, &config, &mut out,
     )
     .unwrap();
     std::env::remove_var("NO_COLOR");
@@ -340,7 +348,7 @@ fn test_handler_legacy_v0_todos_json_loads_unchanged() {
 
     let mut out = Vec::new();
     handle_list(
-        None, true, false, None, &data_file, today, &config, &mut out,
+        None, true, false, None, None, None, false, &data_file, today, &config, &mut out,
     )
     .unwrap();
     let stdout_str = String::from_utf8_lossy(&out);
@@ -377,6 +385,7 @@ fn test_handler_broken_pipe_quiet_exit() {
         handle_add(
             vec![format!("Task {i}")],
             None,
+            None,
             true,
             &data_file,
             today,
@@ -391,6 +400,9 @@ fn test_handler_broken_pipe_quiet_exit() {
         false,
         false,
         None,
+        None,
+        None,
+        false,
         &data_file,
         today,
         &config,
@@ -412,6 +424,7 @@ fn test_handler_concurrency_100_parallel_adds() {
             handle_add_with_reader(
                 vec![format!("Thread 1 task {i}")],
                 None,
+                None,
                 true,
                 &file_path,
                 today,
@@ -428,6 +441,7 @@ fn test_handler_concurrency_100_parallel_adds() {
             handle_add_with_reader(
                 vec![format!("Thread 2 task {i}")],
                 None,
+                None,
                 true,
                 &file_path2,
                 today,
@@ -441,9 +455,12 @@ fn test_handler_concurrency_100_parallel_adds() {
     t1.join().unwrap();
     t2.join().unwrap();
 
-    // Verify 100 tasks exist and JSON is valid
+    // Verify 100 tasks exist, all IDs are unique, and next_id >= 101
     let loaded = slate::storage::load_todos(&data_file).unwrap();
     assert_eq!(loaded.todos.len(), 100);
+    let ids: std::collections::HashSet<u64> = loaded.todos.iter().map(|t| t.id).collect();
+    assert_eq!(ids.len(), 100, "all 100 task IDs must be unique");
+    assert!(loaded.next_id >= 101, "next_id must be at least 101");
 }
 
 #[test]
@@ -456,6 +473,7 @@ fn test_cli_add_quick_add_syntax_and_errors() {
     // 1. Success with tokens
     handle_add(
         vec!["Submit tax return @tomorrow !! #finance #taxes".to_string()],
+        None,
         None,
         false,
         &data_file,
@@ -480,6 +498,7 @@ fn test_cli_add_quick_add_syntax_and_errors() {
     let err_past = handle_add(
         vec!["Old task @2026-10-20".to_string()],
         None,
+        None,
         false,
         &data_file,
         today,
@@ -491,12 +510,288 @@ fn test_cli_add_quick_add_syntax_and_errors() {
     let err_empty = handle_add(
         vec!["@tomorrow !! #tag".to_string()],
         None,
+        None,
         false,
         &data_file,
         today,
         &mut out,
     );
     assert!(matches!(err_empty, Err(CmdError::Usage(_))));
+}
+
+#[test]
+fn test_cli_add_parent_subtask() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let mut out = Vec::new();
+
+    // 1. Add top-level parent task
+    handle_add(
+        vec!["Parent task".to_string()],
+        None,
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+
+    // 2. Add subtask via --parent 1
+    handle_add(
+        vec!["Subtask one ! #child".to_string()],
+        None,
+        Some("1".to_string()),
+        false,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+    assert_eq!(String::from_utf8_lossy(&out), "Added: Subtask one\n");
+    out.clear();
+
+    let loaded = slate::storage::load_todos(&data_file).unwrap().todos;
+    assert_eq!(loaded.len(), 2);
+    assert_eq!(loaded[0].text, "Parent task");
+    assert_eq!(loaded[1].text, "Subtask one");
+    assert_eq!(loaded[1].parent, Some(loaded[0].id));
+    assert_eq!(loaded[1].created_date, loaded[0].created_date);
+    assert_eq!(loaded[1].priority, 1);
+    assert_eq!(loaded[1].tags, vec!["child"]);
+
+    // 3. Subtask cannot have its own @date or @recurrence token
+    let res_date = handle_add(
+        vec!["Invalid subtask @tomorrow".to_string()],
+        None,
+        Some("1".to_string()),
+        true,
+        &data_file,
+        today,
+        &mut out,
+    );
+    assert!(matches!(res_date, Err(CmdError::Usage(_))));
+
+    let res_rec = handle_add(
+        vec!["Invalid subtask @daily".to_string()],
+        None,
+        Some("1".to_string()),
+        true,
+        &data_file,
+        today,
+        &mut out,
+    );
+    assert!(matches!(res_rec, Err(CmdError::Usage(_))));
+
+    // 4. Subtask cannot be nested under another subtask (one level only)
+    let res_nested = handle_add(
+        vec!["Deep child".to_string()],
+        None,
+        Some("1.1".to_string()),
+        true,
+        &data_file,
+        today,
+        &mut out,
+    );
+    assert!(matches!(res_nested, Err(CmdError::Usage(_))));
+
+    // 5. Parent not found
+    let res_not_found = handle_add(
+        vec!["Orphan".to_string()],
+        None,
+        Some("99".to_string()),
+        true,
+        &data_file,
+        today,
+        &mut out,
+    );
+    assert!(matches!(res_not_found, Err(CmdError::NotFound(_))));
+}
+
+#[test]
+fn test_cli_date_vs_token_date_conflict() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let mut out = Vec::new();
+
+    // --date conflict with @date token returns CmdError::Usage (exit code 2)
+    let res = handle_add(
+        vec!["Task @2026-11-05".to_string()],
+        Some("2026-11-01".to_string()),
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    );
+    match res {
+        Err(CmdError::Usage(msg)) => {
+            assert!(msg.contains("conflicting dates"));
+        }
+        other => panic!("expected conflicting date usage error, got {other:?}"),
+    }
+
+    // Matching dates succeed
+    let res_ok = handle_add(
+        vec!["Task @2026-11-01".to_string()],
+        Some("2026-11-01".to_string()),
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    );
+    assert!(res_ok.is_ok());
+}
+
+#[test]
+fn test_cli_list_filters_and_upcoming() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let config = Config::default();
+    let mut out = Vec::new();
+
+    // Add tasks
+    handle_add(
+        vec!["Work task ! #work".to_string()],
+        None,
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+    handle_add(
+        vec!["Home task !! #home".to_string()],
+        None,
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+    handle_add(
+        vec!["Future task @tomorrow #future".to_string()],
+        None,
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+
+    // 1. Filter by tag: #work
+    handle_list(
+        None,
+        false,
+        false,
+        None,
+        Some("work".to_string()),
+        None,
+        false,
+        &data_file,
+        today,
+        &config,
+        &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+    assert!(list_str.contains("Work task"));
+    assert!(!list_str.contains("Home task"));
+    out.clear();
+
+    // 2. Filter by tag with hash prefix: #home
+    handle_list(
+        None,
+        false,
+        false,
+        None,
+        Some("#home".to_string()),
+        None,
+        false,
+        &data_file,
+        today,
+        &config,
+        &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+    assert!(!list_str.contains("Work task"));
+    assert!(list_str.contains("Home task"));
+    out.clear();
+
+    // 3. Filter by min-priority 2 (!!)
+    handle_list(
+        None,
+        false,
+        false,
+        None,
+        None,
+        Some(2),
+        false,
+        &data_file,
+        today,
+        &config,
+        &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+    assert!(!list_str.contains("Work task")); // priority 1
+    assert!(list_str.contains("Home task")); // priority 2
+    out.clear();
+
+    // 4. Invalid min-priority 3
+    let res_inv = handle_list(
+        None,
+        false,
+        false,
+        None,
+        None,
+        Some(3),
+        false,
+        &data_file,
+        today,
+        &config,
+        &mut out,
+    );
+    assert!(matches!(res_inv, Err(CmdError::Usage(_))));
+
+    // 5. Upcoming view (shows future tasks)
+    handle_list(
+        None, false, false, None, None, None, true, &data_file, today, &config, &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+    assert!(list_str.contains("Future task"));
+    assert!(!list_str.contains("Work task"));
+    out.clear();
+
+    // 6. Conflicting upcoming flags
+    let res_up_all = handle_list(
+        None, true, false, None, None, None, true, &data_file, today, &config, &mut out,
+    );
+    assert!(matches!(res_up_all, Err(CmdError::Usage(_))));
+
+    let res_up_date = handle_list(
+        Some("today".to_string()),
+        false,
+        false,
+        None,
+        None,
+        None,
+        true,
+        &data_file,
+        today,
+        &config,
+        &mut out,
+    );
+    assert!(matches!(res_up_date, Err(CmdError::Usage(_))));
 }
 
 #[test]
@@ -511,6 +806,7 @@ fn test_cli_subtasks_listing_and_operations() {
     handle_add(
         vec!["Parent task".to_string()],
         None,
+        None,
         true,
         &data_file,
         today,
@@ -518,30 +814,30 @@ fn test_cli_subtasks_listing_and_operations() {
     )
     .unwrap();
 
-    // Add subtask directly to storage
-    slate::storage::try_load_modify_save(&data_file, |data| {
-        let id = data.next_id;
-        data.next_id += 1;
-        data.todos.push(slate::model::Todo {
-            id,
-            text: "Child task".to_string(),
-            created_date: today,
-            done: false,
-            parent: Some(1),
-            ..Default::default()
-        });
-        Ok::<(), CmdError>(())
-    })
+    // Add subtask via --parent
+    handle_add(
+        vec!["Child task".to_string()],
+        None,
+        Some("1".to_string()),
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
     .unwrap();
 
-    // 2. List shows "1" for parent and "1.1" indented for subtask
+    // 2. List shows "1" for parent with subtask progress and "1.1" indented for subtask
     handle_list(
-        None, false, false, None, &data_file, today, &config, &mut out,
+        None, false, false, None, None, None, false, &data_file, today, &config, &mut out,
     )
     .unwrap();
     let list_str = String::from_utf8_lossy(&out);
     assert!(
         list_str.contains("Parent task") && (list_str.contains("○") || list_str.contains("[ ]"))
+    );
+    assert!(
+        list_str.contains("0/1"),
+        "parent must display subtask progress 0/1"
     );
     assert!(list_str.contains("1.1") && list_str.contains("Child task"));
     out.clear();
@@ -574,6 +870,72 @@ fn test_cli_subtasks_listing_and_operations() {
 }
 
 #[test]
+fn test_cli_read_handlers_do_not_modify_file() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let monday = NaiveDate::from_ymd_opt(2026, 10, 26).unwrap();
+    let tuesday = NaiveDate::from_ymd_opt(2026, 10, 27).unwrap();
+    let config = Config::default();
+    let mut out = Vec::new();
+
+    // 1. Add recurring task on Monday
+    handle_add(
+        vec!["Daily standup @daily".to_string()],
+        None,
+        None,
+        true,
+        &data_file,
+        monday,
+        &mut out,
+    )
+    .unwrap();
+    out.clear();
+
+    let bytes_before = fs::read(&data_file).unwrap();
+
+    // 2. Listing on Tuesday shows materialized instance in output, but disk bytes are identical!
+    handle_list(
+        None, false, false, None, None, None, false, &data_file, tuesday, &config, &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+    assert!(list_str.contains("Daily standup"));
+    out.clear();
+
+    let bytes_after_list = fs::read(&data_file).unwrap();
+    assert_eq!(
+        bytes_before, bytes_after_list,
+        "handle_list must never modify data file on disk"
+    );
+
+    // 3. Today command on Tuesday shows task in output, but disk bytes are identical!
+    handle_today(&data_file, tuesday, &config, &mut out).unwrap();
+    let today_str = String::from_utf8_lossy(&out);
+    assert!(today_str.contains("Daily standup"));
+    out.clear();
+
+    let bytes_after_today = fs::read(&data_file).unwrap();
+    assert_eq!(
+        bytes_before, bytes_after_today,
+        "handle_today must never modify data file on disk"
+    );
+
+    // 4. When a write action occurs on Tuesday (e.g. handle_add), file is updated on disk
+    handle_add(
+        vec!["Tuesday task".to_string()],
+        None,
+        None,
+        true,
+        &data_file,
+        tuesday,
+        &mut out,
+    )
+    .unwrap();
+    let loaded_after_write = slate::storage::load_todos(&data_file).unwrap();
+    assert_eq!(loaded_after_write.todos.len(), 3); // Monday instance, materialized Tuesday instance, and Tuesday task
+}
+
+#[test]
 fn test_cli_recurring_tasks_addition_and_materialization() {
     let dir = tempdir().unwrap();
     let data_file = dir.path().join("todos.json");
@@ -585,6 +947,7 @@ fn test_cli_recurring_tasks_addition_and_materialization() {
     // 1. Add daily task via quick-add CLI
     handle_add(
         vec!["Daily standup @daily".to_string()],
+        None,
         None,
         true,
         &data_file,
@@ -603,17 +966,101 @@ fn test_cli_recurring_tasks_addition_and_materialization() {
         slate::model::RecurrenceRule::Daily
     );
 
-    // 2. Listing on Tuesday materializes Tuesday instance
+    // 2. Listing on Tuesday materializes Tuesday instance in memory
     handle_list(
-        None, false, false, None, &data_file, tuesday, &config, &mut out,
+        None, false, false, None, None, None, false, &data_file, tuesday, &config, &mut out,
     )
     .unwrap();
     let list_str = String::from_utf8_lossy(&out);
     assert!(list_str.contains("Daily standup"));
     out.clear();
 
+    // Read handlers do not modify disk
     let loaded_tue = slate::storage::load_todos(&data_file).unwrap();
-    assert_eq!(loaded_tue.todos.len(), 2);
-    assert_eq!(loaded_tue.todos[0].created_date, monday);
-    assert_eq!(loaded_tue.todos[1].created_date, tuesday);
+    assert_eq!(loaded_tue.todos.len(), 1);
+
+    // Write handler materializes on disk
+    handle_add(
+        vec!["New Tuesday task".to_string()],
+        None,
+        None,
+        true,
+        &data_file,
+        tuesday,
+        &mut out,
+    )
+    .unwrap();
+    let loaded_tue_after = slate::storage::load_todos(&data_file).unwrap();
+    assert_eq!(loaded_tue_after.todos.len(), 3);
+}
+
+#[test]
+fn test_cli_human_output_formatting() {
+    let dir = tempdir().unwrap();
+    let data_file = dir.path().join("todos.json");
+    let today = NaiveDate::from_ymd_opt(2026, 10, 29).unwrap();
+    let config = Config::default();
+    let mut out = Vec::new();
+
+    // 1. Add parent task with repeat, priority, tag
+    handle_add(
+        vec!["Parent task @daily !! #work".to_string()],
+        None,
+        None,
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+
+    // Add note to parent task
+    slate::storage::try_load_modify_save(&data_file, |data| {
+        data.todos[0].note = Some("Check slides".to_string());
+        Ok::<(), CmdError>(())
+    })
+    .unwrap();
+
+    // 2. Add subtask with priority and tag
+    handle_add(
+        vec!["Child step ! #sub".to_string()],
+        None,
+        Some("1".to_string()),
+        true,
+        &data_file,
+        today,
+        &mut out,
+    )
+    .unwrap();
+
+    // 3. Run handle_list and verify output formatting
+    handle_list(
+        None, false, false, None, None, None, false, &data_file, today, &config, &mut out,
+    )
+    .unwrap();
+    let list_str = String::from_utf8_lossy(&out);
+
+    // Verify parent row contains:
+    // - Checkbox
+    // - Repeat glyph (~ or ↻)
+    // - Priority marker (!!)
+    // - Text
+    // - Subtask progress (0/1)
+    // - Tag (#work)
+    // - Note glyph (= or ≡)
+    assert!(list_str.contains("Parent task"));
+    assert!(list_str.contains("!!"));
+    assert!(list_str.contains("#work"));
+    assert!(list_str.contains("0/1"));
+    assert!(list_str.contains("~") || list_str.contains("↻"));
+    assert!(list_str.contains("=") || list_str.contains("≡"));
+
+    // Verify child row contains:
+    // - 1.1 index
+    // - Priority marker (!)
+    // - Tag (#sub)
+    assert!(list_str.contains("1.1"));
+    assert!(list_str.contains("Child step"));
+    assert!(list_str.contains("!"));
+    assert!(list_str.contains("#sub"));
 }

@@ -26,7 +26,7 @@ pub struct Cli {
 pub enum Commands {
     #[command(
         about = "Add one or more tasks",
-        after_help = "Examples:\n  slate add Buy milk\n  slate add \"Plan architecture\" \"Review PR\"\n  cat tasks.txt | slate add -\n  slate add --date tomorrow \"Call dentist\"\n  slate add -q \"Silent task\""
+        after_help = "Examples:\n  slate add Buy milk\n  slate add \"Prepare slides @fri #work !!\"\n  slate add --parent 1 \"First step\"\n  cat tasks.txt | slate add -\n  slate add --date tomorrow \"Call dentist\"\n  slate add -q \"Silent task\""
     )]
     Add {
         #[arg(
@@ -43,6 +43,9 @@ pub enum Commands {
             help = "Target date (today, yesterday, tomorrow, or YYYY-MM-DD)"
         )]
         date: Option<String>,
+
+        #[arg(long, value_name = "N", help = "Parent task index to add as a subtask")]
+        parent: Option<String>,
 
         #[arg(short = 'q', long, help = "Do not print confirmation")]
         quiet: bool,
@@ -119,7 +122,7 @@ pub enum Commands {
 
     #[command(
         about = "List tasks",
-        after_help = "Examples:\n  slate list\n  slate list --date tomorrow\n  slate list --all --pending\n  slate list --limit 5"
+        after_help = "Examples:\n  slate list\n  slate list --date tomorrow\n  slate list --all --pending\n  slate list --limit 5\n  slate list --tag work\n  slate list --min-priority 1\n  slate list --upcoming"
     )]
     List {
         #[arg(
@@ -137,6 +140,23 @@ pub enum Commands {
 
         #[arg(long, value_name = "N", help = "Limit number of tasks displayed")]
         limit: Option<usize>,
+
+        #[arg(
+            long,
+            value_name = "TAG",
+            help = "Filter tasks by tag (case-insensitive)"
+        )]
+        tag: Option<String>,
+
+        #[arg(
+            long = "min-priority",
+            value_name = "1|2",
+            help = "Filter tasks by minimum priority (1 for !, 2 for !!)"
+        )]
+        min_priority: Option<u8>,
+
+        #[arg(long, help = "Show tasks on future days")]
+        upcoming: bool,
     },
 
     #[command(

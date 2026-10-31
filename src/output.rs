@@ -119,7 +119,8 @@ pub fn should_use_unicode(config: &Config) -> bool {
 #[allow(clippy::type_complexity)]
 pub fn write_list_human(
     days_and_tasks: &[(NaiveDate, Vec<(String, usize, &Todo)>)],
-    is_all: bool,
+    all_todos: &[Todo],
+    is_multi_day: bool,
     config: &Config,
     out: &mut dyn Write,
 ) -> io::Result<()> {
@@ -133,9 +134,11 @@ pub fn write_list_human(
     };
 
     let sub_connector = if use_unicode { "└ " } else { "` " };
+    let repeat_glyph = if use_unicode { "↻ " } else { "~ " };
+    let note_glyph = if use_unicode { " ≡" } else { " =" };
 
     for (day_idx, (date, tasks)) in days_and_tasks.iter().enumerate() {
-        if is_all {
+        if is_multi_day {
             let date_str = date.format("%Y-%m-%d").to_string();
             if day_idx > 0 {
                 writeln!(out)?;
@@ -163,47 +166,189 @@ pub fn write_list_human(
                 String::new()
             };
 
+            let subtask_progress = if *depth == 0 {
+                let subs: Vec<&Todo> = all_todos
+                    .iter()
+                    .filter(|t| t.parent == Some(task.id))
+                    .collect();
+                if !subs.is_empty() {
+                    let done_subs = subs.iter().filter(|t| t.done).count();
+                    Some((done_subs, subs.len()))
+                } else {
+                    None
+                }
+            } else {
+                None
+            };
+
+            let rep_str = if task.recurring_id.is_some() {
+                repeat_glyph
+            } else {
+                ""
+            };
+
+            let prio_str = match task.priority {
+                2 => "!! ",
+                1 => "! ",
+                _ => "",
+            };
+
+            let prog_str = if let Some((d, t)) = subtask_progress {
+                format!(" {d}/{t}")
+            } else {
+                String::new()
+            };
+
+            let tags_str = if !task.tags.is_empty() {
+                format!(
+                    " {}",
+                    task.tags
+                        .iter()
+                        .map(|t| format!("#{t}"))
+                        .collect::<Vec<_>>()
+                        .join(" ")
+                )
+            } else {
+                String::new()
+            };
+
+            let note_str = if task.note.as_ref().is_some_and(|n| !n.trim().is_empty()) {
+                note_glyph
+            } else {
+                ""
+            };
+
             if *depth > 0 {
                 if use_color {
                     if task.done {
                         writeln!(
                             out,
-                            "    {:>4}  \x1b[2m{}\x1b[0m\x1b[32m{}\x1b[0m  \x1b[2m{}{}\x1b[0m",
-                            idx, sub_connector, symbol, task.text, time_suffix
+                            "    {:>4}  \x1b[2m{}\x1b[0m\x1b[32m{}\x1b[0m  \x1b[2m{}{}{}{}{}{}{}\x1b[0m",
+                            idx, sub_connector, symbol, rep_str, prio_str, task.text, prog_str, tags_str, note_str, time_suffix
                         )?;
                     } else {
+                        let rep_colored = if rep_str.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\x1b[2m{rep_str}\x1b[0m")
+                        };
+                        let prio_colored = match task.priority {
+                            2 => "\x1b[33m!! \x1b[0m",
+                            1 => "\x1b[36m! \x1b[0m",
+                            _ => "",
+                        };
+                        let prog_colored = if prog_str.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\x1b[2m{prog_str}\x1b[0m")
+                        };
+                        let tags_colored = if tags_str.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\x1b[2m{tags_str}\x1b[0m")
+                        };
+                        let note_colored = if note_str.is_empty() {
+                            String::new()
+                        } else {
+                            format!("\x1b[2m{note_str}\x1b[0m")
+                        };
                         writeln!(
                             out,
-                            "    {:>4}  \x1b[2m{}\x1b[0m\x1b[36m{}\x1b[0m  {}",
-                            idx, sub_connector, symbol, task.text
+                            "    {:>4}  \x1b[2m{}\x1b[0m\x1b[36m{}\x1b[0m  {}{}{}{}{}{}",
+                            idx,
+                            sub_connector,
+                            symbol,
+                            rep_colored,
+                            prio_colored,
+                            task.text,
+                            prog_colored,
+                            tags_colored,
+                            note_colored
                         )?;
                     }
                 } else {
                     writeln!(
                         out,
-                        "    {:>4}  {}{}  {}{}",
-                        idx, sub_connector, symbol, task.text, time_suffix
+                        "    {:>4}  {}{}  {}{}{}{}{}{}{}",
+                        idx,
+                        sub_connector,
+                        symbol,
+                        rep_str,
+                        prio_str,
+                        task.text,
+                        prog_str,
+                        tags_str,
+                        note_str,
+                        time_suffix
                     )?;
                 }
             } else if use_color {
                 if task.done {
                     writeln!(
                         out,
-                        "  {:>2}  \x1b[32m{}\x1b[0m  \x1b[2m{}{}\x1b[0m",
-                        idx, symbol, task.text, time_suffix
+                        "  {:>2}  \x1b[32m{}\x1b[0m  \x1b[2m{}{}{}{}{}{}{}\x1b[0m",
+                        idx,
+                        symbol,
+                        rep_str,
+                        prio_str,
+                        task.text,
+                        prog_str,
+                        tags_str,
+                        note_str,
+                        time_suffix
                     )?;
                 } else {
+                    let rep_colored = if rep_str.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\x1b[2m{rep_str}\x1b[0m")
+                    };
+                    let prio_colored = match task.priority {
+                        2 => "\x1b[33m!! \x1b[0m",
+                        1 => "\x1b[36m! \x1b[0m",
+                        _ => "",
+                    };
+                    let prog_colored = if prog_str.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\x1b[2m{prog_str}\x1b[0m")
+                    };
+                    let tags_colored = if tags_str.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\x1b[2m{tags_str}\x1b[0m")
+                    };
+                    let note_colored = if note_str.is_empty() {
+                        String::new()
+                    } else {
+                        format!("\x1b[2m{note_str}\x1b[0m")
+                    };
                     writeln!(
                         out,
-                        "  {:>2}  \x1b[36m{}\x1b[0m  {}",
-                        idx, symbol, task.text
+                        "  {:>2}  \x1b[36m{}\x1b[0m  {}{}{}{}{}{}",
+                        idx,
+                        symbol,
+                        rep_colored,
+                        prio_colored,
+                        task.text,
+                        prog_colored,
+                        tags_colored,
+                        note_colored
                     )?;
                 }
             } else {
                 writeln!(
                     out,
-                    "  {:>2}  {}  {}{}",
-                    idx, symbol, task.text, time_suffix
+                    "  {:>2}  {}  {}{}{}{}{}{}{}",
+                    idx,
+                    symbol,
+                    rep_str,
+                    prio_str,
+                    task.text,
+                    prog_str,
+                    tags_str,
+                    note_str,
+                    time_suffix
                 )?;
             }
         }
@@ -216,6 +361,7 @@ pub fn write_today_human(
     done: usize,
     total: usize,
     tasks: &[(String, usize, &Todo)],
+    all_todos: &[Todo],
     config: &Config,
     out: &mut dyn Write,
 ) -> io::Result<()> {
@@ -251,7 +397,7 @@ pub fn write_today_human(
     if !tasks.is_empty() {
         writeln!(out)?;
         let days_and_tasks = vec![(date, tasks.to_vec())];
-        write_list_human(&days_and_tasks, false, config, out)?;
+        write_list_human(&days_and_tasks, all_todos, false, config, out)?;
     }
 
     Ok(())
