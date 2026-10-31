@@ -8915,4 +8915,282 @@ mod tests {
         let content = std::fs::read_to_string(&path).unwrap();
         assert_eq!(content, corrupt_content);
     }
+
+    #[test]
+    fn test_failure_unreadable_corrupt_newer_duplicate_warns_once_and_recovers() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 2,
+            "todos": [{"id": 1, "text": "Valid task", "created_date": "2026-10-31", "done": false}]
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+        let now = std::time::Instant::now();
+
+        // 1. Corrupt JSON
+        std::fs::write(&path, "{ invalid json corrupt").unwrap();
+        app.check_for_external_changes(now);
+        let warned = app.check_for_external_changes(now);
+        assert!(warned);
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Data file changed but can't be read · keeping current view")
+        );
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].text, "Valid task");
+
+        // Polling again on same fingerprint does NOT warn again
+        let warned_again = app.check_for_external_changes(now);
+        assert!(!warned_again);
+
+        // 2. Newer version
+        std::fs::write(&path, r#"{"version": 999, "next_id": 1, "todos": []}"#).unwrap();
+        app.check_for_external_changes(now);
+        let warned_v = app.check_for_external_changes(now);
+        assert!(warned_v);
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Data file changed but can't be read · keeping current view")
+        );
+
+        // 3. Duplicate IDs
+        let dup_json = r#"{
+            "version": 2,
+            "next_id": 3,
+            "todos": [
+                {"id": 1, "text": "A", "created_date": "2026-10-31", "done": false},
+                {"id": 1, "text": "B", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, dup_json).unwrap();
+        app.check_for_external_changes(now);
+        let warned_dup = app.check_for_external_changes(now);
+        assert!(warned_dup);
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Data file changed but can't be read · keeping current view")
+        );
+
+        // 4. Fixed file afterwards reloads cleanly
+        let fixed_json = r#"{
+            "version": 2,
+            "next_id": 3,
+            "todos": [
+                {"id": 1, "text": "Valid task", "created_date": "2026-10-31", "done": false},
+                {"id": 2, "text": "Fixed task", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, fixed_json).unwrap();
+        app.check_for_external_changes(now);
+        let reloaded = app.check_for_external_changes(now);
+        assert!(reloaded);
+        assert_eq!(app.todos.len(), 2);
+        assert_eq!(app.todos[1].text, "Fixed task");
+    }
+
+    #[test]
+    fn test_failure_missing_file_warns_once_and_recreates_on_next_change() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 2,
+            "todos": [{"id": 1, "text": "Keep me", "created_date": "2026-10-31", "done": false}]
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+        let now = std::time::Instant::now();
+
+        // Delete file externally
+        std::fs::remove_file(&path).unwrap();
+
+        // Check warns once about missing file
+        let warned = app.check_for_external_changes(now);
+        assert!(warned);
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Data file missing · it will be recreated on next change")
+        );
+
+        // In-memory state is NOT cleared!
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].text, "Keep me");
+
+        // Polling again does not warn again
+        let warned_again = app.check_for_external_changes(now);
+        assert!(!warned_again);
+
+        // Next change recreates the file from memory
+        app.add_todo("Recreated task");
+        assert!(path.exists());
+
+        let disk_data = crate::storage::load_todos(&path).unwrap();
+        assert_eq!(disk_data.todos.len(), 2);
+        assert_eq!(disk_data.todos[0].text, "Keep me");
+        assert_eq!(disk_data.todos[1].text, "Recreated task");
+    }
+
+    #[test]
+    fn test_failure_restored_legacy_format_migrates_in_memory_and_creates_backup() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 2,
+            "todos": [{"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false}]
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+        let now = std::time::Instant::now();
+
+        // Restore legacy v0 format (bare array)
+        let v0_json = r#"[
+            {"id": 10, "text": "Legacy v0 task", "created_date": "2026-10-31", "done": false}
+        ]"#;
+        std::fs::write(&path, v0_json).unwrap();
+
+        app.check_for_external_changes(now);
+        let reloaded = app.check_for_external_changes(now);
+        assert!(reloaded);
+        assert_eq!(app.todos.len(), 1);
+        assert_eq!(app.todos[0].id, 1);
+        assert_eq!(app.todos[0].text, "Legacy v0 task");
+        assert!(app.is_legacy_format);
+        assert_eq!(app.original_version, 0);
+
+        // On next write, .v0.bak is created
+        app.add_todo("New task");
+        let v0_bak = dir.path().join("todos.v0.bak");
+        assert!(v0_bak.exists());
+        let bak_content = std::fs::read_to_string(&v0_bak).unwrap();
+        assert!(bak_content.contains("Legacy v0 task"));
+    }
+
+    #[test]
+    fn test_safety_two_instances_sharing_file_50_alternating_adds() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 1,
+            "todos": []
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app1 = App::try_with_config(path.clone(), today).unwrap();
+        let mut app2 = App::try_with_config(path.clone(), today).unwrap();
+
+        for i in 1..=50 {
+            if i % 2 == 1 {
+                app1.add_todo(&format!("Task {i}"));
+            } else {
+                app2.add_todo(&format!("Task {i}"));
+            }
+        }
+
+        // Final disk state has all 50 tasks
+        let disk_data = crate::storage::load_todos(&path).unwrap();
+        assert_eq!(disk_data.todos.len(), 50);
+        for i in 1..=50 {
+            assert!(
+                disk_data
+                    .todos
+                    .iter()
+                    .any(|t| t.text == format!("Task {i}")),
+                "Missing Task {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn test_safety_read_only_reload_leaves_file_byte_identical() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+    "version": 2,
+    "next_id": 2,
+    "todos": [
+        {
+            "id": 1,
+            "text": "Byte identical check",
+            "created_date": "2026-10-31",
+            "done": false
+        }
+    ]
+}"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+        let bytes_before = std::fs::read(&path).unwrap();
+
+        let now = std::time::Instant::now();
+        // Stat & observe unchanged
+        let reloaded = app.check_for_external_changes(now);
+        assert!(!reloaded);
+
+        let bytes_after = std::fs::read(&path).unwrap();
+        assert_eq!(bytes_before, bytes_after);
+    }
+
+    #[test]
+    fn test_safety_small_terminal_guard_remains_functional_on_reload() {
+        use tempfile::tempdir;
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("todos.json");
+
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let initial_json = r#"{
+            "version": 2,
+            "next_id": 2,
+            "todos": [{"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false}]
+        }"#;
+        std::fs::write(&path, initial_json).unwrap();
+
+        let mut app = App::try_with_config(path.clone(), today).unwrap();
+
+        // Terminal resized tiny
+        app.on_resize(20, 5);
+        assert!(app.is_too_small());
+
+        // External change
+        let external_json = r#"{
+            "version": 2,
+            "next_id": 3,
+            "todos": [
+                {"id": 1, "text": "Task 1", "created_date": "2026-10-31", "done": false},
+                {"id": 2, "text": "Task 2", "created_date": "2026-10-31", "done": false}
+            ]
+        }"#;
+        std::fs::write(&path, external_json).unwrap();
+
+        let now = std::time::Instant::now();
+        app.check_for_external_changes(now);
+        let reloaded = app.check_for_external_changes(now);
+        assert!(reloaded);
+
+        // Guard remains true, dimensions intact, selections clamped without panic
+        assert!(app.is_too_small());
+        assert_eq!(app.terminal_width, 20);
+        assert_eq!(app.terminal_height, 5);
+    }
 }

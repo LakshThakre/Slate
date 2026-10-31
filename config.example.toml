@@ -178,3 +178,12 @@ show_streak = true
 # Options: "all" (all top-level tasks must be done), "any" (at least one done)
 # Default: "all"
 streak_rule = "all"
+
+[storage]
+# Automatically detect external changes to the data file and reload without restarting
+# Default: true
+live_reload = true
+
+# Polling interval in milliseconds for detecting external changes (clamped to 250..=5000)
+# Default: 500
+reload_interval_ms = 500

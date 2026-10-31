@@ -406,6 +406,7 @@ impl Config {
             "tasks",
             "summary",
             "stats",
+            "storage",
         ];
 
         for k in table.keys() {
@@ -786,6 +787,47 @@ impl Config {
             }
         }
 
+        // 13. [storage]
+        if let Some(storage_val) = table.get("storage") {
+            if let Some(storage_table) = storage_val.as_table() {
+                let allowed_storage_keys = ["live_reload", "reload_interval_ms"];
+                for k in storage_table.keys() {
+                    if !allowed_storage_keys.contains(&k.as_str()) {
+                        warnings.push(format!("Unknown storage config key: '{k}'"));
+                    }
+                }
+
+                if let Some(lr_val) = storage_table.get("live_reload") {
+                    if let Some(b) = lr_val.as_bool() {
+                        config.storage.live_reload = b;
+                    } else {
+                        warnings
+                            .push("storage.live_reload must be a boolean · using true".to_string());
+                    }
+                }
+
+                if let Some(ri_val) = storage_table.get("reload_interval_ms") {
+                    if let Some(ri) = ri_val.as_integer() {
+                        if (250..=5000).contains(&ri) {
+                            config.storage.reload_interval_ms = ri as u64;
+                        } else {
+                            let clamped = ri.clamp(250, 5000) as u64;
+                            warnings.push(format!(
+                                "storage.reload_interval_ms {ri} out of range 250..=5000 · clamped to {clamped}"
+                            ));
+                            config.storage.reload_interval_ms = clamped;
+                        }
+                    } else {
+                        warnings.push(
+                            "storage.reload_interval_ms must be an integer · using 500".to_string(),
+                        );
+                    }
+                }
+            } else {
+                warnings.push("[storage] must be a table".to_string());
+            }
+        }
+
         (config, warnings)
     }
 
@@ -955,6 +997,8 @@ mod tests {
         assert_eq!(config.progress.width, 10);
         assert!(config.progress.show_count);
         assert_eq!(config.keys.mode, KeyMode::Default);
+        assert!(config.storage.live_reload);
+        assert_eq!(config.storage.reload_interval_ms, 500);
     }
 
     #[test]
@@ -985,5 +1029,42 @@ mod tests {
         assert_eq!(warnings_inv.len(), 2);
         assert_eq!(config_inv.summary.default_range, SummaryRange::Week);
         assert_eq!(config_inv.stats.streak_rule, crate::stats::StreakRule::All);
+    }
+
+    #[test]
+    fn test_config_storage_parsing() {
+        let toml_str = r#"
+            [storage]
+            live_reload = false
+            reload_interval_ms = 1000
+        "#;
+        let (config, warnings) = Config::from_str(toml_str);
+        assert!(warnings.is_empty());
+        assert!(!config.storage.live_reload);
+        assert_eq!(config.storage.reload_interval_ms, 1000);
+
+        // Clamping tests
+        let (config_low, warnings_low) = Config::from_str("storage.reload_interval_ms = 100");
+        assert_eq!(config_low.storage.reload_interval_ms, 250);
+        assert_eq!(warnings_low.len(), 1);
+        assert!(warnings_low[0].contains("clamped to 250"));
+
+        let (config_high, warnings_high) = Config::from_str("storage.reload_interval_ms = 10000");
+        assert_eq!(config_high.storage.reload_interval_ms, 5000);
+        assert_eq!(warnings_high.len(), 1);
+        assert!(warnings_high[0].contains("clamped to 5000"));
+
+        // Invalid types fall back
+        let (config_bad, warnings_bad) = Config::from_str(
+            r#"
+            [storage]
+            live_reload = "yes"
+            reload_interval_ms = "fast"
+            unknown_opt = true
+        "#,
+        );
+        assert_eq!(warnings_bad.len(), 3);
+        assert!(config_bad.storage.live_reload);
+        assert_eq!(config_bad.storage.reload_interval_ms, 500);
     }
 }
