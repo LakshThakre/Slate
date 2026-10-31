@@ -507,7 +507,7 @@ Slate is crash-proof: a missing file, invalid TOML syntax, unknown key, invalid 
 | `date_format` | string | `"%A, %d %B"` | strftime format for Today and selected date headers (e.g. `"Friday, 23 October"`). |
 | `short_date_format` | string | `"%a %d %b"` | strftime format for History dates column (e.g. `"Mon 19 Oct"`). |
 | `time_format` | string | `"24h"` | Completion timestamp format in History: `"24h"` (`"done 14:32"`) or `"12h"` (`"done 2:32 pm"`). |
-| `week_start` | string | `"monday"` | Week start day: `"monday"`, `"sunday"`, or `"saturday"`. *(Validated and stored; the week summary view is planned for a later phase so no current view consumes this setting yet).* |
+| `week_start` | string | `"monday"` | Week start day: `"monday"`, `"sunday"`, or `"saturday"`. |
 | `[ui]` | table | | UI display settings. |
 | `ui.symbols` | string | `"unicode"` | Symbol mode: `"unicode"` (`○`, `✓`, `█`) or `"ascii"` (`[ ]`, `[x]`, `#`). |
 | `ui.show_history` | boolean | `true` | When `false`, hides the History tab and view entirely. `Tab`/`Shift+Tab` do nothing, and History shortcuts are hidden. Historical data remains safely preserved on disk. |

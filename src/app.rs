@@ -66,6 +66,8 @@ pub struct App {
     pub symbols: crate::ui::Symbols,
     pub keymap: crate::keymap::Keymap,
     pub hit_areas: Vec<crate::ui::HitArea>,
+    pub data_revision: u64,
+    pub stats_cache: crate::stats::StatsCache,
 }
 
 impl Default for App {
@@ -192,6 +194,8 @@ impl App {
             symbols,
             keymap,
             hit_areas: Vec::new(),
+            data_revision: 1,
+            stats_cache: crate::stats::StatsCache::default(),
         };
 
         if !all_warnings.is_empty() {
@@ -204,8 +208,12 @@ impl App {
             &mut app.next_id,
             app.today,
         );
-        if added > 0 && app.auto_save {
-            app.save();
+        if added > 0 {
+            app.data_revision += 1;
+            app.stats_cache.invalidate();
+            if app.auto_save {
+                app.save();
+            }
         }
 
         app.clamp_selections();
@@ -271,6 +279,8 @@ impl App {
             symbols: crate::ui::Symbols::unicode(),
             keymap: crate::keymap::Keymap::default(),
             hit_areas: Vec::new(),
+            data_revision: 1,
+            stats_cache: crate::stats::StatsCache::default(),
         };
         app.clamp_selections();
         app
@@ -535,7 +545,7 @@ impl App {
     }
 
     pub fn on_day_changed(&mut self, _old_date: NaiveDate, _new_date: NaiveDate) {
-        // Hook for future phases (carry-over, etc.)
+        self.stats_cache.invalidate();
     }
 
     pub fn tick(&mut self, current_today: NaiveDate) -> bool {
@@ -562,8 +572,12 @@ impl App {
                 &mut self.next_id,
                 self.today,
             );
-            if added > 0 && self.auto_save {
-                self.save();
+            if added > 0 {
+                self.data_revision += 1;
+                self.stats_cache.invalidate();
+                if self.auto_save {
+                    self.save();
+                }
             }
             self.set_transient_message(format!("New day · {}", current_today.format("%A, %-d %B")));
             true
@@ -604,6 +618,8 @@ impl App {
     {
         self.snapshot();
         f(&mut self.todos);
+        self.data_revision += 1;
+        self.stats_cache.invalidate();
         if let Some(fid) = self.focus {
             if !self.todos.iter().any(|t| t.id == fid && !t.done) {
                 self.focus = None;
@@ -626,6 +642,8 @@ impl App {
             self.todos = prev.todos;
             self.recurring = prev.recurring;
             self.focus = prev.focus;
+            self.data_revision += 1;
+            self.stats_cache.invalidate();
             self.save();
             self.re_resolve_selections();
             self.set_transient_message("Undone");
@@ -647,6 +665,8 @@ impl App {
             self.todos = next.todos;
             self.recurring = next.recurring;
             self.focus = next.focus;
+            self.data_revision += 1;
+            self.stats_cache.invalidate();
             self.save();
             self.re_resolve_selections();
             self.set_transient_message("Redone");
@@ -1981,6 +2001,8 @@ impl App {
 
                         if recurring_id.is_some() {
                             self.todos.push(added_task);
+                            self.data_revision += 1;
+                            self.stats_cache.invalidate();
                             crate::store::materialize_recurring(
                                 &mut self.todos,
                                 &mut self.recurring,

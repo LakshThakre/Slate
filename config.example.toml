@@ -42,8 +42,6 @@ time_format = "24h"
 # Week start day
 # Options: "monday", "sunday", "saturday"
 # Default: "monday"
-# NOTE: This setting is parsed and validated now, but no current view consumes it yet
-# because the week summary view is planned for a later phase.
 week_start = "monday"
 
 [ui]

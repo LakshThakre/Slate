@@ -41,6 +41,14 @@ pub fn next_weekday(today: NaiveDate, target: Weekday) -> NaiveDate {
     today + Duration::days(days as i64)
 }
 
+/// Calculates the previous occurrence of `target` weekday strictly before `today` (1..=7 days back).
+pub fn prev_weekday(today: NaiveDate, target: Weekday) -> NaiveDate {
+    let cur = today.weekday().number_from_monday();
+    let tgt = target.number_from_monday();
+    let days = if cur > tgt { cur - tgt } else { cur + 7 - tgt };
+    today - Duration::days(days as i64)
+}
+
 /// Parses weekday from string name (case-insensitive, 3-char abbrev or full name).
 fn parse_weekday(s: &str) -> Option<Weekday> {
     match s.to_ascii_lowercase().as_str() {
@@ -84,33 +92,64 @@ fn parse_mm_dd(s: &str, today: NaiveDate) -> Option<NaiveDate> {
     None
 }
 
-/// Parses relative date offset like +3d or +2w (N from 1 to 365).
-fn parse_relative_offset(s: &str, today: NaiveDate) -> Option<NaiveDate> {
-    if !s.starts_with('+') {
+/// Parses relative date offset like +3d or +2w (or -3d, -2w when allow_past is true; N from 1 to 3650).
+fn parse_relative_offset_ext(s: &str, today: NaiveDate, allow_past: bool) -> Option<NaiveDate> {
+    let (is_negative, rest) = if let Some(stripped) = s.strip_prefix('+') {
+        (false, stripped)
+    } else if allow_past {
+        if let Some(stripped) = s.strip_prefix('-') {
+            (true, stripped)
+        } else {
+            return None;
+        }
+    } else {
         return None;
-    }
-    let rest = &s[1..];
+    };
+
     if rest.len() < 2 {
         return None;
     }
     let unit = rest.chars().last()?.to_ascii_lowercase();
     let num_str = &rest[..rest.len() - 1];
     let n: i64 = num_str.parse().ok()?;
-    if !(1..=365).contains(&n) {
+    let max_n = if allow_past { 3650 } else { 365 };
+    if !(1..=max_n).contains(&n) {
         return None;
     }
 
-    match unit {
-        'd' => Some(today + Duration::days(n)),
-        'w' => Some(today + Duration::days(n * 7)),
-        _ => None,
+    let days = match unit {
+        'd' => n,
+        'w' => n.checked_mul(7)?,
+        _ => return None,
+    };
+
+    if is_negative {
+        today.checked_sub_signed(Duration::days(days))
+    } else {
+        today.checked_add_signed(Duration::days(days))
     }
 }
 
-/// Checks if string matches date expression and parses it.
-/// Returns Some(Ok(date)) if valid, Some(Err(ParseError)) if recognized date token is invalid (e.g. past),
-/// or None if not recognized as a date expression.
+/// Parses relative date offset like +3d or +2w (N from 1 to 365).
+fn parse_relative_offset(s: &str, today: NaiveDate) -> Option<NaiveDate> {
+    parse_relative_offset_ext(s, today, false)
+}
+
+/// Checks if string matches date expression and parses it (reschedule mode, no past dates).
 pub fn parse_date_expression(expr: &str, today: NaiveDate) -> Result<NaiveDate, String> {
+    parse_date_expression_ext(expr, today, false)
+}
+
+/// Extended date expression parser.
+/// When `allow_past` is true:
+/// - Allows `yesterday`, `-Nd`, `-Nw` (N up to 3650), and past `YYYY-MM-DD`.
+/// - `MM-DD` uses the current year (`today.year()`).
+/// - Bare weekday names mean the most recent past occurrence (strictly before `today`).
+pub fn parse_date_expression_ext(
+    expr: &str,
+    today: NaiveDate,
+    allow_past: bool,
+) -> Result<NaiveDate, String> {
     let s = expr.trim();
     let s = s.strip_prefix('@').unwrap_or(s);
     let s_lower = s.to_ascii_lowercase();
@@ -118,27 +157,53 @@ pub fn parse_date_expression(expr: &str, today: NaiveDate) -> Result<NaiveDate, 
     if s_lower == "today" {
         return Ok(today);
     }
+    if s_lower == "yesterday" {
+        if allow_past {
+            return today
+                .pred_opt()
+                .ok_or_else(|| "date underflow for yesterday".to_string());
+        } else {
+            return Err("date 'yesterday' cannot be in the past".to_string());
+        }
+    }
     if s_lower == "tomorrow" {
         return today
             .succ_opt()
             .ok_or_else(|| "date overflow for tomorrow".to_string());
     }
     if let Some(w) = parse_weekday(&s_lower) {
-        return Ok(next_weekday(today, w));
+        if allow_past {
+            return Ok(prev_weekday(today, w));
+        } else {
+            return Ok(next_weekday(today, w));
+        }
     }
     if let Ok(d) = NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        if !allow_past && d < today {
+            return Err(format!("date '{d}' cannot be in the past"));
+        }
+        return Ok(d);
+    }
+    if allow_past {
+        let parts: Vec<&str> = s.split('-').collect();
+        if parts.len() == 2 {
+            if let (Ok(month), Ok(day)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) {
+                if (1..=12).contains(&month) && (1..=31).contains(&day) {
+                    if let Some(d) = NaiveDate::from_ymd_opt(today.year(), month, day) {
+                        return Ok(d);
+                    } else {
+                        return Err(format!("invalid date '{s}' for year {}", today.year()));
+                    }
+                }
+            }
+        }
+    } else if let Some(d) = parse_mm_dd(s, today) {
         if d < today {
             return Err(format!("date '{d}' cannot be in the past"));
         }
         return Ok(d);
     }
-    if let Some(d) = parse_mm_dd(s, today) {
-        if d < today {
-            return Err(format!("date '{d}' cannot be in the past"));
-        }
-        return Ok(d);
-    }
-    if let Some(d) = parse_relative_offset(s, today) {
+    if let Some(d) = parse_relative_offset_ext(s, today, allow_past) {
         return Ok(d);
     }
 
@@ -562,5 +627,82 @@ mod tests {
         assert_eq!(f_prio2.tags, vec!["urgent"]);
         assert_eq!(f_prio2.min_priority, 2);
         assert_eq!(f_prio2.format_header(), "filter: #urgent !!");
+    }
+
+    #[test]
+    fn test_parse_date_expression_ext_jump_forms() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 30).unwrap(); // Friday
+
+        // today, yesterday, tomorrow
+        assert_eq!(
+            parse_date_expression_ext("today", today, true).unwrap(),
+            today
+        );
+        assert_eq!(
+            parse_date_expression_ext("yesterday", today, true).unwrap(),
+            today - Duration::days(1)
+        );
+        assert_eq!(
+            parse_date_expression_ext("tomorrow", today, true).unwrap(),
+            today + Duration::days(1)
+        );
+
+        // ISO format (past and future)
+        let past_iso = NaiveDate::from_ymd_opt(2025, 4, 12).unwrap();
+        assert_eq!(
+            parse_date_expression_ext("2025-04-12", today, true).unwrap(),
+            past_iso
+        );
+        // But with allow_past=false, past ISO fails:
+        assert!(parse_date_expression_ext("2025-04-12", today, false).is_err());
+
+        // MM-DD with allow_past=true uses current year (2026)
+        let mm_dd = parse_date_expression_ext("05-15", today, true).unwrap();
+        assert_eq!(mm_dd, NaiveDate::from_ymd_opt(2026, 5, 15).unwrap());
+
+        // Relative offsets +Nd, -Nd, +Nw, -Nw
+        assert_eq!(
+            parse_date_expression_ext("+3d", today, true).unwrap(),
+            today + Duration::days(3)
+        );
+        assert_eq!(
+            parse_date_expression_ext("-5d", today, true).unwrap(),
+            today - Duration::days(5)
+        );
+        assert_eq!(
+            parse_date_expression_ext("+2w", today, true).unwrap(),
+            today + Duration::days(14)
+        );
+        assert_eq!(
+            parse_date_expression_ext("-3w", today, true).unwrap(),
+            today - Duration::days(21)
+        );
+        assert_eq!(
+            parse_date_expression_ext("-3650d", today, true).unwrap(),
+            today - Duration::days(3650)
+        );
+
+        // Bare weekday names in jump (allow_past = true) mean MOST RECENT PAST occurrence (strictly before today)
+        // Today is Friday (2026-10-30)
+        // "fri" -> last Friday (2026-10-23, 7 days ago)
+        assert_eq!(
+            parse_date_expression_ext("fri", today, true).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 23).unwrap()
+        );
+        // "thu" -> yesterday (2026-10-29, 1 day ago)
+        assert_eq!(
+            parse_date_expression_ext("thursday", today, true).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 29).unwrap()
+        );
+        // "sat" -> last Saturday (2026-10-24, 6 days ago)
+        assert_eq!(
+            parse_date_expression_ext("sat", today, true).unwrap(),
+            NaiveDate::from_ymd_opt(2026, 10, 24).unwrap()
+        );
+
+        // Invalid expressions
+        assert!(parse_date_expression_ext("not-a-date", today, true).is_err());
+        assert!(parse_date_expression_ext("-0d", today, true).is_err());
+        assert!(parse_date_expression_ext("-4000d", today, true).is_err());
     }
 }
