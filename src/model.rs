@@ -161,3 +161,19 @@ pub enum InputMode {
     Searching,
     JumpToDate,
 }
+
+impl InputMode {
+    pub fn is_mutating(&self) -> bool {
+        matches!(
+            self,
+            InputMode::Adding
+                | InputMode::AddingSubtask(_)
+                | InputMode::Editing(_)
+                | InputMode::Rescheduling(_)
+                | InputMode::ReschedulingBulk
+                | InputMode::EditingNote(_)
+                | InputMode::SettingRecurrence(_)
+                | InputMode::ConfirmDeleteRecurring(_)
+        )
+    }
+}

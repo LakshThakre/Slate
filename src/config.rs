@@ -273,6 +273,31 @@ pub struct Config {
 
     #[serde(default)]
     pub stats: StatsConfig,
+
+    #[serde(default)]
+    pub storage: StorageConfig,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+pub struct StorageConfig {
+    #[serde(default = "default_true")]
+    pub live_reload: bool,
+
+    #[serde(default = "default_reload_interval_ms")]
+    pub reload_interval_ms: u64,
+}
+
+fn default_reload_interval_ms() -> u64 {
+    500
+}
+
+impl Default for StorageConfig {
+    fn default() -> Self {
+        Self {
+            live_reload: true,
+            reload_interval_ms: 500,
+        }
+    }
 }
 
 impl Default for Config {
@@ -290,6 +315,7 @@ impl Default for Config {
             tasks: TasksConfig::default(),
             summary: SummaryConfig::default(),
             stats: StatsConfig::default(),
+            storage: StorageConfig::default(),
         }
     }
 }

@@ -79,6 +79,8 @@ pub struct App {
     pub fingerprint: Option<crate::storage::FileFingerprint>,
     pub is_first_save: bool,
     pub last_backup_time: Option<std::time::SystemTime>,
+    pub detector: crate::watch::ChangeDetector,
+    pub pending_external_change: bool,
     pub terminal_width: u16,
     pub terminal_height: u16,
     pub config: crate::config::Config,
@@ -212,6 +214,8 @@ impl App {
             fingerprint: load_res.fingerprint,
             is_first_save: true,
             last_backup_time: None,
+            detector: crate::watch::ChangeDetector::new(load_res.fingerprint),
+            pending_external_change: false,
             terminal_width: 80,
             terminal_height: 24,
             summary_range: config.summary.default_range,
@@ -305,6 +309,8 @@ impl App {
             fingerprint: None,
             is_first_save: true,
             last_backup_time: None,
+            detector: crate::watch::ChangeDetector::new(None),
+            pending_external_change: false,
             terminal_width: 80,
             terminal_height: 24,
             config: crate::config::Config::default(),
@@ -352,6 +358,7 @@ impl App {
                 self.is_legacy_format = false;
                 self.is_first_save = false;
                 self.fingerprint = save_res.new_fingerprint;
+                self.detector.record_known(save_res.new_fingerprint);
                 self.last_backup_time = Some(std::time::SystemTime::now());
 
                 if let Some(warn) = save_res.backup_warning {
@@ -630,6 +637,184 @@ impl App {
             true
         } else {
             false
+        }
+    }
+
+    pub fn apply_external_data(
+        &mut self,
+        load_res: crate::storage::LoadResult,
+        show_message: bool,
+    ) -> bool {
+        let is_equal = self.todos == load_res.todos
+            && self.recurring == load_res.recurring
+            && self.focus == load_res.focus;
+
+        if is_equal {
+            self.fingerprint = load_res.fingerprint;
+            self.detector.record_known(load_res.fingerprint);
+            return false;
+        }
+
+        let had_undo_history = !self.undo_stack.is_empty() || !self.redo_stack.is_empty();
+        self.undo_stack.clear();
+        self.redo_stack.clear();
+
+        let prev_history_date = self.dates_list().get(self.history_date_index).copied();
+        let prev_upcoming_date = self
+            .upcoming_dates_list()
+            .get(self.upcoming_date_index)
+            .copied();
+
+        self.todos = load_res.todos;
+        self.next_id = load_res.next_id;
+        self.recurring = load_res.recurring;
+        self.focus = load_res.focus;
+        self.original_version = load_res.original_version;
+        self.is_legacy_format = load_res.was_legacy;
+        self.fingerprint = load_res.fingerprint;
+        self.detector.record_known(load_res.fingerprint);
+
+        self.marks
+            .retain(|id| self.todos.iter().any(|t| t.id == *id));
+
+        if let Some(fid) = self.focus {
+            if !self.todos.iter().any(|t| t.id == fid && !t.done) {
+                self.focus = None;
+            }
+        }
+
+        // Re-resolve History date by date, falling back to nearest remaining date
+        if let Some(target_date) = prev_history_date {
+            let new_dates = self.dates_list();
+            if let Some(pos) = new_dates.iter().position(|&d| d == target_date) {
+                self.history_date_index = pos;
+                self.selected_history_date = Some(target_date);
+            } else if !new_dates.is_empty() {
+                let (nearest_pos, nearest_date) = new_dates
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, &d)| (d - target_date).num_days().abs())
+                    .map(|(i, &d)| (i, d))
+                    .unwrap();
+                self.history_date_index = nearest_pos;
+                self.selected_history_date = Some(nearest_date);
+            }
+        }
+
+        // Re-resolve Upcoming date by date, falling back to nearest remaining date
+        if let Some(target_date) = prev_upcoming_date {
+            let new_up_dates = self.upcoming_dates_list();
+            if let Some(pos) = new_up_dates.iter().position(|&d| d == target_date) {
+                self.upcoming_date_index = pos;
+                self.selected_upcoming_date = Some(target_date);
+            } else if !new_up_dates.is_empty() {
+                let (nearest_pos, nearest_date) = new_up_dates
+                    .iter()
+                    .enumerate()
+                    .min_by_key(|(_, &d)| (d - target_date).num_days().abs())
+                    .map(|(i, &d)| (i, d))
+                    .unwrap();
+                self.upcoming_date_index = nearest_pos;
+                self.selected_upcoming_date = Some(nearest_date);
+            }
+        }
+
+        self.re_resolve_selections();
+
+        self.data_revision += 1;
+        self.stats_cache.invalidate();
+
+        if self.input_mode == InputMode::Searching {
+            let prev_hit_id = self
+                .search_results
+                .hits
+                .get(self.search_selected_index)
+                .map(|h| h.task_id);
+            self.search_results = crate::search::search_tasks(
+                &self.todos,
+                &self.input_buffer,
+                self.today,
+                self.config.ui.show_history,
+                self.symbols.is_ascii,
+            );
+            if let Some(prev_id) = prev_hit_id {
+                if let Some(pos) = self
+                    .search_results
+                    .hits
+                    .iter()
+                    .position(|h| h.task_id == prev_id)
+                {
+                    self.search_selected_index = pos;
+                } else if self.search_selected_index >= self.search_results.hits.len() {
+                    self.search_selected_index = self.search_results.hits.len().saturating_sub(1);
+                }
+            } else if self.search_selected_index >= self.search_results.hits.len() {
+                self.search_selected_index = self.search_results.hits.len().saturating_sub(1);
+            }
+        }
+
+        let added = crate::store::materialize_recurring(
+            &mut self.todos,
+            &mut self.recurring,
+            &mut self.next_id,
+            self.today,
+        );
+        if added > 0 {
+            self.data_revision += 1;
+            self.stats_cache.invalidate();
+            if self.auto_save {
+                self.save();
+            }
+        }
+
+        if show_message {
+            if had_undo_history {
+                self.set_transient_message(
+                    "Reloaded · data changed on disk · undo history cleared",
+                );
+            } else {
+                self.set_transient_message("Reloaded · data changed on disk");
+            }
+        }
+
+        true
+    }
+
+    pub fn check_for_external_changes(&mut self, now: std::time::Instant) -> bool {
+        let stat_res = crate::watch::stat_fingerprint(&self.data_path);
+        let fp_opt = match stat_res {
+            Ok(fp) => fp,
+            Err(_) => return false,
+        };
+
+        match self.detector.observe(fp_opt, now) {
+            crate::watch::Observation::Unchanged | crate::watch::Observation::Settling => false,
+            crate::watch::Observation::Missing => {
+                self.set_transient_message(
+                    "Data file missing · it will be recreated on next change",
+                );
+                true
+            }
+            crate::watch::Observation::ReadNow => {
+                if self.input_mode.is_mutating() {
+                    self.pending_external_change = true;
+                    return false;
+                }
+                match crate::storage::load_todos(&self.data_path) {
+                    Ok(load_res) => self.apply_external_data(load_res, true),
+                    Err(_e) => {
+                        if let Some(fp) = fp_opt {
+                            if self.detector.record_failed(fp) {
+                                self.set_transient_message(
+                                    "Data file changed but can't be read · keeping current view",
+                                );
+                                return true;
+                            }
+                        }
+                        false
+                    }
+                }
+            }
         }
     }
 
@@ -7614,5 +7799,351 @@ mod tests {
             current_bytes, initial_bytes,
             "Disk bytes must remain unchanged"
         );
+    }
+
+    #[test]
+    fn test_apply_external_cli_style_add_appears() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let mut app = App::new_for_test_with_date(vec![], today);
+        let external_todos = vec![Todo {
+            id: 1,
+            text: "External task".to_string(),
+            created_date: today,
+            done: false,
+            done_at: None,
+            ..Default::default()
+        }];
+        let load_res = crate::storage::LoadResult {
+            todos: external_todos.clone(),
+            next_id: 2,
+            recurring: vec![],
+            focus: None,
+            original_version: 2,
+            was_legacy: false,
+            fingerprint: Some(crate::storage::FileFingerprint::new_test(
+                std::time::SystemTime::UNIX_EPOCH,
+                100,
+                1,
+            )),
+        };
+        let changed = app.apply_external_data(load_res, true);
+        assert!(changed);
+        assert_eq!(app.todos, external_todos);
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Reloaded · data changed on disk")
+        );
+    }
+
+    #[test]
+    fn test_apply_selection_kept_by_id() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let t1 = Todo {
+            id: 1,
+            text: "Task 1".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let t2 = Todo {
+            id: 2,
+            text: "Task 2".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let mut app = App::new_for_test_with_date(vec![t1.clone(), t2.clone()], today);
+        app.today_selected_index = 1;
+        app.today_selected_id = Some(2);
+
+        // External add prepends t0
+        let t0 = Todo {
+            id: 3,
+            text: "Task 0".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let load_res = crate::storage::LoadResult {
+            todos: vec![t0, t1, t2],
+            next_id: 4,
+            recurring: vec![],
+            focus: None,
+            original_version: 2,
+            was_legacy: false,
+            fingerprint: Some(crate::storage::FileFingerprint::new_test(
+                std::time::SystemTime::UNIX_EPOCH,
+                200,
+                1,
+            )),
+        };
+        app.apply_external_data(load_res, true);
+        // t2 was at index 1, now at index 2, but selection tracked by id keeps t2
+        assert_eq!(app.today_selected_id, Some(2));
+        assert_eq!(app.today_selected_index, 2);
+    }
+
+    #[test]
+    fn test_apply_selected_task_deleted_externally_lands_on_neighbor() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let t1 = Todo {
+            id: 1,
+            text: "Task 1".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let t2 = Todo {
+            id: 2,
+            text: "Task 2".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let mut app = App::new_for_test_with_date(vec![t1.clone(), t2], today);
+        app.today_selected_index = 1;
+        app.today_selected_id = Some(2);
+
+        // External deletion of t2
+        let load_res = crate::storage::LoadResult {
+            todos: vec![t1],
+            next_id: 3,
+            recurring: vec![],
+            focus: None,
+            original_version: 2,
+            was_legacy: false,
+            fingerprint: Some(crate::storage::FileFingerprint::new_test(
+                std::time::SystemTime::UNIX_EPOCH,
+                100,
+                1,
+            )),
+        };
+        app.apply_external_data(load_res, true);
+        assert_eq!(app.today_selected_id, Some(1));
+        assert_eq!(app.today_selected_index, 0);
+    }
+
+    #[test]
+    fn test_apply_history_date_vanishing_falls_back_to_nearest() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let d20 = NaiveDate::from_ymd_opt(2026, 10, 20).unwrap();
+        let d24 = NaiveDate::from_ymd_opt(2026, 10, 24).unwrap();
+        let d25 = NaiveDate::from_ymd_opt(2026, 10, 25).unwrap();
+
+        let t20 = Todo {
+            id: 1,
+            text: "T20".to_string(),
+            created_date: d20,
+            ..Default::default()
+        };
+        let t24 = Todo {
+            id: 2,
+            text: "T24".to_string(),
+            created_date: d24,
+            ..Default::default()
+        };
+        let t25 = Todo {
+            id: 3,
+            text: "T25".to_string(),
+            created_date: d25,
+            ..Default::default()
+        };
+
+        let mut app = App::new_for_test_with_date(vec![t20.clone(), t24.clone(), t25], today);
+        let dates = app.dates_list();
+        app.history_date_index = dates.iter().position(|&d| d == d25).unwrap();
+        app.selected_history_date = Some(d25);
+        app.history_todo_id = Some(3);
+
+        // External change deletes t25 (so d25 is gone). Nearest remaining is d24!
+        let load_res = crate::storage::LoadResult {
+            todos: vec![t20, t24],
+            next_id: 4,
+            recurring: vec![],
+            focus: None,
+            original_version: 2,
+            was_legacy: false,
+            fingerprint: Some(crate::storage::FileFingerprint::new_test(
+                std::time::SystemTime::UNIX_EPOCH,
+                150,
+                1,
+            )),
+        };
+        app.apply_external_data(load_res, true);
+        assert_eq!(app.selected_history_date, Some(d24));
+    }
+
+    #[test]
+    fn test_apply_marks_pruned_and_focus_cleared_when_missing() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let t1 = Todo {
+            id: 1,
+            text: "T1".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let t2 = Todo {
+            id: 2,
+            text: "T2".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let mut app = App::new_for_test_with_date(vec![t1.clone(), t2], today);
+        app.marks.insert(1);
+        app.marks.insert(2);
+        app.focus = Some(2);
+
+        // External change removes t2
+        let load_res = crate::storage::LoadResult {
+            todos: vec![t1],
+            next_id: 3,
+            recurring: vec![],
+            focus: None,
+            original_version: 2,
+            was_legacy: false,
+            fingerprint: Some(crate::storage::FileFingerprint::new_test(
+                std::time::SystemTime::UNIX_EPOCH,
+                100,
+                1,
+            )),
+        };
+        app.apply_external_data(load_res, true);
+        assert!(app.marks.contains(&1));
+        assert!(!app.marks.contains(&2));
+        assert_eq!(app.focus, None);
+    }
+
+    #[test]
+    fn test_apply_undo_redo_cleared_with_message_variants() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let t1 = Todo {
+            id: 1,
+            text: "T1".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let mut app = App::new_for_test_with_date(vec![t1], today);
+
+        // 1. With undo stack non-empty
+        app.undo_stack.push(Snapshot {
+            todos: vec![],
+            recurring: vec![],
+            focus: None,
+        });
+        let load_res1 = crate::storage::LoadResult {
+            todos: vec![Todo {
+                id: 1,
+                text: "T1 modified".to_string(),
+                created_date: today,
+                ..Default::default()
+            }],
+            next_id: 2,
+            recurring: vec![],
+            focus: None,
+            original_version: 2,
+            was_legacy: false,
+            fingerprint: Some(crate::storage::FileFingerprint::new_test(
+                std::time::SystemTime::UNIX_EPOCH,
+                110,
+                1,
+            )),
+        };
+        app.apply_external_data(load_res1, true);
+        assert!(app.undo_stack.is_empty());
+        assert!(app.redo_stack.is_empty());
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Reloaded · data changed on disk · undo history cleared")
+        );
+
+        // 2. With empty stacks
+        let load_res2 = crate::storage::LoadResult {
+            todos: vec![Todo {
+                id: 1,
+                text: "T1 modified again".to_string(),
+                created_date: today,
+                ..Default::default()
+            }],
+            next_id: 2,
+            recurring: vec![],
+            focus: None,
+            original_version: 2,
+            was_legacy: false,
+            fingerprint: Some(crate::storage::FileFingerprint::new_test(
+                std::time::SystemTime::UNIX_EPOCH,
+                120,
+                1,
+            )),
+        };
+        app.apply_external_data(load_res2, true);
+        assert_eq!(
+            app.transient_message.as_deref(),
+            Some("Reloaded · data changed on disk")
+        );
+    }
+
+    #[test]
+    fn test_apply_equal_data_no_redraw_no_message() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let t1 = Todo {
+            id: 1,
+            text: "T1".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let mut app = App::new_for_test_with_date(vec![t1.clone()], today);
+        let fp = Some(crate::storage::FileFingerprint::new_test(
+            std::time::SystemTime::UNIX_EPOCH,
+            100,
+            1,
+        ));
+        app.fingerprint = fp;
+        let load_res = crate::storage::LoadResult {
+            todos: vec![t1],
+            next_id: 2,
+            recurring: vec![],
+            focus: None,
+            original_version: 2,
+            was_legacy: false,
+            fingerprint: fp,
+        };
+        let changed = app.apply_external_data(load_res, true);
+        assert!(!changed);
+        assert_eq!(app.transient_message, None);
+    }
+
+    #[test]
+    fn test_apply_search_results_refreshed_with_query_kept() {
+        let today = NaiveDate::from_ymd_opt(2026, 10, 31).unwrap();
+        let t1 = Todo {
+            id: 1,
+            text: "Buy groceries".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let mut app = App::new_for_test_with_date(vec![t1.clone()], today);
+        app.input_mode = InputMode::Searching;
+        app.input_buffer = "groceries".to_string();
+        app.update_search();
+        assert_eq!(app.search_results.hits.len(), 1);
+
+        // External add matching "groceries"
+        let t2 = Todo {
+            id: 2,
+            text: "More groceries".to_string(),
+            created_date: today,
+            ..Default::default()
+        };
+        let load_res = crate::storage::LoadResult {
+            todos: vec![t1, t2],
+            next_id: 3,
+            recurring: vec![],
+            focus: None,
+            original_version: 2,
+            was_legacy: false,
+            fingerprint: Some(crate::storage::FileFingerprint::new_test(
+                std::time::SystemTime::UNIX_EPOCH,
+                200,
+                1,
+            )),
+        };
+        app.apply_external_data(load_res, true);
+        assert_eq!(app.input_buffer, "groceries");
+        assert_eq!(app.search_results.hits.len(), 2);
     }
 }
